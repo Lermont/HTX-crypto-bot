@@ -1,2 +1,0 @@
-# HTX-crypto-bot
-

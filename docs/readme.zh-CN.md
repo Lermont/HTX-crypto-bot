@@ -1,6 +1,6 @@
 # HTX Futures EMA Pullback Bot
 
-[English](../README.md) | [Русский](README.ru.md) | [策略详情](../strategy.md)
+[English](../readme.md) | [Русский](readme.ru.md) | [策略详情](../strategy.md)
 
 HTX Futures EMA Pullback Bot 是一个用于 HTX USDT-M 合约的 Python crypto trading bot。它可以运行 long 和 short 两个交易配置，扫描可配置的山寨币列表，基于已收盘 K 线生成 EMA pullback strategy 信号，并在一个进程中管理限价入场、补仓、reduce-only 出场和 breakeven 行为。
 
