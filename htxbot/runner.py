@@ -1,0 +1,226 @@
+# -*- coding: utf-8 -*-
+
+import time
+
+import config
+
+
+class RunnerMixin:
+    def _log_step_exception(self, symbol: str, exc: Exception):
+        is_transient = bool(getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc))
+        self._log_event(
+            "WARNING" if is_transient else "ERROR",
+            f"Step failed for {symbol}: {exc}",
+            event="state_exchange_mismatch",
+            symbol=symbol,
+            reason="step_network_error" if is_transient else "step_error",
+        )
+
+    def setup(self):
+        self._log_event("INFO", "Initializing HTX futures bot", event="futures_setup", reason="startup")
+        self._load_markets_with_retry()
+
+        self.benchmark_symbol = self._find_futures_symbol("btc")
+        if not self.benchmark_symbol:
+            self._log_event(
+                "ERROR",
+                "BTC USDT-M futures benchmark is missing",
+                event="futures_setup",
+                reason="benchmark_missing",
+            )
+            raise RuntimeError("BTC benchmark futures symbol is missing")
+
+        if config.MACRO.enable_gold_btc_rsi_overlay:
+            self.macro_gold_symbol = self._find_macro_gold_symbol()
+            self._macro_gold_lookup_done = True
+            self.macro_direct_gold_btc_symbol = self._find_direct_gold_btc_symbol()
+            self._macro_direct_gold_btc_lookup_done = True
+            if self.macro_gold_symbol:
+                self._log_event(
+                    "INFO",
+                    f"Macro gold symbol found: {self.macro_gold_symbol}",
+                    event="futures_setup",
+                    symbol=self.macro_gold_symbol,
+                    reason=f"macro_gold_symbol;spot={int(bool(getattr(self, 'macro_gold_is_spot', False)))}",
+                )
+            else:
+                self._log_event(
+                    "WARNING",
+                    "Macro gold symbol is unavailable; gold/BTC RSI overlay will run in neutral fallback",
+                    event="macro_context_unavailable",
+                    reason="gold_symbol_not_found",
+                )
+
+        seen = set()
+        for coin in config.COINS:
+            symbol = self._find_futures_symbol(coin)
+            if not symbol:
+                self._log_event(
+                    "WARNING",
+                    f"USDT-M futures pair is unavailable for {coin}",
+                    event="futures_setup",
+                    symbol=coin.upper(),
+                    reason="symbol_not_found",
+                )
+                continue
+            if symbol == self.benchmark_symbol:
+                self._log_event(
+                    "WARNING",
+                    f"Skipping benchmark symbol from entry universe: {symbol}",
+                    event="futures_setup",
+                    symbol=symbol,
+                    reason="benchmark_symbol_not_traded",
+                )
+                continue
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            market = self.exchange.market(symbol)
+            self.symbols.append(symbol)
+            self.market_by_symbol[symbol] = market
+            state = self._get_state(symbol)
+            state.market_symbol = symbol
+            self.entry_symbols.add(symbol)
+
+        for symbol, state in list(self.states.items()):
+            if symbol in seen or symbol not in self.exchange.markets:
+                continue
+            has_local_exposure = bool(state.position_size > 0 or state.entry_orders or state.sell_ladder_orders)
+            if not has_local_exposure:
+                continue
+            market = self.exchange.market(symbol)
+            if not (market.get("linear") and (market.get("swap") or market.get("future"))):
+                continue
+            seen.add(symbol)
+            self.symbols.append(symbol)
+            self.market_by_symbol[symbol] = market
+            state.market_symbol = symbol
+            state.frozen_no_more_buys = True
+            self._log_event(
+                "WARNING",
+                f"Tracking removed symbol in maintenance-only mode: {symbol}",
+                event="position_frozen",
+                symbol=symbol,
+                reason="maintenance_only_removed_from_coins",
+            )
+
+        self._log_event(
+            "INFO",
+            f"Found {len(self.entry_symbols)} entry symbols and {len(self.symbols)} total tracked HTX USDT-M futures symbols",
+            event="futures_setup",
+            reason=f"benchmark={self.benchmark_symbol}",
+        )
+        if getattr(self, "skip_futures_account_setup", False):
+            self._log_event(
+                "INFO",
+                "Futures account setup skipped; another profile already performed shared startup setup",
+                event="futures_setup",
+                reason="shared_account_setup_skipped",
+            )
+        else:
+            self._setup_futures_account()
+        if not config.RUNTIME.dry_run and not getattr(self, "skip_live_balance_log", False):
+            account = self._account_snapshot()
+            self._log_event(
+                "INFO",
+                f"LIVE mode: futures cross balance free={account['free']:.8f} total={account['total']:.8f} USDT",
+                event="futures_setup",
+                reason="live_cross_balance_checked",
+            )
+        self._save_state()
+
+    def step_symbol(self, symbol: str):
+        state = self._get_state(symbol)
+        snapshot = self._fetch_position_snapshot(symbol)
+        if not snapshot.get("ok", False):
+            return
+
+        open_orders = self._fetch_open_orders(symbol)
+        if open_orders is None:
+            self._log_event(
+                "WARNING",
+                f"Skipping {symbol}: open orders are unavailable",
+                event="state_exchange_mismatch",
+                symbol=symbol,
+                reason="open_orders_unavailable_skip",
+            )
+            return
+        sync_status = self._sync_state_with_position(symbol, snapshot, open_orders=open_orders)
+        if sync_status in {"disabled", "closed", "reserved"}:
+            return
+        if sync_status == "position_changed":
+            return
+        if self._maybe_close_dust_position(symbol, open_orders):
+            return
+
+        state = self._get_state(symbol)
+        external_reserved_symbols = getattr(self, "external_reserved_symbols", set())
+        if symbol in external_reserved_symbols and state.position_size <= 0:
+            if state.entry_orders:
+                self._cancel_entry_orders(symbol, reason="reserved_by_other_profile")
+            if state.sell_ladder_orders:
+                self._cancel_sell_orders(symbol, reason="reserved_by_other_profile")
+            self._log_event(
+                "DEBUG",
+                f"Skipping {symbol}: another profile has active exposure",
+                event="state_exchange_mismatch",
+                symbol=symbol,
+                reason="reserved_by_other_profile",
+            )
+            return
+
+        signal = self.signal_cache.get("symbols", {}).get(symbol)
+        signal_valid = bool(signal and signal.get("valid") and self.signal_cache.get("benchmark_ok"))
+
+        if not self._validate_sell_orders(symbol, open_orders):
+            return
+        if not self._validate_entry_orders(symbol, open_orders):
+            return
+        self._manage_entry_orders(symbol, signal, open_orders)
+
+        state = self._get_state(symbol)
+        if state.position_size > 0:
+            if not signal_valid:
+                self._freeze_no_more_buys(symbol, reason="signal_invalid_or_missing")
+            time_exit_applied = self._maybe_apply_time_based_exit(symbol, signal)
+            if not time_exit_applied:
+                self._maybe_manage_exit_runner(symbol, signal)
+            self._ensure_sell_ladder(symbol)
+            state = self._get_state(symbol)
+            if state.frozen_no_more_buys:
+                self._maybe_place_frozen_recovery_buy(symbol, signal)
+            else:
+                self._maybe_place_average_buy(symbol, signal)
+            return
+
+        if state.position_size <= 0:
+            exit_side = config.EXIT_SIDE
+            if state.sell_ladder_orders:
+                self._log_event(
+                    "WARNING",
+                    f"Tracked {exit_side} exit orders remain on flat {symbol}; canceling tracked bot orders",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=exit_side,
+                    reason="flat_symbol_exit_order",
+                )
+                self._cancel_sell_orders(symbol, reason="flat_symbol_exit_order")
+            if not state.entry_orders:
+                self._maybe_place_initial_buy(symbol, signal)
+
+    def run(self):
+        self._acquire_runtime_lock()
+        self.setup()
+        self._log_event("INFO", "HTX futures bot loop started", event="futures_setup", reason="bot_started")
+
+        while True:
+            self._reset_private_caches()
+            self._update_signal_cache_if_needed()
+            self._prepare_new_entry_gate()
+            for symbol in self.symbols:
+                try:
+                    self.step_symbol(symbol)
+                except Exception as exc:
+                    self._log_step_exception(symbol, exc)
+            self._save_state()
+            time.sleep(config.RUNTIME.poll_interval_sec)
