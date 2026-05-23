@@ -7,18 +7,16 @@ import os
 import tempfile
 import time
 import unittest
-import warnings
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import config
 import ccxt
 from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
-from htxbot.external_price import BookTicker, ExternalPriceFeed, MexcBookTickerClient
+from htxbot.external_price import BookTicker, ExternalPriceFeed
 from htxbot.indicators import calculate_rsi
-
-replace = config.replace_settings
 
 
 SYMBOL = "TEST/USDT:USDT"
@@ -71,11 +69,6 @@ class StaticExternalPriceFeed:
         return context
 
 
-class InvalidExternalPriceFeed:
-    def get_context(self, symbol, htx_ticker, market=None):
-        return None
-
-
 class FakeMexcClient:
     def __init__(self, books):
         self.books = list(books)
@@ -86,33 +79,6 @@ class FakeMexcClient:
         if not self.books:
             raise RuntimeError("no fake books left")
         return self.books.pop(0)
-
-
-class FakeRequestsResponse:
-    def __init__(self, payload=None, error=None):
-        self.payload = payload or {}
-        self.error = error
-        self.raise_for_status_calls = 0
-
-    def raise_for_status(self):
-        self.raise_for_status_calls += 1
-        if self.error is not None:
-            raise self.error
-
-    def json(self):
-        return dict(self.payload)
-
-
-class FakeRequestsSession:
-    def __init__(self, responses):
-        self.responses = list(responses)
-        self.calls = []
-
-    def get(self, url, params=None, timeout=None):
-        self.calls.append({"url": url, "params": params, "timeout": timeout})
-        if not self.responses:
-            raise RuntimeError("no fake responses left")
-        return self.responses.pop(0)
 
 
 class FakeExchange:
@@ -273,25 +239,6 @@ def override_config(**values):
                 setattr(config, name, old_value)
 
 
-@contextmanager
-def patched_env(**values):
-    sentinel = object()
-    previous = {name: os.environ.get(name, sentinel) for name in values}
-    for name, value in values.items():
-        if value is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = value
-    try:
-        yield
-    finally:
-        for name, old_value in previous.items():
-            if old_value is sentinel:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = old_value
-
-
 class UnifiedBotTests(unittest.TestCase):
     def make_bot(self, tmp_path: Path) -> HtxFuturesBot:
         instance = object.__new__(HtxFuturesBot)
@@ -442,106 +389,6 @@ class UnifiedBotTests(unittest.TestCase):
         context.update(overrides)
         return context
 
-    def test_mexc_client_uses_requests_session_params_and_timeout(self):
-        response = FakeRequestsResponse(
-            {
-                "bidPrice": "99.9",
-                "askPrice": "100.1",
-                "bidQty": "7",
-                "askQty": "8",
-            }
-        )
-        session = FakeRequestsSession([response])
-        client = MexcBookTickerClient(timeout_sec=2.5, session=session)
-
-        book = client.fetch("TESTUSDT")
-
-        self.assertEqual(book.bid, 99.9)
-        self.assertEqual(book.ask, 100.1)
-        self.assertEqual(book.bid_qty, 7.0)
-        self.assertEqual(book.ask_qty, 8.0)
-        self.assertEqual(response.raise_for_status_calls, 1)
-        self.assertEqual(
-            session.calls,
-            [
-                {
-                    "url": "https://api.mexc.com/api/v3/ticker/bookTicker",
-                    "params": {"symbol": "TESTUSDT"},
-                    "timeout": 2.5,
-                }
-            ],
-        )
-
-    def test_external_price_requests_error_uses_cached_fallback(self):
-        now = [2000.0]
-        settings = replace(
-            config.EXTERNAL_PRICE_FEED,
-            rest_poll_interval_sec=0.0,
-            stale_after_ms=10000,
-            max_price_age_ms=10000,
-            max_internal_spread_bps=50.0,
-            min_valid_bid_qty_usdt=1.0,
-            min_valid_ask_qty_usdt=1.0,
-        )
-        session = FakeRequestsSession(
-            [
-                FakeRequestsResponse(
-                    {
-                        "bidPrice": "99.9",
-                        "askPrice": "100.1",
-                        "bidQty": "10",
-                        "askQty": "10",
-                    }
-                ),
-                FakeRequestsResponse(error=RuntimeError("http failed")),
-            ]
-        )
-        client = MexcBookTickerClient(timeout_sec=3.0, session=session)
-        feed = ExternalPriceFeed(settings, mexc_client=client, clock=lambda: now[0])
-
-        first = feed.get_context(SYMBOL, {"bid": 99.9, "ask": 100.1}, market=MARKET)
-        now[0] = 2001.0
-        second = feed.get_context(SYMBOL, {"bid": 99.9, "ask": 100.1}, market=MARKET)
-
-        self.assertTrue(first["valid"])
-        self.assertTrue(second["valid"])
-        self.assertEqual(second["reason"], "mexc_fetch_failed_cached")
-
-    def test_external_price_requests_error_without_cache_returns_failed_context(self):
-        settings = replace(
-            config.EXTERNAL_PRICE_FEED,
-            rest_poll_interval_sec=0.0,
-            max_internal_spread_bps=50.0,
-            min_valid_bid_qty_usdt=1.0,
-            min_valid_ask_qty_usdt=1.0,
-        )
-        session = FakeRequestsSession([FakeRequestsResponse(error=RuntimeError("timeout"))])
-        client = MexcBookTickerClient(timeout_sec=3.0, session=session)
-        feed = ExternalPriceFeed(settings, mexc_client=client, clock=lambda: 2000.0)
-
-        context = feed.get_context(SYMBOL, {"bid": 99.9, "ask": 100.1}, market=MARKET)
-
-        self.assertFalse(context["valid"])
-        self.assertTrue(context["stale"])
-        self.assertEqual(context["reason"], "mexc_fetch_failed")
-
-    def test_external_price_invalid_mexc_book_reports_invalid_reason(self):
-        settings = replace(
-            config.EXTERNAL_PRICE_FEED,
-            rest_poll_interval_sec=0.0,
-            max_internal_spread_bps=50.0,
-            min_valid_bid_qty_usdt=1000.0,
-            min_valid_ask_qty_usdt=1000.0,
-        )
-        client = FakeMexcClient([BookTicker(99.9, 100.1, 1.0, 1.0, ts=2000.0)])
-        feed = ExternalPriceFeed(settings, mexc_client=client, clock=lambda: 2000.0)
-
-        context = feed.get_context(SYMBOL, {"bid": 99.9, "ask": 100.1}, market=MARKET)
-
-        self.assertFalse(context["valid"])
-        self.assertTrue(context["stale"])
-        self.assertEqual(context["reason"], "mexc_book_invalid")
-
     def test_external_price_feed_computes_spread_rollups_and_changes(self):
         now = [1000.0]
         settings = replace(
@@ -664,20 +511,9 @@ class UnifiedBotTests(unittest.TestCase):
                     rows = list(csv.DictReader(handle))
                 self.assertIn("external_reference_stale", rows[-1]["reason"])
 
-    def test_external_price_invalid_context_blocks_entry_when_stale_is_fatal(self):
-        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
-            settings = replace(config.EXTERNAL_PRICE_FEED, disable_trading_if_reference_stale=True)
-            with override_config(RUNTIME=runtime, EXTERNAL_PRICE_FEED=settings):
-                bot = self.make_bot(Path(raw_tmp))
-                bot.external_price_feed = InvalidExternalPriceFeed()
-
-                bot._maybe_place_initial_buy(SYMBOL, self.entry_signal())
-
-                self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
-                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
-                    rows = list(csv.DictReader(handle))
-                self.assertIn("external_price_context_invalid", rows[-1]["reason"])
+    def test_default_external_impulse_bonus_matches_entry_score_scale(self):
+        self.assertAlmostEqual(config.EXTERNAL_PRICE_FEED.impulse_score_bonus, 0.02)
+        self.assertLess(config.EXTERNAL_PRICE_FEED.impulse_score_bonus, config.STRATEGY.entry_min_score)
 
     def test_pending_entry_keeps_external_impulse_bonus_during_signal_revalidation(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -713,38 +549,6 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._manage_entry_orders(SYMBOL, signal, open_orders=[])
 
                 self.assertEqual([order["id"] for order in state.entry_orders], ["pending_entry"])
-
-    def test_external_price_context_is_cached_within_entry_decision(self):
-        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
-            strategy = replace(config.STRATEGY, entry_min_score=0.03)
-            settings = replace(
-                config.EXTERNAL_PRICE_FEED,
-                impulse_confirmation_enabled=True,
-                mexc_lead_threshold_bps_30s=5.0,
-                impulse_score_bonus=0.02,
-                block_if_exchange_divergence_1m_bps=0.0,
-                max_htx_premium_for_long_bps=50.0,
-            )
-            with override_config(RUNTIME=runtime, STRATEGY=strategy, EXTERNAL_PRICE_FEED=settings):
-                bot = self.make_bot(Path(raw_tmp))
-                bot.external_price_feed = StaticExternalPriceFeed(
-                    self.external_context(
-                        spread_bps=0.0,
-                        htx_change_30s_bps=0.0,
-                        mexc_change_30s_bps=10.0,
-                    )
-                )
-
-                bot._maybe_place_initial_buy(SYMBOL, self.entry_signal(score=0.015))
-
-                self.assertTrue(bot._get_state(SYMBOL).entry_orders)
-                self.assertEqual(len(bot.external_price_feed.calls), 1)
-
-                bot._reset_private_caches()
-                bot._external_entry_block_reason(SYMBOL)
-
-                self.assertEqual(len(bot.external_price_feed.calls), 2)
 
     def test_external_price_divergence_sets_entry_cooldown(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -1019,7 +823,10 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ema_entry_ladder_uses_two_one_percent_levels(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=True)):
+            with override_config(
+                BUYING=replace(config.BUYING, ladder_offsets=(0.0, 0.01)),
+                RUNTIME=replace(config.RUNTIME, dry_run=True),
+            ):
                 bot = self.make_bot(Path(raw_tmp))
                 bot._place_buy_ladder(
                     SYMBOL,
@@ -1034,7 +841,10 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual([order["price"] for order in orders], [10.0, 9.9])
 
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=True)):
+            with override_config(
+                BUYING=replace(config.BUYING, ladder_offsets=(0.0, 0.01)),
+                RUNTIME=replace(config.RUNTIME, dry_run=True),
+            ):
                 bot = self.make_bot(Path(raw_tmp))
                 bot._place_buy_ladder(
                     SYMBOL,
@@ -1139,53 +949,6 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(profile.risk.max_total_notional_fraction, 0.85)
         self.assertEqual(profile.risk.dust_position_notional, 12.0)
         self.assertEqual(profile.risk.tiny_entry_max_notional, 12.0)
-
-    def test_profile_specific_env_overrides_global_fallback(self):
-        with patched_env(DRY_RUN="true", LONG_DRY_RUN="false"):
-            profile = config._make_profile("long", "long", ("test",))
-
-        self.assertFalse(profile.runtime.dry_run)
-
-    def test_profile_dotenv_unprefixed_keys_are_profile_scoped(self):
-        with tempfile.TemporaryDirectory() as raw_tmp:
-            tmp_path = Path(raw_tmp)
-            (tmp_path / "long").mkdir()
-            (tmp_path / "short").mkdir()
-            (tmp_path / ".env").write_text("DRY_RUN=true\n", encoding="utf-8")
-            (tmp_path / "long" / ".env").write_text("DRY_RUN=false\n", encoding="utf-8")
-
-            with patched_env(DRY_RUN=None, LONG_DRY_RUN=None, HTXBOT_LONG_DRY_RUN=None):
-                with override_config(BASE_DIR=tmp_path):
-                    profile = config._make_profile("long", "long", ("test",))
-
-        self.assertFalse(profile.runtime.dry_run)
-
-    def test_invalid_env_values_warn_and_use_defaults(self):
-        config.CONFIG_WARNINGS.clear()
-        env = {
-            "ALIAS_POST_ONLY_ENABLED": "definitely",
-            "ALIAS_POLL_INTERVAL_SEC": "slow",
-            "ALIAS_DRY_RUN_EQUITY": "heavy",
-            "ALIAS_EMA_ENTRY_LADDER_FRACTIONS": "0.5,nope",
-        }
-        with patched_env(**env):
-            with warnings.catch_warnings(record=True) as captured:
-                warnings.simplefilter("always")
-                profile = config._make_profile("alias", "long", ("test",))
-
-        self.assertTrue(profile.runtime.post_only_enabled)
-        self.assertEqual(profile.runtime.poll_interval_sec, 3)
-        self.assertEqual(profile.runtime.dry_run_equity, 1000.0)
-        self.assertEqual(profile.buying.ladder_fractions, (0.5, 0.5))
-        self.assertGreaterEqual(len(config.CONFIG_WARNINGS), 4)
-        self.assertGreaterEqual(len(captured), 4)
-
-    def test_pydantic_settings_are_frozen_and_hashable(self):
-        mapping = {config.EXTERNAL_PRICE_FEED: "shared"}
-
-        self.assertEqual(mapping[config.EXTERNAL_PRICE_FEED], "shared")
-        with self.assertRaises(Exception):
-            config.RUNTIME.dry_run = not config.RUNTIME.dry_run
 
     def test_entry_ladder_does_not_retry_with_lower_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

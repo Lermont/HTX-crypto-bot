@@ -304,9 +304,7 @@ class MonitoringMixin:
         reason = str(kwargs.get("reason") or "")
         if config.RUNTIME.dry_run and not message.startswith("[DRY-RUN]"):
             message = f"[DRY-RUN] {message}"
-            if reason:
-                kwargs["reason"] = f"dry_run:{reason}"
-            else:
+            if not reason:
                 kwargs["reason"] = "dry_run"
 
         log_method = getattr(self.log, level.lower(), self.log.info)

@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 
+import json
 import math
 import time
+import urllib.parse
+import urllib.request
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Callable, Deque, Dict, Optional, Tuple
-
-import requests
 
 
 @dataclass(frozen=True)
@@ -32,18 +33,15 @@ class BookTicker:
 
 
 class MexcBookTickerClient:
-    def __init__(self, timeout_sec: float = 3.0, session: Optional[requests.Session] = None):
+    def __init__(self, timeout_sec: float = 3.0, opener: Optional[Callable] = None):
         self.timeout_sec = max(0.1, float(timeout_sec or 3.0))
-        self.session = session or requests.Session()
+        self.opener = opener or urllib.request.urlopen
 
     def fetch(self, symbol: str) -> BookTicker:
-        response = self.session.get(
-            "https://api.mexc.com/api/v3/ticker/bookTicker",
-            params={"symbol": symbol},
-            timeout=self.timeout_sec,
-        )
-        response.raise_for_status()
-        payload = response.json()
+        query = urllib.parse.urlencode({"symbol": symbol})
+        url = f"https://api.mexc.com/api/v3/ticker/bookTicker?{query}"
+        with self.opener(url, timeout=self.timeout_sec) as response:
+            payload = json.loads(response.read().decode("utf-8"))
         return BookTicker(
             bid=_safe_float(payload.get("bidPrice")),
             ask=_safe_float(payload.get("askPrice")),
@@ -86,13 +84,12 @@ class ExternalPriceFeed:
 
         mexc_book, reason = self._mexc_book(symbol, mexc_symbol, now)
         if not self._book_valid(mexc_book, require_qty=True):
-            invalid_reason = reason if reason and reason != "ok" else "mexc_book_invalid"
-            context = self._context_from_books(symbol, mexc_symbol, htx_book, mexc_book, now, invalid_reason)
+            context = self._context_from_books(symbol, mexc_symbol, htx_book, mexc_book, now, reason or "mexc_book_invalid")
             context["valid"] = False
             context["stale"] = True
             return context
 
-        context = self._context_from_books(symbol, mexc_symbol, htx_book, mexc_book, now, reason or "ok")
+        context = self._context_from_books(symbol, mexc_symbol, htx_book, mexc_book, now, "ok")
         self._record_history(symbol, context, now)
         return context
 

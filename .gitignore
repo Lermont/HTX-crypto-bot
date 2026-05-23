@@ -16,7 +16,6 @@ build/
 dist/
 *.egg-info/
 *.log
-*_macro.csv
 
 *.lock
 bot_state.json

@@ -14,7 +14,7 @@
 - если одновременно появилось много валидных сигналов, выбирать только лучшие через top-N и crowded mode;
 - ограничивать скорость набора новых позиций через rate-limit;
 - открывать позицию двумя limit-ордерами;
-- сопровождать позицию одним reduce-only take-profit;
+- сопровождать позицию adaptive reduce-only exit ladder с отдельным runner-хвостом в normal-режиме;
 - разрешать максимум пять усреднений до breakeven, если старший EMA-сигнал не сломан;
 - если позиция не закрылась за 48 часов, отменять дальнейшие доборы и переводить выход в reduce-only breakeven.
 
@@ -52,16 +52,27 @@ BOT_PROFILES=long,short
 
 Если один профиль уже держит позицию, entry orders или exit orders по символу, второй профиль считает символ зарезервированным, не открывает встречную экспозицию и отменяет свои tracked orders по этому символу.
 
-Дефолтный список монет для `long` и `short` одинаковый:
+Дефолтный список монет для `long`:
+
+```text
+eth, sol, bnb, xrp, ada, avax, link, dot, ltc, bch,
+etc, trx, ton, sui, apt, op, near, sei, inj, fil,
+atom, algo, pol, tao, icp, wld, grt, tia, hbar,
+kas, xlm, kaito, ssv, lpt, pendle, ena, ondo, jup,
+aave, uni, ldo, ethfi, zro, zk, 1inch, crv, orca,
+hype, zec, xmr, dydx, ens, cake, comp, gala, axs,
+sand
+```
+
+Дефолтный список монет для `short`:
 
 ```text
 eth, sol, bnb, xrp, ada, avax, link, dot, ltc, bch,
 doge, etc, trx, ton, sui, apt, arb, op, near, sei,
 inj, fil, atom, algo, pol, tao, icp, wld, grt, pyth,
-tia, hbar, kas, xlm, kaito, ssv, lpt, pendle, ena,
-ondo, jup, aave, uni, ldo, ethfi, zro, zk, 1inch,
-crv, orca, hype, zec, xmr, dydx, ens, cake, comp,
-gala, axs, cfx, sand, chz
+tia, hbar, xlm, kaito, ssv, lpt, pendle, ena, jup,
+uni, ldo, ethfi, zro, zk, 1inch, crv, orca, zec,
+xmr, dydx, ens, cake, comp, gala, axs, cfx, sand
 ```
 
 ## 3. Основной цикл
@@ -248,6 +259,28 @@ short_score = macro_gap + trigger_gap + pullback_depth + max(0, -rs60)
 
 Score используется не только для логирования. Он является частью fresh-entry quality gate и ключом ранжирования в top-N.
 
+### 8.1 Gold/BTC RSI macro overlay
+
+Если `ENABLE_GOLD_BTC_RSI_OVERLAY=true`, бот отдельно считает RSI по XAUT/gold proxy и BTC на `GOLD_TIMEFRAME=4h`. Этот overlay не добавляет XAUT в торговый universe, а только меняет риск-контекст:
+
+- `deleveraging`: BTC и gold слабые, новые входы могут быть запрещены через `PANIC_DISABLE_NEW_ENTRIES`, усреднения и recovery запрещаются, ladder становится шире;
+- `crypto_underperforms_gold`: gold сильный, BTC слабый или сильно отстаёт от gold, long budget уменьшается до `RISK_OFF_LONG_BUDGET_MULTIPLIER=0.55`, short budget остаётся мягче через `RISK_OFF_SHORT_BUDGET_MULTIPLIER=0.85`, усреднения/recovery могут блокироваться;
+- `crypto_risk_on` и `broad_liquidity_risk_on`: long остаётся без штрафа, short budget снижается до `0.75` или `0.85`;
+- stale или недоступный macro-context логируется и используется как neutral fallback.
+
+Macro overlay применяется к `budget_multiplier`, `ladder_multiplier`, fresh-entry block, averaging block и ускорению breakeven/time-exit через `RISK_OFF_TIME_EXIT_MULTIPLIER`.
+
+### 8.2 External MEXC price radar
+
+Если `EXTERNAL_PRICE_FEED_ENABLED=true`, HTX book сравнивается с MEXC book ticker:
+
+- stale reference по умолчанию игнорируется для входа (`EXTERNAL_PRICE_IGNORE_REFERENCE_IF_STALE=true`), но может стать fail-closed через `EXTERNAL_PRICE_DISABLE_TRADING_IF_REFERENCE_STALE=true`;
+- long не открывается, если HTX premium выше `EXTERNAL_PRICE_MAX_HTX_PREMIUM_FOR_LONG_BPS=15`;
+- short не открывается, если HTX discount ниже `-EXTERNAL_PRICE_MAX_HTX_DISCOUNT_FOR_SHORT_BPS=15`;
+- резкое расхождение HTX/MEXC за 1 минуту больше `EXTERNAL_PRICE_BLOCK_IF_DIVERGENCE_1M_BPS=50` включает cooldown на `EXTERNAL_PRICE_BLOCK_DURATION_SEC=300`;
+- если MEXC ведёт HTX на 30 сек минимум на `EXTERNAL_PRICE_MEXC_LEAD_THRESHOLD_BPS_30S=5`, к fresh-entry score добавляется `EXTERNAL_PRICE_IMPULSE_SCORE_BONUS=0.02`;
+- благоприятный HTX premium/discount может включить `external_tightened` exit ladder.
+
 ## 9. Fresh-entry quality gate
 
 Для нового initial entry `_is_entry_signal_valid` требует:
@@ -265,7 +298,7 @@ benchmark_ok == true
 
 ```text
 ENTRY_MIN_SCORE=0.03
-score >= ENTRY_MIN_SCORE
+raw_score + external_impulse_bonus >= ENTRY_MIN_SCORE
 ```
 
 3. направленная относительная сила `rs60`:
@@ -409,6 +442,7 @@ ENTRY_RATE_LIMIT_WINDOW_MINUTES=60
 - symbol разрешён текущим top-N/rate-limit/crowded `entry_gate`;
 - символ не зарезервирован другим профилем;
 - profile health gate прошёл;
+- external price gate не вернул premium/discount/divergence block;
 - risk budget даёт положительный размер.
 
 Health gate:
@@ -544,27 +578,39 @@ sell_fee_rate=0.0001
 
 ## 16. Нормальный выход
 
-После появления позиции бот обеспечивает tracked reduce-only exit ladder. В дефолтной конфигурации это один limit-ордер на 100% позиции:
+После появления позиции бот обеспечивает tracked reduce-only exit ladder. В дефолтной конфигурации включён adaptive ladder:
+
+```text
+EMA_ADAPTIVE_EXIT_ENABLED=true
+EMA_EXIT_NORMAL_LADDER_FRACTIONS=0.35,0.25,0.25,0.15
+EMA_EXIT_NORMAL_LADDER_MARKUPS=0.008,0.016,0.030,0.050
+EMA_EXIT_MEDIUM_LADDER_FRACTIONS=0.45,0.30,0.15,0.10
+EMA_EXIT_MEDIUM_LADDER_MARKUPS=0.004,0.010,0.020,0.035
+EMA_EXIT_HEAVY_LADDER_FRACTIONS=0.60,0.25,0.15
+EMA_EXIT_HEAVY_LADDER_MARKUPS=0.003,0.008,0.015
+EMA_EXIT_RUNNER_ENABLED=true
+```
+
+Выбор ladder зависит от текущего notional к initial notional:
+
+- `normal`: ratio `<= 1.30`;
+- `medium`: ratio `<= 1.80`;
+- `heavy`: ratio `> 1.80`.
+
+В `normal` ladder последняя фракция `0.15` до 6 часов не ставится обычным лимитным TP, а резервируется как runner. Runner активируется после движения в прибыль на `EMA_EXIT_RUNNER_ACTIVATION_MARKUP=0.020` и закрывается reduce-only limit при trailing pullback `0.010`, take-profit `0.050` или сломе trigger EMA против позиции.
+
+Если HTX имеет благоприятный premium для long или discount для short, external price radar может заменить normal ladder на `external_tightened`:
+
+```text
+EXTERNAL_PRICE_TIGHTENED_LADDER_FRACTIONS=0.40,0.30,0.20,0.10
+EXTERNAL_PRICE_TIGHTENED_LADDER_MARKUPS=0.005,0.010,0.020,runner
+```
+
+Если `EMA_ADAPTIVE_EXIT_ENABLED=false`, используется legacy ladder:
 
 ```text
 EMA_EXIT_LADDER_FRACTIONS=1.0
 EMA_TAKE_PROFIT_MARKUP=0.01
-```
-
-Long TP:
-
-```text
-exit_price = average_entry_price * 1.01
-side = sell
-reduceOnly = true
-```
-
-Short TP:
-
-```text
-exit_price = average_entry_price * 0.99
-side = buy
-reduceOnly = true
 ```
 
 Exit amount ограничивается фактически доступным для закрытия количеством `position_available`. Если closeable amount недоступен или биржа сообщает, что reduce-only amount превышает доступный объём, бот не ставит дублирующий выход и помечает exit ladder как pending closeable.
@@ -701,11 +747,11 @@ signal exists and signal.valid and benchmark_ok
 Это не основной выход стратегии, но активный защитный механизм:
 
 ```text
-DUST_POSITION_NOTIONAL=1.0
+DUST_POSITION_NOTIONAL=10.0
 DUST_CLOSE_ENABLED=true
 ```
 
-Если позиция имеет notional `<= 1 USDT` и `DRY_RUN=false`, бот:
+Если позиция имеет notional `<= 10 USDT` и `DRY_RUN=false`, бот:
 
 - отменяет tracked entry/exit orders;
 - ставит reduce-only market order на закрытие доступного пылевого объёма;

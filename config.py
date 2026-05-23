@@ -1,39 +1,19 @@
 # -*- coding: utf-8 -*-
 
 import os
-import warnings
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Tuple, TypeVar, Union
-
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from typing import Dict, Iterator, Optional, Tuple, Union
 
 
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_WARNINGS = []
-_T = TypeVar("_T")
-_BOOL_ADAPTER = TypeAdapter(bool)
-_INT_ADAPTER = TypeAdapter(int)
-_FLOAT_ADAPTER = TypeAdapter(float)
-_FLOAT_TUPLE_ADAPTER = TypeAdapter(Tuple[float, ...])
-_OPTIONAL_FLOAT_TUPLE_ADAPTER = TypeAdapter(Tuple[Optional[float], ...])
 
 
-class FrozenSettingsModel(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-
-def _warn_config(message: str) -> None:
-    CONFIG_WARNINGS.append(message)
-    warnings.warn(message, RuntimeWarning, stacklevel=2)
-
-
-def _read_dotenv_if_present(path: Path, profile: str = "") -> Dict[str, str]:
-    values: Dict[str, str] = {}
+def _load_dotenv_if_present(path: Path, profile: str = "") -> None:
     if not path.exists():
-        return values
+        return
 
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -44,55 +24,14 @@ def _read_dotenv_if_present(path: Path, profile: str = "") -> Dict[str, str]:
         if key:
             clean_value = value.strip().strip("\"'")
             if profile and not key.upper().startswith((f"{profile.upper()}_", "HTXBOT_")):
-                values.setdefault(f"{profile.upper()}_{key}", clean_value)
+                os.environ.setdefault(f"{profile.upper()}_{key}", clean_value)
             else:
-                values.setdefault(key, clean_value)
-    return values
+                os.environ.setdefault(key, clean_value)
 
 
-def _collect_env_values() -> Dict[str, str]:
-    values: Dict[str, str] = {}
-    for path, profile in (
-        (BASE_DIR / ".env", ""),
-        (BASE_DIR / "long" / ".env", "long"),
-        (BASE_DIR / "short" / ".env", "short"),
-    ):
-        for key, value in _read_dotenv_if_present(path, profile=profile).items():
-            values.setdefault(key, value)
-    values.update({key: value for key, value in os.environ.items()})
-    return values
-
-
-class ProfileEnvSource(PydanticBaseSettingsSource):
-    def get_field_value(self, field, field_name: str):
-        return None, field_name, False
-
-    def prepare_field_value(self, field_name: str, field, value: Any, value_is_complex: bool) -> Any:
-        return value
-
-    def __call__(self) -> Dict[str, Any]:
-        return {"env_values": _collect_env_values()}
-
-
-class ProfileEnvSettings(BaseSettings):
-    env_values: Dict[str, str] = {}
-
-    model_config = SettingsConfigDict(extra="ignore")
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls,
-        init_settings,
-        env_settings,
-        dotenv_settings,
-        file_secret_settings,
-    ):
-        return (ProfileEnvSource(settings_cls),)
-
-
-def _env_values() -> Dict[str, str]:
-    return ProfileEnvSettings().env_values
+_load_dotenv_if_present(BASE_DIR / ".env")
+_load_dotenv_if_present(BASE_DIR / "long" / ".env", profile="long")
+_load_dotenv_if_present(BASE_DIR / "short" / ".env", profile="short")
 
 
 def _env(name: str, profile: str = "") -> str:
@@ -101,21 +40,11 @@ def _env(name: str, profile: str = "") -> str:
         prefix = profile.upper()
         candidates.extend((f"{prefix}_{name}", f"HTXBOT_{prefix}_{name}"))
     candidates.append(name)
-    values = _env_values()
     for candidate in candidates:
-        value = str(values.get(candidate, "")).strip()
+        value = os.getenv(candidate, "").strip()
         if value:
             return value
     return ""
-
-
-def _parse_env_value(name: str, raw_value: str, default: _T, adapter: TypeAdapter, profile: str = "") -> _T:
-    try:
-        return adapter.validate_python(raw_value)
-    except ValidationError as exc:
-        label = f"{profile}.{name}" if profile else name
-        _warn_config(f"Invalid config value for {label}: {raw_value!r}; using default {default!r}. {exc}")
-        return default
 
 
 def _first_env(*names: str, profile: str = "") -> str:
@@ -127,24 +56,32 @@ def _first_env(*names: str, profile: str = "") -> str:
 
 
 def _env_bool(name: str, default: bool, profile: str = "") -> bool:
-    value = _env(name, profile=profile)
-    if not value:
-        return default
-    return _parse_env_value(name, value, default, _BOOL_ADAPTER, profile=profile)
+    value = _env(name, profile=profile).lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
 
 
 def _env_float(name: str, default: float, profile: str = "") -> float:
     value = _env(name, profile=profile)
     if not value:
         return default
-    return _parse_env_value(name, value, default, _FLOAT_ADAPTER, profile=profile)
+    try:
+        return float(value)
+    except ValueError:
+        return default
 
 
 def _env_int(name: str, default: int, profile: str = "") -> int:
     value = _env(name, profile=profile)
     if not value:
         return default
-    return _parse_env_value(name, value, default, _INT_ADAPTER, profile=profile)
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def _env_csv(name: str, default: Tuple[str, ...], profile: str = "") -> Tuple[str, ...]:
@@ -159,10 +96,16 @@ def _env_float_tuple(name: str, default: Tuple[float, ...], profile: str = "") -
     value = _env(name, profile=profile)
     if not value:
         return default
-    items = [item.strip() for item in value.split(",") if item.strip()]
-    if not items:
-        return default
-    return _parse_env_value(name, items, default, _FLOAT_TUPLE_ADAPTER, profile=profile)
+    parsed = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            parsed.append(float(item))
+        except ValueError:
+            return default
+    return tuple(parsed) or default
 
 
 def _env_optional_float_tuple(name: str, default: Tuple[Optional[float], ...], profile: str = "") -> Tuple[Optional[float], ...]:
@@ -177,10 +120,11 @@ def _env_optional_float_tuple(name: str, default: Tuple[Optional[float], ...], p
         if item in {"runner", "none", "null"}:
             parsed.append(None)
             continue
-        parsed.append(item)
-    if not parsed:
-        return default
-    return _parse_env_value(name, parsed, default, _OPTIONAL_FLOAT_TUPLE_ADAPTER, profile=profile)
+        try:
+            parsed.append(float(item))
+        except ValueError:
+            return default
+    return tuple(parsed) or default
 
 LONG_COINS = (
     "eth", "sol", "bnb", "xrp", "ada", "avax", "link", "dot", "ltc", "bch",
@@ -203,12 +147,14 @@ SHORT_COINS = (
 )
 
 
-class ApiCredentials(FrozenSettingsModel):
+@dataclass(frozen=True)
+class ApiCredentials:
     api_key: str
     api_secret: str
 
 
-class ExchangeSettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class ExchangeSettings:
     quote_currency: str
     enable_rate_limit: bool
     timeout_ms: int
@@ -220,7 +166,8 @@ class ExchangeSettings(FrozenSettingsModel):
     markets_cache_max_age_sec: int
 
 
-class SignalSettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class SignalSettings:
     timeframe: str
     rs_fast_window: int
     rs_slow_window: int
@@ -231,13 +178,15 @@ class SignalSettings(FrozenSettingsModel):
     min_signal_candles: int
 
 
-class BuySettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class BuySettings:
     position_budget_fraction: float
     ladder_fractions: Tuple[float, ...]
     ladder_offsets: Tuple[float, ...]
 
 
-class SellSettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class SellSettings:
     buy_fee_rate: float
     sell_fee_rate: float
     min_gross_profit_floor: float
@@ -245,7 +194,8 @@ class SellSettings(FrozenSettingsModel):
     ladder_markups: Tuple[float, ...]
 
 
-class RiskSettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class RiskSettings:
     min_quote_reserve: float
     max_active_positions: int
     max_position_notional_fraction: float
@@ -263,7 +213,8 @@ class RiskSettings(FrozenSettingsModel):
     cooldown_minutes_after_close: int
 
 
-class StrategySettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class StrategySettings:
     ema_strategy_enabled: bool
     ema_macro_timeframe: str
     ema_pullback_timeframe: str
@@ -445,7 +396,8 @@ class StrategySettings(FrozenSettingsModel):
     funding_negative_markup_multiplier: float
 
 
-class MacroSettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class MacroSettings:
     enable_gold_btc_rsi_overlay: bool
     gold_coins: Tuple[str, ...]
     gold_timeframe: str
@@ -472,7 +424,8 @@ class MacroSettings(FrozenSettingsModel):
     stale_macro_max_age_sec: int
 
 
-class ExternalPriceFeedSettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class ExternalPriceFeedSettings:
     enabled: bool
     primary_exchange: str
     reference_exchanges: Tuple[str, ...]
@@ -505,7 +458,8 @@ class ExternalPriceFeedSettings(FrozenSettingsModel):
     stale_after_ms: int
 
 
-class MonitoringSettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class MonitoringSettings:
     log_level: str
     cycle_stats_csv_file: str
     csv_log_file: str
@@ -516,7 +470,8 @@ class MonitoringSettings(FrozenSettingsModel):
     equity_csv_ttl_sec: float
 
 
-class RuntimeSettings(FrozenSettingsModel):
+@dataclass(frozen=True)
+class RuntimeSettings:
     order_timeout_sec: int
     poll_interval_sec: int
     post_only_enabled: bool
@@ -529,7 +484,8 @@ class RuntimeSettings(FrozenSettingsModel):
     dry_run_equity: float
 
 
-class BotProfile(FrozenSettingsModel):
+@dataclass(frozen=True)
+class BotProfile:
     name: str
     coins: Tuple[str, ...]
     trade_direction: str
@@ -626,12 +582,6 @@ def _path(profile: str, filename: str) -> str:
     return str(BASE_DIR / profile / filename)
 
 
-def replace_settings(model: FrozenSettingsModel, **updates):
-    if not isinstance(model, BaseModel):
-        raise TypeError("replace_settings expects a Pydantic settings model")
-    return model.model_copy(update=updates)
-
-
 def _validate_fraction_tuple(name: str, values: Tuple[float, ...], eps: float = 1e-9) -> None:
     if not values:
         raise ValueError(f"{name} must not be empty")
@@ -654,41 +604,6 @@ def _validate_tuple_lengths(
             f"{name} {left_name} and {right_name} must have the same length, "
             f"got {len(left)} and {len(right)}"
         )
-
-
-def _default_fraction_tuple_on_error(
-    label: str,
-    values: Tuple[float, ...],
-    default: Tuple[float, ...],
-    profile: str,
-) -> Tuple[float, ...]:
-    try:
-        _validate_fraction_tuple(label, values)
-        return values
-    except ValueError as exc:
-        _warn_config(f"Invalid config group for {profile}.{label}: {exc}; using default {default!r}.")
-        return default
-
-
-def _default_fraction_pair_on_error(
-    label: str,
-    fractions: Tuple[float, ...],
-    values_name: str,
-    values: Tuple[object, ...],
-    default_fractions: Tuple[float, ...],
-    default_values: Tuple[object, ...],
-    profile: str,
-) -> Tuple[Tuple[float, ...], Tuple[object, ...]]:
-    try:
-        _validate_fraction_tuple(f"{label}.fractions", fractions)
-        _validate_tuple_lengths(label, "fractions", fractions, values_name, values)
-        return fractions, values
-    except ValueError as exc:
-        _warn_config(
-            f"Invalid config group for {profile}.{label}: {exc}; "
-            f"using defaults {default_fractions!r} and {default_values!r}."
-        )
-        return default_fractions, default_values
 
 
 def _validate_profile(profile: "BotProfile") -> None:
@@ -805,96 +720,44 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         trend_ema_slow=_env_int("EMA_MACRO_SLOW_MINUTES", 72000, profile=name),
         min_signal_candles=120,
     )
-    default_ema_entry_offsets = (0.0, 0.01)
-    default_ema_entry_fractions = (0.50, 0.50)
-    default_ema_exit_fractions = (1.0,)
-    default_ema_exit_normal_fractions = (0.35, 0.25, 0.25, 0.15)
-    default_ema_exit_normal_markups = (0.008, 0.016, 0.030, 0.050)
-    default_ema_exit_medium_fractions = (0.45, 0.30, 0.15, 0.10)
-    default_ema_exit_medium_markups = (0.004, 0.010, 0.020, 0.035)
-    default_ema_exit_heavy_fractions = (0.60, 0.25, 0.15)
-    default_ema_exit_heavy_markups = (0.003, 0.008, 0.015)
-
-    ema_entry_offsets_default = _env_float_tuple("EMA_ENTRY_LADDER_OFFSETS", default_ema_entry_offsets, profile=name)
+    ema_entry_offsets_default = _env_float_tuple("EMA_ENTRY_LADDER_OFFSETS", (0.0, 0.01), profile=name)
     ema_entry_offsets = _env_float_tuple(
         f"EMA_ENTRY_LADDER_OFFSETS_{direction.upper()}",
         ema_entry_offsets_default,
         profile=name,
     )
-    ema_entry_fractions = _env_float_tuple("EMA_ENTRY_LADDER_FRACTIONS", default_ema_entry_fractions, profile=name)
-    ema_exit_fractions = _env_float_tuple("EMA_EXIT_LADDER_FRACTIONS", default_ema_exit_fractions, profile=name)
+    ema_entry_fractions = _env_float_tuple("EMA_ENTRY_LADDER_FRACTIONS", (0.50, 0.50), profile=name)
+    ema_exit_fractions = _env_float_tuple("EMA_EXIT_LADDER_FRACTIONS", (1.0,), profile=name)
     ema_take_profit_markup = _env_float("EMA_TAKE_PROFIT_MARKUP", 0.01, profile=name)
     ema_exit_normal_fractions = _env_float_tuple(
         "EMA_EXIT_NORMAL_LADDER_FRACTIONS",
-        default_ema_exit_normal_fractions,
+        (0.35, 0.25, 0.25, 0.15),
         profile=name,
     )
     ema_exit_normal_markups = _env_float_tuple(
         "EMA_EXIT_NORMAL_LADDER_MARKUPS",
-        default_ema_exit_normal_markups,
+        (0.008, 0.016, 0.030, 0.050),
         profile=name,
     )
     ema_exit_medium_fractions = _env_float_tuple(
         "EMA_EXIT_MEDIUM_LADDER_FRACTIONS",
-        default_ema_exit_medium_fractions,
+        (0.45, 0.30, 0.15, 0.10),
         profile=name,
     )
     ema_exit_medium_markups = _env_float_tuple(
         "EMA_EXIT_MEDIUM_LADDER_MARKUPS",
-        default_ema_exit_medium_markups,
+        (0.004, 0.010, 0.020, 0.035),
         profile=name,
     )
     ema_exit_heavy_fractions = _env_float_tuple(
         "EMA_EXIT_HEAVY_LADDER_FRACTIONS",
-        default_ema_exit_heavy_fractions,
+        (0.60, 0.25, 0.15),
         profile=name,
     )
     ema_exit_heavy_markups = _env_float_tuple(
         "EMA_EXIT_HEAVY_LADDER_MARKUPS",
-        default_ema_exit_heavy_markups,
+        (0.003, 0.008, 0.015),
         profile=name,
-    )
-    ema_entry_fractions, ema_entry_offsets = _default_fraction_pair_on_error(
-        "BUYING.ladder",
-        ema_entry_fractions,
-        "offsets",
-        ema_entry_offsets,
-        default_ema_entry_fractions,
-        ema_entry_offsets_default if len(ema_entry_offsets_default) == len(default_ema_entry_fractions) else default_ema_entry_offsets,
-        name,
-    )
-    ema_exit_fractions = _default_fraction_tuple_on_error(
-        "SELLING.ladder_fractions",
-        ema_exit_fractions,
-        default_ema_exit_fractions,
-        name,
-    )
-    ema_exit_normal_fractions, ema_exit_normal_markups = _default_fraction_pair_on_error(
-        "STRATEGY.ema_exit_normal",
-        ema_exit_normal_fractions,
-        "markups",
-        ema_exit_normal_markups,
-        default_ema_exit_normal_fractions,
-        default_ema_exit_normal_markups,
-        name,
-    )
-    ema_exit_medium_fractions, ema_exit_medium_markups = _default_fraction_pair_on_error(
-        "STRATEGY.ema_exit_medium",
-        ema_exit_medium_fractions,
-        "markups",
-        ema_exit_medium_markups,
-        default_ema_exit_medium_fractions,
-        default_ema_exit_medium_markups,
-        name,
-    )
-    ema_exit_heavy_fractions, ema_exit_heavy_markups = _default_fraction_pair_on_error(
-        "STRATEGY.ema_exit_heavy",
-        ema_exit_heavy_fractions,
-        "markups",
-        ema_exit_heavy_markups,
-        default_ema_exit_heavy_fractions,
-        default_ema_exit_heavy_markups,
-        name,
     )
     dust_position_notional = _env_float("DUST_POSITION_NOTIONAL", 10.0, profile=name)
     buying = BuySettings(
@@ -937,13 +800,6 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         margin_mode="cross",
         position_mode="one-way",
         cooldown_minutes_after_close=10,
-    )
-    default_ema_breakeven_exit_fractions = (1.0,)
-    ema_breakeven_exit_fractions = _default_fraction_tuple_on_error(
-        "STRATEGY.ema_breakeven_exit_fractions",
-        _env_float_tuple("EMA_BREAKEVEN_EXIT_FRACTIONS", default_ema_breakeven_exit_fractions, profile=name),
-        default_ema_breakeven_exit_fractions,
-        name,
     )
     strategy = StrategySettings(
         ema_strategy_enabled=_env_bool("EMA_STRATEGY_ENABLED", True, profile=name),
@@ -997,7 +853,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_breakeven_after_hours=_env_float("EMA_BREAKEVEN_AFTER_HOURS", 48.0, profile=name),
         ema_breakeven_reprice_minutes=_env_float("EMA_BREAKEVEN_REPRICE_MINUTES", 15.0, profile=name),
         ema_breakeven_fee_buffer=_env_float("EMA_BREAKEVEN_FEE_BUFFER", 0.0002, profile=name),
-        ema_breakeven_exit_fractions=ema_breakeven_exit_fractions,
+        ema_breakeven_exit_fractions=_env_float_tuple("EMA_BREAKEVEN_EXIT_FRACTIONS", (1.0,), profile=name),
         enable_signal_size_scaling=False,
         signal_budget_min_multiplier=1.0,
         signal_budget_max_multiplier=1.0,
@@ -1171,26 +1027,6 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         equity_csv_ttl_sec=_env_float("EQUITY_CSV_TTL_SEC", 30.0, profile=name),
     )
 
-    default_tightened_ladder_fractions = (0.40, 0.30, 0.20, 0.10)
-    default_tightened_ladder_markups = (0.005, 0.010, 0.020, None)
-    tightened_ladder_fractions, tightened_ladder_markups = _default_fraction_pair_on_error(
-        "EXTERNAL_PRICE_FEED.tightened_ladder",
-        _env_float_tuple(
-            "EXTERNAL_PRICE_TIGHTENED_LADDER_FRACTIONS",
-            default_tightened_ladder_fractions,
-            profile=name,
-        ),
-        "markups",
-        _env_optional_float_tuple(
-            "EXTERNAL_PRICE_TIGHTENED_LADDER_MARKUPS",
-            default_tightened_ladder_markups,
-            profile=name,
-        ),
-        default_tightened_ladder_fractions,
-        default_tightened_ladder_markups,
-        name,
-    )
-
     external_price_feed = ExternalPriceFeedSettings(
         enabled=_env_bool("EXTERNAL_PRICE_FEED_ENABLED", True, profile=name),
         primary_exchange=_env("EXTERNAL_PRICE_PRIMARY_EXCHANGE", profile=name) or "htx",
@@ -1211,14 +1047,14 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         block_duration_sec=_env_int("EXTERNAL_PRICE_BLOCK_DURATION_SEC", 300, profile=name),
         impulse_confirmation_enabled=_env_bool("EXTERNAL_PRICE_IMPULSE_CONFIRMATION_ENABLED", True, profile=name),
         mexc_lead_threshold_bps_30s=_env_float("EXTERNAL_PRICE_MEXC_LEAD_THRESHOLD_BPS_30S", 5.0, profile=name),
-        impulse_score_bonus=_env_float("EXTERNAL_PRICE_IMPULSE_SCORE_BONUS", 1.0, profile=name),
+        impulse_score_bonus=_env_float("EXTERNAL_PRICE_IMPULSE_SCORE_BONUS", 0.02, profile=name),
         require_same_direction=_env_bool("EXTERNAL_PRICE_REQUIRE_SAME_DIRECTION", True, profile=name),
         exit_adjustment_enabled=_env_bool("EXTERNAL_PRICE_EXIT_ADJUSTMENT_ENABLED", True, profile=name),
         long_take_profit_tighten_if_htx_premium_bps=_env_float("EXTERNAL_PRICE_LONG_TP_TIGHTEN_PREMIUM_BPS", 20.0, profile=name),
         short_take_profit_tighten_if_htx_discount_bps=_env_float("EXTERNAL_PRICE_SHORT_TP_TIGHTEN_DISCOUNT_BPS", 20.0, profile=name),
         tighten_ladder_factor=_env_float("EXTERNAL_PRICE_TIGHTEN_LADDER_FACTOR", 0.6, profile=name),
-        tightened_ladder_fractions=tightened_ladder_fractions,
-        tightened_ladder_markups=tightened_ladder_markups,
+        tightened_ladder_fractions=_env_float_tuple("EXTERNAL_PRICE_TIGHTENED_LADDER_FRACTIONS", (0.40, 0.30, 0.20, 0.10), profile=name),
+        tightened_ladder_markups=_env_optional_float_tuple("EXTERNAL_PRICE_TIGHTENED_LADDER_MARKUPS", (0.005, 0.010, 0.020, None), profile=name),
         disable_trading_if_reference_stale=_env_bool("EXTERNAL_PRICE_DISABLE_TRADING_IF_REFERENCE_STALE", False, profile=name),
         ignore_reference_if_stale=_env_bool("EXTERNAL_PRICE_IGNORE_REFERENCE_IF_STALE", True, profile=name),
         stale_after_ms=_env_int("EXTERNAL_PRICE_STALE_AFTER_MS", 3000, profile=name),
