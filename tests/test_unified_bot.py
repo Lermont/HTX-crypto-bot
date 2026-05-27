@@ -429,6 +429,18 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertTrue(context["stale"])
         self.assertGreater(context["age_ms"], 3000)
 
+    def test_external_price_rejects_unsupported_reference_exchange(self):
+        settings = replace(config.EXTERNAL_PRICE_FEED, reference_exchanges=("binance",))
+        client = FakeMexcClient([BookTicker(99.9, 100.1, 10.0, 10.0, ts=1000.0)])
+        feed = ExternalPriceFeed(settings, mexc_client=client, clock=lambda: 1000.0)
+
+        context = feed.get_context(SYMBOL, {"bid": 99.9, "ask": 100.1}, market=MARKET)
+
+        self.assertFalse(context["valid"])
+        self.assertTrue(context["stale"])
+        self.assertEqual(context["reason"], "reference_exchange_unsupported")
+        self.assertEqual(client.calls, [])
+
     def test_external_price_uses_strictest_stale_age_limit(self):
         now = [2000.0]
         settings = replace(
@@ -857,6 +869,23 @@ class UnifiedBotTests(unittest.TestCase):
                 orders = bot._get_state(SYMBOL).entry_orders
                 self.assertEqual(len(orders), 2)
                 self.assertEqual([order["price"] for order in orders], [10.0, 10.1])
+
+    def test_decimal_places_zero_price_precision_rounds_away_from_crossing_book(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=True)):
+                bot = self.make_bot(Path(raw_tmp))
+                market = {**MARKET, "precision": {"price": 0}}
+                bot.exchange.markets[SYMBOL] = market
+                bot.market_by_symbol[SYMBOL] = market
+                bot.exchange.precisionMode = ccxt.DECIMAL_PLACES
+
+                def integer_price_precision(_symbol, price):
+                    return f"{round(float(price)):.0f}"
+
+                bot.exchange.price_to_precision = integer_price_precision
+
+                self.assertEqual(bot._price_at_or_above(SYMBOL, 10.2), 11.0)
+                self.assertEqual(bot._price_at_or_below(SYMBOL, 10.8), 10.0)
 
     def test_profile_validation_rejects_mismatched_ema_ladder_lengths(self):
         profile = config.resolve_profile("long")
@@ -2305,6 +2334,23 @@ class UnifiedBotTests(unittest.TestCase):
                 os.environ.pop("BOT_PROFILES", None)
             else:
                 os.environ["BOT_PROFILES"] = previous
+
+    def test_enabled_profile_names_reads_global_htxbot_prefix(self):
+        previous_bot_profiles = os.environ.get("BOT_PROFILES")
+        previous_prefixed = os.environ.get("HTXBOT_BOT_PROFILES")
+        os.environ.pop("BOT_PROFILES", None)
+        os.environ["HTXBOT_BOT_PROFILES"] = "short"
+        try:
+            self.assertEqual(config.enabled_profile_names(), ("short",))
+        finally:
+            if previous_bot_profiles is None:
+                os.environ.pop("BOT_PROFILES", None)
+            else:
+                os.environ["BOT_PROFILES"] = previous_bot_profiles
+            if previous_prefixed is None:
+                os.environ.pop("HTXBOT_BOT_PROFILES", None)
+            else:
+                os.environ["HTXBOT_BOT_PROFILES"] = previous_prefixed
 
     def test_combined_run_once_rechecks_disabled_symbols(self):
         class FakeBot:
