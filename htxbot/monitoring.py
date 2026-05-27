@@ -95,6 +95,10 @@ class MonitoringMixin:
         if path:
             self._ensure_headered_csv_file(path, self.EXTERNAL_PRICE_CSV_HEADER)
 
+    def _ensure_account_pnl_csv_file(self):
+        path = getattr(self, "account_pnl_csv_path", None)
+        if path:
+            self._ensure_headered_csv_file(path, self.ACCOUNT_PNL_CSV_HEADER)
     def _ensure_jsonl_file(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(exist_ok=True)
@@ -549,6 +553,41 @@ class MonitoringMixin:
                 ]
             )
 
+    def _append_account_pnl_csv(self, context: dict):
+        path = getattr(self, "account_pnl_csv_path", None)
+        if not path:
+            return
+
+        def fmt(value: object) -> str:
+            try:
+                return f"{float(value):.8f}"
+            except (TypeError, ValueError):
+                return ""
+
+        self._rotate_csv_if_needed(path, self.ACCOUNT_PNL_CSV_HEADER)
+        with path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    int(context.get("ts") or time.time()),
+                    getattr(self, "profile_name", config.BOT_NAME),
+                    fmt(context.get("open_pnl", 0.0)),
+                    fmt(context.get("unrealized_pnl", 0.0)),
+                    fmt(context.get("realized_open_pnl", 0.0)),
+                    fmt(context.get("open_notional", 0.0)),
+                    fmt(context.get("open_pnl_rate", 0.0)),
+                    int(context.get("position_count") or 0),
+                    int(context.get("history_samples") or 0),
+                    fmt(context.get("min_open_pnl", 0.0)),
+                    fmt(context.get("p25_open_pnl", 0.0)),
+                    fmt(context.get("median_open_pnl", 0.0)),
+                    fmt(context.get("p75_open_pnl", 0.0)),
+                    fmt(context.get("max_open_pnl", 0.0)),
+                    fmt(context.get("previous_open_pnl", 0.0)),
+                    fmt(context.get("delta_open_pnl", 0.0)),
+                    context.get("reason", ""),
+                ]
+            )
     def _diagnostic_error_code(self, exc: Optional[Exception], message: str = "") -> str:
         text = f"{message} {exc or ''}"
         for pattern in (

@@ -79,6 +79,8 @@ class TradeState:
     exit_runner_peak_price: float = 0.0
     exit_runner_bottom_price: float = 0.0
     exit_runner_contracts: float = 0.0
+    last_account_unload_at: Optional[float] = None
+    account_unload_count: int = 0
     entry_rs30: float = 0.0
     entry_rs60: float = 0.0
     entry_ema30: float = 0.0

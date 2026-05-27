@@ -259,6 +259,11 @@ class StrategySettings:
     ema_exit_runner_activation_markup: float
     ema_exit_runner_trailing_pullback: float
     ema_exit_runner_take_profit_markup: float
+    ema_exit_trailing_enabled: bool
+    ema_exit_trailing_fixed_fraction: float
+    ema_exit_trailing_activation_markup: float
+    ema_exit_trailing_pullback: float
+    ema_exit_trailing_take_profit_markup: float
     ema_averaging_enabled: bool
     ema_averaging_drawdown_step: float
     ema_averaging_position_fraction: float
@@ -266,6 +271,29 @@ class StrategySettings:
     ema_averaging_power: float
     ema_averaging_interval_hours: float
     ema_max_averaging_stages: int
+    account_pnl_enabled: bool
+    account_pnl_window_minutes: float
+    account_pnl_sample_interval_sec: float
+    account_profit_unload_enabled: bool
+    account_profit_unload_min_pnl_quote: float
+    account_profit_unload_min_pnl_rate: float
+    account_profit_unload_percentile: float
+    account_profit_unload_fraction: float
+    account_profit_unload_drawdown_fraction: float
+    account_profit_unload_peak_drawdown_fraction: float
+    account_profit_unload_full_pnl_quote: float
+    account_profit_unload_min_position_pnl_quote: float
+    account_profit_unload_min_position_pnl_rate: float
+    account_profit_unload_cooldown_sec: float
+    account_averaging_enabled: bool
+    account_averaging_min_samples: int
+    account_averaging_percentile: float
+    account_averaging_near_trough_quote: float
+    account_averaging_near_trough_fraction: float
+    account_averaging_bounce_quote: float
+    account_averaging_falling_guard_quote: float
+    account_averaging_falling_guard_fraction: float
+    account_averaging_budget_scale: float
     ema_breakeven_enabled: bool
     ema_breakeven_after_hours: float
     ema_breakeven_reprice_minutes: float
@@ -472,6 +500,7 @@ class MonitoringSettings:
     csv_log_file: str
     macro_csv_file: str
     external_price_csv_file: str
+    account_pnl_csv_file: str
     signal_analytics_csv_file: str
     signal_analytics_jsonl_file: str
     diagnostics_csv_file: str
@@ -690,6 +719,21 @@ def _validate_profile(profile: "BotProfile") -> None:
         f"{profile.name}.EXTERNAL_PRICE_FEED.tightened_ladder_fractions",
         profile.external_price_feed.tightened_ladder_fractions,
     )
+    if not 0.0 <= profile.strategy.ema_exit_trailing_fixed_fraction <= 1.0:
+        raise ValueError(f"{profile.name}.STRATEGY.ema_exit_trailing_fixed_fraction must be between 0 and 1")
+    for setting_name in (
+        "account_profit_unload_percentile",
+        "account_profit_unload_fraction",
+        "account_profit_unload_drawdown_fraction",
+        "account_profit_unload_peak_drawdown_fraction",
+        "account_averaging_percentile",
+        "account_averaging_near_trough_fraction",
+        "account_averaging_falling_guard_fraction",
+        "account_averaging_budget_scale",
+    ):
+        value = getattr(profile.strategy, setting_name)
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"{profile.name}.STRATEGY.{setting_name} must be between 0 and 1")
 
 
 def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfile:
@@ -860,6 +904,23 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_exit_runner_activation_markup=_env_float("EMA_EXIT_RUNNER_ACTIVATION_MARKUP", 0.020, profile=name),
         ema_exit_runner_trailing_pullback=_env_float("EMA_EXIT_RUNNER_TRAILING_PULLBACK", 0.010, profile=name),
         ema_exit_runner_take_profit_markup=_env_float("EMA_EXIT_RUNNER_TAKE_PROFIT_MARKUP", 0.050, profile=name),
+        ema_exit_trailing_enabled=_env_bool("EMA_EXIT_TRAILING_ENABLED", True, profile=name),
+        ema_exit_trailing_fixed_fraction=_env_float("EMA_EXIT_TRAILING_FIXED_FRACTION", 0.35, profile=name),
+        ema_exit_trailing_activation_markup=_env_float(
+            "EMA_EXIT_TRAILING_ACTIVATION_MARKUP",
+            _env_float("EMA_EXIT_RUNNER_ACTIVATION_MARKUP", 0.020, profile=name),
+            profile=name,
+        ),
+        ema_exit_trailing_pullback=_env_float(
+            "EMA_EXIT_TRAILING_PULLBACK",
+            _env_float("EMA_EXIT_RUNNER_TRAILING_PULLBACK", 0.010, profile=name),
+            profile=name,
+        ),
+        ema_exit_trailing_take_profit_markup=_env_float(
+            "EMA_EXIT_TRAILING_TAKE_PROFIT_MARKUP",
+            _env_float("EMA_EXIT_RUNNER_TAKE_PROFIT_MARKUP", 0.050, profile=name),
+            profile=name,
+        ),
         ema_averaging_enabled=_env_bool("EMA_AVERAGING_ENABLED", True, profile=name),
         ema_averaging_drawdown_step=_env_float("EMA_AVERAGING_DRAWDOWN_STEP", 0.02, profile=name),
         ema_averaging_position_fraction=_env_float(
@@ -874,6 +935,30 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ),
         ema_averaging_power=_env_float("EMA_AVERAGING_POWER", 0.80, profile=name),
         ema_averaging_interval_hours=_env_float("EMA_AVERAGING_INTERVAL_HOURS", 8.0, profile=name),
+        ema_max_averaging_stages=_env_int("EMA_MAX_AVERAGING_STAGES", 5, profile=name),
+        account_pnl_enabled=_env_bool("ACCOUNT_PNL_ENABLED", True, profile=name),
+        account_pnl_window_minutes=_env_float("ACCOUNT_PNL_WINDOW_MINUTES", 360.0, profile=name),
+        account_pnl_sample_interval_sec=_env_float("ACCOUNT_PNL_SAMPLE_INTERVAL_SEC", 30.0, profile=name),
+        account_profit_unload_enabled=_env_bool("ACCOUNT_PROFIT_UNLOAD_ENABLED", True, profile=name),
+        account_profit_unload_min_pnl_quote=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_PNL_QUOTE", 5.0, profile=name),
+        account_profit_unload_min_pnl_rate=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_PNL_RATE", 0.002, profile=name),
+        account_profit_unload_percentile=_env_float("ACCOUNT_PROFIT_UNLOAD_PERCENTILE", 0.75, profile=name),
+        account_profit_unload_fraction=_env_float("ACCOUNT_PROFIT_UNLOAD_FRACTION", 0.25, profile=name),
+        account_profit_unload_drawdown_fraction=_env_float("ACCOUNT_PROFIT_UNLOAD_DRAWDOWN_FRACTION", 0.50, profile=name),
+        account_profit_unload_peak_drawdown_fraction=_env_float("ACCOUNT_PROFIT_UNLOAD_PEAK_DRAWDOWN_FRACTION", 0.25, profile=name),
+        account_profit_unload_full_pnl_quote=_env_float("ACCOUNT_PROFIT_UNLOAD_FULL_PNL_QUOTE", 0.0, profile=name),
+        account_profit_unload_min_position_pnl_quote=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_POSITION_PNL_QUOTE", 0.50, profile=name),
+        account_profit_unload_min_position_pnl_rate=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_POSITION_PNL_RATE", 0.001, profile=name),
+        account_profit_unload_cooldown_sec=_env_float("ACCOUNT_PROFIT_UNLOAD_COOLDOWN_SEC", 300.0, profile=name),
+        account_averaging_enabled=_env_bool("ACCOUNT_AVERAGING_ENABLED", True, profile=name),
+        account_averaging_min_samples=_env_int("ACCOUNT_AVERAGING_MIN_SAMPLES", 6, profile=name),
+        account_averaging_percentile=_env_float("ACCOUNT_AVERAGING_PERCENTILE", 0.25, profile=name),
+        account_averaging_near_trough_quote=_env_float("ACCOUNT_AVERAGING_NEAR_TROUGH_QUOTE", 3.0, profile=name),
+        account_averaging_near_trough_fraction=_env_float("ACCOUNT_AVERAGING_NEAR_TROUGH_FRACTION", 0.10, profile=name),
+        account_averaging_bounce_quote=_env_float("ACCOUNT_AVERAGING_BOUNCE_QUOTE", 1.0, profile=name),
+        account_averaging_falling_guard_quote=_env_float("ACCOUNT_AVERAGING_FALLING_GUARD_QUOTE", 1.0, profile=name),
+        account_averaging_falling_guard_fraction=_env_float("ACCOUNT_AVERAGING_FALLING_GUARD_FRACTION", 0.05, profile=name),
+        account_averaging_budget_scale=_env_float("ACCOUNT_AVERAGING_BUDGET_SCALE", 0.50, profile=name),
         ema_max_averaging_stages=_env_int("EMA_MAX_AVERAGING_STAGES", 2, profile=name),
         ema_breakeven_enabled=_env_bool("EMA_BREAKEVEN_ENABLED", True, profile=name),
         ema_breakeven_after_hours=_env_float("EMA_BREAKEVEN_AFTER_HOURS", 48.0, profile=name),
@@ -1060,6 +1145,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         csv_log_file=_path(name, f"bot_futures{'_short' if name == 'short' else ''}_trades.csv"),
         macro_csv_file=_path(name, "bot_futures_macro.csv"),
         external_price_csv_file=_path(name, "external_price_feed.csv"),
+        account_pnl_csv_file=_path(name, "account_pnl.csv"),
         signal_analytics_csv_file=_path(name, "signal_analytics.csv"),
         signal_analytics_jsonl_file=_path(name, "signal_analytics.jsonl"),
         diagnostics_csv_file=_path(name, "diagnostics.csv"),

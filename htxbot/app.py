@@ -55,6 +55,11 @@ class HtxFuturesBot(
         "spread_bps_zscore", "htx_change_30s_bps", "mexc_change_30s_bps",
         "htx_change_1m_bps", "mexc_change_1m_bps", "age_ms", "reason",
     ]
+    ACCOUNT_PNL_CSV_HEADER = [
+        "ts", "profile", "open_pnl", "unrealized_pnl", "realized_open_pnl",
+        "open_notional", "open_pnl_rate", "position_count", "history_samples",
+        "min_open_pnl", "p25_open_pnl", "median_open_pnl", "p75_open_pnl",
+        "max_open_pnl", "previous_open_pnl", "delta_open_pnl", "reason",
     SIGNAL_ANALYTICS_CSV_HEADER = [
         "ts", "profile", "symbol", "side", "signal_id", "signal_ts",
         "strategy_name", "valid", "entry_valid", "add_valid", "decision",
@@ -88,6 +93,7 @@ class HtxFuturesBot(
                 self.markets_cache_path = self.state_path.with_name(f"{self.state_path.stem}_markets_cache.json")
             self.csv_path = Path(config.MONITORING.csv_log_file)
             self.cycle_stats_path = Path(config.MONITORING.cycle_stats_csv_file)
+            self.account_pnl_csv_path = Path(config.MONITORING.account_pnl_csv_file)
             self.macro_csv_path = Path(config.MONITORING.macro_csv_file)
             self.external_price_csv_path = Path(config.MONITORING.external_price_csv_file)
             self.signal_analytics_csv_path = Path(config.MONITORING.signal_analytics_csv_file)
@@ -139,6 +145,15 @@ class HtxFuturesBot(
             }
             self.entry_symbols = set()
 
+            self._ensure_csv_file()
+            self._ensure_cycle_stats_file()
+            self.macro_csv_path = Path(config.MONITORING.macro_csv_file)
+            self.external_price_csv_path = Path(config.MONITORING.external_price_csv_file)
+            self._ensure_macro_csv_file()
+            self._ensure_external_price_csv_file()
+            self._ensure_account_pnl_csv_file()
+            self.account_pnl_runtime = {"history": [], "last_sample_at": 0.0}
+            self.account_pnl_bots = [self]
             self._record_config_warnings()
 
     def run(self):

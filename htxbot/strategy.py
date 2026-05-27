@@ -2,7 +2,7 @@
 
 import csv
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import config
 
@@ -50,6 +50,136 @@ class StrategyMixin:
 
     def _position_notional(self, symbol: str, state: TradeState) -> float:
         return self._contracts_to_notional(symbol, state.position_size, state.entry_price)
+
+    def _quantile(self, values: List[float], percentile: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return ordered[0]
+        q = self._clamp(percentile, 0.0, 1.0)
+        raw_index = (len(ordered) - 1) * q
+        lower = int(raw_index)
+        upper = min(len(ordered) - 1, lower + 1)
+        if lower == upper:
+            return ordered[lower]
+        weight = raw_index - lower
+        return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+    def _account_pnl_runtime(self) -> dict:
+        runtime = getattr(self, "account_pnl_runtime", None)
+        if not isinstance(runtime, dict):
+            runtime = {"history": [], "last_sample_at": 0.0}
+            self.account_pnl_runtime = runtime
+        runtime.setdefault("history", [])
+        runtime.setdefault("last_sample_at", 0.0)
+        return runtime
+
+    def _account_pnl_bots(self) -> List[object]:
+        bots = getattr(self, "account_pnl_bots", None)
+        if not bots:
+            return [self]
+        return list(bots)
+
+    def _account_position_rows(self) -> List[dict]:
+        rows: List[dict] = []
+        for bot in self._account_pnl_bots():
+            states = getattr(bot, "states", {}) or {}
+            for symbol, state in states.items():
+                if state.position_size <= 0 or state.entry_price <= 0:
+                    continue
+                try:
+                    notional = bot._position_notional(symbol, state)
+                except Exception:
+                    notional = 0.0
+                realized = self._safe_float(getattr(state, "realized_pnl", 0.0), 0.0)
+                unrealized = self._safe_float(getattr(state, "unrealized_pnl", 0.0), 0.0)
+                net = self._safe_float(getattr(state, "net_open_pnl", realized + unrealized), realized + unrealized)
+                rows.append(
+                    {
+                        "profile": getattr(bot, "profile_name", ""),
+                        "symbol": symbol,
+                        "state": state,
+                        "notional": notional,
+                        "realized_pnl": realized,
+                        "unrealized_pnl": unrealized,
+                        "net_open_pnl": net,
+                    }
+                )
+        return rows
+
+    def _account_pnl_context(self, reason: str = "sample", force_sample: bool = False) -> Dict[str, object]:
+        strategy = config.STRATEGY
+        now = time.time()
+        rows = self._account_position_rows()
+        open_pnl = sum(self._safe_float(row.get("net_open_pnl"), 0.0) for row in rows)
+        unrealized = sum(self._safe_float(row.get("unrealized_pnl"), 0.0) for row in rows)
+        realized_open = sum(self._safe_float(row.get("realized_pnl"), 0.0) for row in rows)
+        open_notional = sum(max(0.0, self._safe_float(row.get("notional"), 0.0)) for row in rows)
+        runtime = self._account_pnl_runtime()
+        history = runtime.get("history")
+        if not isinstance(history, list):
+            history = []
+            runtime["history"] = history
+
+        window_sec = max(0.0, self._safe_float(strategy.account_pnl_window_minutes, 0.0)) * 60.0
+        if window_sec > 0:
+            cutoff = now - window_sec
+            history[:] = [item for item in history if self._safe_float(item.get("ts"), 0.0) >= cutoff]
+
+        sample_interval = max(0.0, self._safe_float(strategy.account_pnl_sample_interval_sec, 0.0))
+        last_sample_at = self._safe_float(runtime.get("last_sample_at"), 0.0)
+        should_sample = bool(strategy.account_pnl_enabled) and (
+            force_sample or not history or sample_interval <= 0 or now - last_sample_at >= sample_interval
+        )
+        if should_sample:
+            history.append(
+                {
+                    "ts": now,
+                    "open_pnl": open_pnl,
+                    "unrealized_pnl": unrealized,
+                    "realized_open_pnl": realized_open,
+                    "open_notional": open_notional,
+                    "position_count": len(rows),
+                }
+            )
+            runtime["last_sample_at"] = now
+
+        values = [self._safe_float(item.get("open_pnl"), 0.0) for item in history]
+        previous = values[-2] if len(values) >= 2 else 0.0
+        delta = open_pnl - previous if len(values) >= 2 else 0.0
+        context: Dict[str, object] = {
+            "ts": now,
+            "positions": rows,
+            "open_pnl": open_pnl,
+            "unrealized_pnl": unrealized,
+            "realized_open_pnl": realized_open,
+            "open_notional": open_notional,
+            "open_pnl_rate": open_pnl / open_notional if open_notional > 0 else 0.0,
+            "position_count": len(rows),
+            "history_samples": len(values),
+            "history_values": values,
+            "min_open_pnl": min(values) if values else open_pnl,
+            "p25_open_pnl": self._quantile(values, 0.25) if values else open_pnl,
+            "median_open_pnl": self._quantile(values, 0.50) if values else open_pnl,
+            "p75_open_pnl": self._quantile(values, 0.75) if values else open_pnl,
+            "max_open_pnl": max(values) if values else open_pnl,
+            "previous_open_pnl": previous,
+            "delta_open_pnl": delta,
+            "reason": reason,
+        }
+        if should_sample:
+            context["history_samples"] = len(history)
+            append_account = getattr(self, "_append_account_pnl_csv", None)
+            if append_account:
+                append_account(context)
+        return context
+
+    def _position_pnl_rate(self, symbol: str, state: TradeState) -> float:
+        notional = self._position_notional(symbol, state)
+        if notional <= 0:
+            return 0.0
+        return self._safe_float(state.net_open_pnl, 0.0) / notional
 
     def _is_dust_position(self, symbol: str, state: TradeState) -> bool:
         threshold = max(0.0, config.RISK.dust_position_notional)
@@ -274,6 +404,214 @@ class StrategyMixin:
             reason_detail=detail,
             event_prefix="tiny_entry_close",
             open_orders=open_orders,
+        )
+
+    def _aggressive_exit_limit_price(self, symbol: str) -> float:
+        reference_price, last_price = self._fetch_reference_price(symbol)
+        price = reference_price or last_price
+        if price <= 0:
+            return 0.0
+        if config.EXIT_SIDE == "sell":
+            return self._price_at_or_below(symbol, price)
+        return self._price_at_or_above(symbol, price)
+
+    def _place_account_reduce_only_close(
+        self,
+        symbol: str,
+        fraction: float,
+        reason: str,
+    ) -> bool:
+        state = self._get_state(symbol)
+        if state.position_size <= 0 or state.entry_price <= 0:
+            return False
+        if not config.RUNTIME.reduce_only_enabled:
+            self._log_event(
+                "ERROR",
+                f"Account unload blocked for {symbol}: reduce-only disabled",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"{reason};account_unload_reduce_only_disabled",
+            )
+            return True
+
+        had_sell_ladder = bool(state.sell_ladder_orders)
+        if state.entry_orders:
+            self._cancel_entry_orders(symbol, reason="account_profit_unload")
+        if state.sell_ladder_orders:
+            self._cancel_sell_orders(symbol, reason="account_profit_unload")
+        state = self._get_state(symbol)
+        if state.entry_orders or state.sell_ladder_orders:
+            self._log_event(
+                "WARNING",
+                f"Account unload delayed for {symbol}: tracked order cancel failed",
+                event="account_profit_unload_skipped",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"{reason};account_unload_cancel_failed",
+            )
+            return True
+
+        closeable = self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder)
+        requested = state.position_size * self._clamp(fraction, 0.0, 1.0)
+        contracts = self._amount_to_precision(symbol, min(max(0.0, requested), max(0.0, closeable), state.position_size))
+        if contracts <= 0:
+            self._log_event(
+                "WARNING",
+                f"Account unload skipped for {symbol}: close amount below exchange minimum",
+                event="account_profit_unload_skipped",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"{reason};account_unload_amount_below_minimum;fraction={fraction:.5f}",
+            )
+            return True
+
+        price = self._aggressive_exit_limit_price(symbol)
+        if price <= 0:
+            self._log_event(
+                "WARNING",
+                f"Account unload skipped for {symbol}: reference price unavailable",
+                event="account_profit_unload_skipped",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                amount=contracts,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"{reason};account_unload_price_unavailable",
+            )
+            return True
+
+        created_at = time.time()
+        order_id = f"dry_{config.EXIT_SIDE}_{symbol}_{int(created_at)}_account_unload"
+        if not config.RUNTIME.dry_run:
+            try:
+                order = self._create_one_way_order(
+                    symbol=symbol,
+                    order_type="limit",
+                    side=config.EXIT_SIDE,
+                    amount=contracts,
+                    price=price,
+                    reduce_only=True,
+                )
+                order_id = str(order.get("id"))
+            except Exception as exc:
+                self._log_event(
+                    "ERROR",
+                    f"Account unload reduce-only order failed for {symbol}: {exc}",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=config.EXIT_SIDE,
+                    price=price,
+                    amount=contracts,
+                    position_size=state.position_size,
+                    entry_price=state.entry_price,
+                    reason=f"{reason};account_unload_order_rejected",
+                )
+                return True
+
+        ref = {
+            "id": order_id,
+            "side": config.EXIT_SIDE,
+            "price": price,
+            "amount": contracts,
+            "created_at": created_at,
+            "stage": 1,
+            "mode": "account_unload",
+            "account_unload": True,
+            "reason": reason,
+        }
+        state.sell_ladder_orders = [ref]
+        state.sell_ladder_mode = "account_unload"
+        state.sell_ladder_signature = self._sell_ladder_signature("account_unload", symbol, state)
+        state.last_account_unload_at = created_at
+        state.account_unload_count = int(self._safe_float(state.account_unload_count, 0.0)) + 1
+        state.frozen_no_more_buys = True
+        self._refresh_active_side(state)
+        self._save_state()
+        self._log_event(
+            "INFO",
+            f"Account profit unload placed for {symbol}: contracts={contracts} price={price}",
+            event="account_profit_unload_planned" if config.RUNTIME.dry_run else "account_profit_unload_placed",
+            symbol=symbol,
+            side=config.EXIT_SIDE,
+            order_id=order_id,
+            price=price,
+            amount=contracts,
+            position_size=state.position_size,
+            entry_price=state.entry_price,
+            reason=f"{reason};fraction={fraction:.5f};position_pnl={state.net_open_pnl:.8f};position_pnl_rate={self._position_pnl_rate(symbol, state):.6f}",
+        )
+        return True
+
+    def _maybe_apply_account_profit_unload(self, symbol: str, signal: Optional[dict] = None) -> bool:
+        strategy = config.STRATEGY
+        if not (strategy.account_pnl_enabled and strategy.account_profit_unload_enabled):
+            return False
+        state = self._get_state(symbol)
+        if state.position_size <= 0 or state.entry_price <= 0:
+            return False
+        if state.sell_ladder_mode == "account_unload" and not state.sell_ladder_orders:
+            state.sell_ladder_mode = "normal"
+            state.sell_ladder_signature = ""
+            self._save_state()
+        if state.sell_ladder_mode not in {"normal", "account_unload"}:
+            return False
+
+        cooldown = max(0.0, strategy.account_profit_unload_cooldown_sec)
+        last_unload_at = self._safe_float(state.last_account_unload_at, 0.0)
+        if last_unload_at > 0 and cooldown > 0 and time.time() - last_unload_at < cooldown:
+            return False
+
+        context = self._account_pnl_context(reason="account_profit_unload")
+        account_pnl = self._safe_float(context.get("open_pnl"), 0.0)
+        account_notional = self._safe_float(context.get("open_notional"), 0.0)
+        if account_pnl <= 0 or account_notional <= 0:
+            return False
+
+        history_values = list(context.get("history_values") or [])
+        percentile_threshold = self._quantile(
+            history_values,
+            self._clamp(strategy.account_profit_unload_percentile, 0.0, 1.0),
+        ) if history_values else account_pnl
+        quote_threshold = max(0.0, strategy.account_profit_unload_min_pnl_quote)
+        rate_threshold = account_notional * max(0.0, strategy.account_profit_unload_min_pnl_rate)
+        trigger_threshold = max(quote_threshold, rate_threshold, percentile_threshold)
+        if account_pnl + 1e-12 < trigger_threshold:
+            return False
+
+        position_pnl = self._safe_float(state.net_open_pnl, 0.0)
+        position_rate = self._position_pnl_rate(symbol, state)
+        if position_pnl < max(0.0, strategy.account_profit_unload_min_position_pnl_quote):
+            return False
+        if position_rate < max(0.0, strategy.account_profit_unload_min_position_pnl_rate):
+            return False
+
+        fraction = self._clamp(strategy.account_profit_unload_fraction, 0.0, 1.0)
+        peak = self._safe_float(context.get("max_open_pnl"), account_pnl)
+        drawdown = max(0.0, peak - account_pnl)
+        peak_drawdown_fraction = max(0.0, strategy.account_profit_unload_peak_drawdown_fraction)
+        if peak > 0 and peak_drawdown_fraction > 0 and drawdown >= peak * peak_drawdown_fraction:
+            fraction = max(fraction, self._clamp(strategy.account_profit_unload_drawdown_fraction, 0.0, 1.0))
+        full_threshold = max(0.0, strategy.account_profit_unload_full_pnl_quote)
+        if full_threshold > 0 and account_pnl >= full_threshold:
+            fraction = 1.0
+        if fraction <= 0:
+            return False
+
+        return self._place_account_reduce_only_close(
+            symbol,
+            fraction=fraction,
+            reason=(
+                f"account_profit_unload;account_pnl={account_pnl:.8f};"
+                f"threshold={trigger_threshold:.8f};pctl={percentile_threshold:.8f};"
+                f"peak={peak:.8f};drawdown={drawdown:.8f}"
+            ),
         )
 
     def _risk_budget(
@@ -668,7 +1006,7 @@ class StrategyMixin:
         return mode == "breakeven"
 
     def _is_managed_exit_mode(self, mode: str) -> bool:
-        return self._is_time_exit_mode(mode)
+        return self._is_time_exit_mode(mode) or mode in {"account_unload", "controlled_loss_exit", "urgent_time_exit"}
 
     def _position_initial_notional(self, symbol: str, state: Optional[TradeState], fallback_contracts: float, fallback_price: float) -> float:
         if not state:
@@ -763,6 +1101,10 @@ class StrategyMixin:
             context["ladder_name"] = "breakeven"
             return steps, context
 
+        if mode == "account_unload":
+            context["ladder_name"] = "account_unload"
+            return [{"fraction": 1.0, "markup": 0.0, "runner": False}], context
+
         if mode != "normal" or not strategy.ema_adaptive_exit_enabled:
             fractions = tuple(strategy.ema_exit_ladder_fractions)
             markups = self._sell_ladder_markups(mode)
@@ -810,6 +1152,20 @@ class StrategyMixin:
 
         fixed_steps: List[dict] = []
         runner_fraction = 0.0
+        if strategy.ema_exit_trailing_enabled and runner_allowed:
+            fixed_fraction = self._clamp(strategy.ema_exit_trailing_fixed_fraction, 0.0, 1.0)
+            fixed_markup = max(0.0, markups[0] if markups else strategy.ema_take_profit_markup)
+            if first_cap_after > 0 and first_markup_cap > 0 and age_hours >= first_cap_after:
+                fixed_markup = min(fixed_markup, first_markup_cap)
+            fixed_steps.append({"fraction": fixed_fraction, "markup": fixed_markup, "runner": False})
+            runner_fraction = max(0.0, 1.0 - fixed_fraction)
+            if runner_fraction > 0:
+                fixed_steps.append({"fraction": runner_fraction, "markup": 0.0, "runner": True})
+                context["runner_enabled"] = True
+                context["runner_fraction"] = runner_fraction
+                context["trailing_exit"] = True
+            return self._merge_exit_ladder_steps(fixed_steps), context
+
         for index, (fraction, markup) in enumerate(zip(fractions, markups)):
             fraction = max(0.0, fraction)
             markup = max(0.0, markup)
@@ -947,6 +1303,11 @@ class StrategyMixin:
             f"adaptive={int(strategy.ema_adaptive_exit_enabled)}|"
             f"ratio={plan_context.get('position_ratio', 1.0):.4f}|"
             f"runner={int(plan_context.get('runner_enabled', False))}|"
+            f"trailing={int(strategy.ema_exit_trailing_enabled)}:"
+            f"{strategy.ema_exit_trailing_fixed_fraction:.8f}:"
+            f"{strategy.ema_exit_trailing_activation_markup:.8f}:"
+            f"{strategy.ema_exit_trailing_pullback:.8f}:"
+            f"{strategy.ema_exit_trailing_take_profit_markup:.8f}|"
             f"external_spread={plan_context.get('external_spread_bps', 0.0):.4f}|"
             f"tp={strategy.ema_take_profit_markup:.8f}|"
             f"breakeven_after={strategy.ema_breakeven_after_hours:.4f}|"
@@ -3263,7 +3624,12 @@ class StrategyMixin:
         if current_price <= 0:
             return False
 
-        activation = max(0.0, strategy.ema_exit_runner_activation_markup)
+        activation = max(
+            0.0,
+            strategy.ema_exit_trailing_activation_markup
+            if strategy.ema_exit_trailing_enabled
+            else strategy.ema_exit_runner_activation_markup,
+        )
         if config.POSITION_SIDE == "short":
             activation_reached = current_price <= state.entry_price * (1 - activation)
         else:
@@ -3291,8 +3657,18 @@ class StrategyMixin:
                 reason=f"runner_activation;ladder={plan_context.get('ladder_name', 'normal')}",
             )
 
-        pullback = max(0.0, strategy.ema_exit_runner_trailing_pullback)
-        take_profit = max(0.0, strategy.ema_exit_runner_take_profit_markup)
+        pullback = max(
+            0.0,
+            strategy.ema_exit_trailing_pullback
+            if strategy.ema_exit_trailing_enabled
+            else strategy.ema_exit_runner_trailing_pullback,
+        )
+        take_profit = max(
+            0.0,
+            strategy.ema_exit_trailing_take_profit_markup
+            if strategy.ema_exit_trailing_enabled
+            else strategy.ema_exit_runner_take_profit_markup,
+        )
         close_reason = ""
         if config.POSITION_SIDE == "short":
             previous_bottom = state.exit_runner_bottom_price or current_price
@@ -3353,7 +3729,13 @@ class StrategyMixin:
         budget_fraction = fractions[index]
         return index + 2, drawdown_threshold, budget_fraction
 
-    def _ema_averaging_budget(self, symbol: str, state: TradeState, reference_price: float) -> Tuple[float, str]:
+    def _ema_averaging_budget(
+        self,
+        symbol: str,
+        state: TradeState,
+        reference_price: float,
+        budget_scale: float = 1.0,
+    ) -> Tuple[float, str]:
         account = self._account_snapshot()
         free = account["free"]
         equity = account["total"] or free
@@ -3363,6 +3745,13 @@ class StrategyMixin:
         available_after_reserve = max(0.0, free - config.RISK.min_quote_reserve)
         leverage = max(float(config.RISK.leverage), 1.0)
         current_position_notional = self._position_notional(symbol, state)
+        effective_scale = max(0.0, budget_scale)
+        desired_margin = (
+            (current_position_notional / leverage)
+            * max(0.0, config.STRATEGY.ema_averaging_position_fraction)
+            * effective_scale
+        )
+        desired_notional = desired_margin * leverage
         base_notional = self._safe_float(state.initial_entry_notional, 0.0)
         if base_notional <= 0:
             base_notional = self._contracts_to_notional(symbol, state.base_entry_amount, state.base_entry_price)
@@ -3398,6 +3787,69 @@ class StrategyMixin:
         if contracts <= 0:
             return 0.0, "order_size_below_exchange_minimum"
         return planned_margin, (
+            f"ok:ema_average_position_fraction={config.STRATEGY.ema_averaging_position_fraction:.3f};"
+            f"account_budget_scale={effective_scale:.3f};"
+            f"desired_margin={desired_margin:.8f};planned_margin={planned_margin:.8f}"
+        )
+
+    def _account_averaging_block_reason(
+        self,
+        symbol: str,
+        state: TradeState,
+        signal: Optional[dict],
+    ) -> str:
+        strategy = config.STRATEGY
+        if not (strategy.account_pnl_enabled and strategy.account_averaging_enabled):
+            return ""
+        if signal and self._trigger_ema_broken_against_position(signal):
+            return "account_averaging_falling_trend_trigger_broken"
+        if signal and signal.get("btc_entry_valid") is False:
+            return "account_averaging_btc_guard"
+
+        context = self._account_pnl_context(reason="account_averaging")
+        samples = int(context.get("history_samples") or 0)
+        min_samples = max(1, int(strategy.account_averaging_min_samples))
+        if samples < min_samples:
+            return ""
+
+        current = self._safe_float(context.get("open_pnl"), 0.0)
+        trough = self._safe_float(context.get("min_open_pnl"), current)
+        percentile = self._quantile(
+            list(context.get("history_values") or []),
+            self._clamp(strategy.account_averaging_percentile, 0.0, 1.0),
+        )
+        trough_band = max(
+            0.0,
+            strategy.account_averaging_near_trough_quote,
+            abs(trough) * max(0.0, strategy.account_averaging_near_trough_fraction),
+        )
+        allowed_ceiling = max(trough + trough_band, percentile)
+        if current > allowed_ceiling + 1e-12:
+            return (
+                "account_averaging_not_near_trough;"
+                f"account_pnl={current:.8f};allowed={allowed_ceiling:.8f};trough={trough:.8f};pctl={percentile:.8f}"
+            )
+
+        previous = self._safe_float(context.get("previous_open_pnl"), current)
+        delta = self._safe_float(context.get("delta_open_pnl"), 0.0)
+        falling_guard = max(
+            0.0,
+            strategy.account_averaging_falling_guard_quote,
+            abs(current) * max(0.0, strategy.account_averaging_falling_guard_fraction),
+        )
+        if previous and delta < -falling_guard:
+            return (
+                "account_averaging_falling_account_pnl;"
+                f"delta={delta:.8f};guard={falling_guard:.8f};account_pnl={current:.8f}"
+            )
+
+        bounce_quote = max(0.0, strategy.account_averaging_bounce_quote)
+        if bounce_quote > 0 and current < trough + bounce_quote and delta < 0:
+            return (
+                "account_averaging_waiting_for_bounce;"
+                f"account_pnl={current:.8f};trough={trough:.8f};bounce={bounce_quote:.8f};delta={delta:.8f}"
+            )
+        return ""
             f"ok:ema_average_base_fraction={base_fraction:.3f};"
             f"ema_average_power={power:.3f};"
             f"base_notional={base_notional:.8f};"
@@ -3461,6 +3913,19 @@ class StrategyMixin:
                 context={"macro_context": macro_context},
             )
             self._log_macro_action_blocked("macro_averaging_blocked", symbol, signal, macro_context)
+            return
+
+        account_block_reason = self._account_averaging_block_reason(symbol, state, signal)
+        if account_block_reason:
+            self._log_event(
+                "DEBUG",
+                f"EMA averaging skipped for {symbol}: {account_block_reason}",
+                event="ema_average_skipped",
+                symbol=symbol,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"account_averaging_blocked:{account_block_reason}",
+            )
             return
 
         if state.average_stage >= max(0, int(strategy.ema_max_averaging_stages)):
@@ -3529,6 +3994,16 @@ class StrategyMixin:
             )
             return
 
+        account_budget_scale = (
+            self._clamp(strategy.account_averaging_budget_scale, 0.0, 1.0)
+            if strategy.account_pnl_enabled and strategy.account_averaging_enabled
+            else 1.0
+        )
+        budget, budget_reason = self._ema_averaging_budget(
+            symbol,
+            state,
+            reference_price,
+            budget_scale=account_budget_scale,
         budget, budget_reason = self._ema_averaging_budget(symbol, state, reference_price)
         self._record_signal_analytics(
             "averaging_checked",
