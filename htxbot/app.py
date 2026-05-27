@@ -55,12 +55,12 @@ class HtxFuturesBot(
         "spread_bps_zscore", "htx_change_30s_bps", "mexc_change_30s_bps",
         "htx_change_1m_bps", "mexc_change_1m_bps", "age_ms", "reason",
     )
-    ]
     ACCOUNT_PNL_CSV_HEADER = [
         "ts", "profile", "open_pnl", "unrealized_pnl", "realized_open_pnl",
         "open_notional", "open_pnl_rate", "position_count", "history_samples",
         "min_open_pnl", "p25_open_pnl", "median_open_pnl", "p75_open_pnl",
         "max_open_pnl", "previous_open_pnl", "delta_open_pnl", "reason",
+    ]
     SIGNAL_ANALYTICS_CSV_HEADER = [
         "ts", "profile", "symbol", "side", "signal_id", "signal_ts",
         "strategy_name", "valid", "entry_valid", "add_valid", "decision",

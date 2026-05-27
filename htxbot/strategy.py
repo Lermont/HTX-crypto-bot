@@ -1080,6 +1080,7 @@ class StrategyMixin:
         avg_entry_price: float,
         mode: str = "normal",
         state: Optional[TradeState] = None,
+        use_trailing_exit: bool = True,
     ) -> Tuple[List[dict], dict]:
         strategy = config.STRATEGY
         if state is None and symbol:
@@ -1152,7 +1153,8 @@ class StrategyMixin:
 
         fixed_steps: List[dict] = []
         runner_fraction = 0.0
-        if strategy.ema_exit_trailing_enabled and runner_allowed:
+        trailing_enabled = bool(strategy.ema_exit_trailing_enabled and use_trailing_exit)
+        if trailing_enabled and runner_allowed:
             fixed_fraction = self._clamp(strategy.ema_exit_trailing_fixed_fraction, 0.0, 1.0)
             fixed_markup = max(0.0, markups[0] if markups else strategy.ema_take_profit_markup)
             if first_cap_after > 0 and first_markup_cap > 0 and age_hours >= first_cap_after:
@@ -1277,6 +1279,7 @@ class StrategyMixin:
         state: Optional[TradeState] = None,
         total_contracts: Optional[float] = None,
         avg_entry_price: Optional[float] = None,
+        use_trailing_exit: bool = True,
     ) -> str:
         if state is None and symbol:
             state = self._get_state(symbol)
@@ -1289,7 +1292,14 @@ class StrategyMixin:
         if avg_entry_price <= 0:
             avg_entry_price = 1.0
 
-        steps, plan_context = self._sell_ladder_plan(symbol, total_contracts, avg_entry_price, mode=mode, state=state)
+        steps, plan_context = self._sell_ladder_plan(
+            symbol,
+            total_contracts,
+            avg_entry_price,
+            mode=mode,
+            state=state,
+            use_trailing_exit=use_trailing_exit,
+        )
         plan = ",".join(
             f"{self._safe_float(step.get('fraction'), 0.0):.8f}@runner"
             if step.get("runner")
@@ -1297,13 +1307,14 @@ class StrategyMixin:
             for step in steps
         )
         strategy = config.STRATEGY
+        trailing_enabled = bool(strategy.ema_exit_trailing_enabled and use_trailing_exit)
         return (
             f"{mode}|strategy=ema_pullback|direction={config.POSITION_SIDE}|exit_side={config.EXIT_SIDE}|"
             f"plan={plan}|ladder={plan_context.get('ladder_name', mode)}|"
             f"adaptive={int(strategy.ema_adaptive_exit_enabled)}|"
             f"ratio={plan_context.get('position_ratio', 1.0):.4f}|"
             f"runner={int(plan_context.get('runner_enabled', False))}|"
-            f"trailing={int(strategy.ema_exit_trailing_enabled)}:"
+            f"trailing={int(trailing_enabled)}:"
             f"{strategy.ema_exit_trailing_fixed_fraction:.8f}:"
             f"{strategy.ema_exit_trailing_activation_markup:.8f}:"
             f"{strategy.ema_exit_trailing_pullback:.8f}:"
@@ -1343,6 +1354,7 @@ class StrategyMixin:
             state,
             total_contracts=base_contracts,
             avg_entry_price=base_price,
+            use_trailing_exit=False,
         )
         recovery_price = self._sell_price_floor(
             symbol,
@@ -1515,6 +1527,7 @@ class StrategyMixin:
         mode: str = "normal",
         exit_scope: Optional[str] = None,
         signature_override: str = "",
+        use_trailing_exit: bool = True,
     ):
         state = self._get_state(symbol)
         exit_side = config.EXIT_SIDE
@@ -1568,7 +1581,14 @@ class StrategyMixin:
         ref_exit_scope = exit_scope or ("base" if mode == "normal" else "position")
         state.sell_ladder_orders = []
         state.sell_ladder_mode = mode
-        steps, plan_context = self._sell_ladder_plan(symbol, total_contracts, avg_entry_price, mode=mode, state=state)
+        steps, plan_context = self._sell_ladder_plan(
+            symbol,
+            total_contracts,
+            avg_entry_price,
+            mode=mode,
+            state=state,
+            use_trailing_exit=use_trailing_exit,
+        )
         allocations, runner_contracts = self._exit_ladder_contract_allocations(symbol, ladder_contracts, steps, state)
         state.sell_ladder_signature = signature_override or self._sell_ladder_signature(
             mode,
@@ -1576,6 +1596,7 @@ class StrategyMixin:
             state,
             total_contracts=total_contracts,
             avg_entry_price=avg_entry_price,
+            use_trailing_exit=use_trailing_exit,
         )
         if plan_context.get("runner_enabled") and runner_contracts > 0:
             state.exit_runner_contracts = runner_contracts
@@ -1999,6 +2020,7 @@ class StrategyMixin:
                 mode=mode,
                 exit_scope="base",
                 signature_override=signature,
+                use_trailing_exit=False,
             )
 
         state = self._get_state(symbol)
@@ -3787,8 +3809,12 @@ class StrategyMixin:
         if contracts <= 0:
             return 0.0, "order_size_below_exchange_minimum"
         return planned_margin, (
-            f"ok:ema_average_position_fraction={config.STRATEGY.ema_averaging_position_fraction:.3f};"
+            f"ok:ema_average_base_fraction={base_fraction:.3f};"
+            f"ema_average_power={power:.3f};"
             f"account_budget_scale={effective_scale:.3f};"
+            f"base_notional={base_notional:.8f};"
+            f"current_notional={current_position_notional:.8f};"
+            f"ratio={ratio:.6f};"
             f"desired_margin={desired_margin:.8f};planned_margin={planned_margin:.8f}"
         )
 
@@ -3850,13 +3876,6 @@ class StrategyMixin:
                 f"account_pnl={current:.8f};trough={trough:.8f};bounce={bounce_quote:.8f};delta={delta:.8f}"
             )
         return ""
-            f"ok:ema_average_base_fraction={base_fraction:.3f};"
-            f"ema_average_power={power:.3f};"
-            f"base_notional={base_notional:.8f};"
-            f"current_notional={current_position_notional:.8f};"
-            f"ratio={ratio:.6f};"
-            f"desired_margin={desired_margin:.8f};planned_margin={planned_margin:.8f}"
-        )
 
     def _ema_averaging_drawdown_threshold(self, stage_index: int) -> float:
         steps = tuple(config.STRATEGY.averaging_drawdown_steps or ())
@@ -4004,7 +4023,7 @@ class StrategyMixin:
             state,
             reference_price,
             budget_scale=account_budget_scale,
-        budget, budget_reason = self._ema_averaging_budget(symbol, state, reference_price)
+        )
         self._record_signal_analytics(
             "averaging_checked",
             symbol=symbol,

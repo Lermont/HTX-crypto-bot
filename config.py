@@ -960,7 +960,6 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         account_averaging_falling_guard_quote=_env_float("ACCOUNT_AVERAGING_FALLING_GUARD_QUOTE", 1.0, profile=name),
         account_averaging_falling_guard_fraction=_env_float("ACCOUNT_AVERAGING_FALLING_GUARD_FRACTION", 0.05, profile=name),
         account_averaging_budget_scale=_env_float("ACCOUNT_AVERAGING_BUDGET_SCALE", 0.50, profile=name),
-        ema_max_averaging_stages=_env_int("EMA_MAX_AVERAGING_STAGES", 2, profile=name),
         ema_breakeven_enabled=_env_bool("EMA_BREAKEVEN_ENABLED", True, profile=name),
         ema_breakeven_after_hours=_env_float("EMA_BREAKEVEN_AFTER_HOURS", 48.0, profile=name),
         ema_breakeven_reprice_minutes=_env_float("EMA_BREAKEVEN_REPRICE_MINUTES", 15.0, profile=name),
