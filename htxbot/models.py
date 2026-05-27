@@ -3,8 +3,6 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
-import config
-
 
 @dataclass
 class TradeState:
@@ -43,6 +41,8 @@ class TradeState:
     remaining_entry_quote: float = 0.0
     remaining_buy_fees_quote: float = 0.0
     net_open_pnl: float = 0.0
+    leverage: float = 0.0
+    margin_mode: str = ""
     base_entry_amount: float = 0.0
     base_entry_quote: float = 0.0
     base_entry_fees_quote: float = 0.0

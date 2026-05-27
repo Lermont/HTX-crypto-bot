@@ -407,6 +407,41 @@ class UnifiedBotTests(unittest.TestCase):
         context.update(overrides)
         return context
 
+    def test_log_event_survives_csv_append_failure(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bot = self.make_bot(Path(raw_tmp))
+            bot.csv_path = Path(raw_tmp) / "csv_path_is_directory"
+            bot.csv_path.mkdir()
+
+            bot._log_event("INFO", "test message", event="test_event", symbol=SYMBOL, reason="test")
+
+            self.assertTrue(getattr(bot, "_csv_log_failed_once", False))
+
+    def test_live_state_save_is_atomic_and_loadable(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, dry_run=False)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 2.0
+                state.entry_price = 10.0
+
+                bot._save_state()
+
+                payload = json.loads(bot.state_path.read_text(encoding="utf-8"))
+                self.assertEqual(payload[SYMBOL]["position_size"], 2.0)
+                self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
+
+    def test_runtime_lock_replaces_stale_lock_and_releases(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bot = self.make_bot(Path(raw_tmp))
+            bot.lock_path.write_text("not-a-pid", encoding="utf-8")
+
+            bot._acquire_runtime_lock()
+
+            self.assertEqual(bot.lock_path.read_text(encoding="utf-8"), str(os.getpid()))
+            bot._release_runtime_lock()
+            self.assertFalse(bot.lock_path.exists())
     def test_structured_signal_analytics_files_and_jsonl_are_written(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -771,6 +806,22 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.entry_orders, [])
                 self.assertGreater(state.cooldown_until, time.time())
 
+    def test_external_price_context_is_cached_within_cycle(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            feed = StaticExternalPriceFeed(self.external_context(spread_bps=0.0))
+            bot.external_price_feed = feed
+
+            first = bot._external_price_context(SYMBOL)
+            second = bot._external_price_context(SYMBOL)
+
+            self.assertEqual(first["spread_bps"], second["spread_bps"])
+            self.assertEqual(len(feed.calls), 1)
+
+            bot._reset_private_caches()
+            bot._external_price_context(SYMBOL)
+
+            self.assertEqual(len(feed.calls), 2)
     def test_external_price_directional_1m_blocks_adverse_long_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, dry_run=True)
@@ -1224,6 +1275,23 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(profile.risk.max_total_notional_fraction, 0.85)
         self.assertEqual(profile.risk.dust_position_notional, 12.0)
         self.assertEqual(profile.risk.tiny_entry_max_notional, 12.0)
+
+    def test_profile_reads_global_htxbot_env_prefix(self):
+        env_keys = ("DRY_RUN", "HTXBOT_DRY_RUN", "ALIAS_DRY_RUN", "HTXBOT_ALIAS_DRY_RUN")
+        previous = {key: os.environ.get(key) for key in env_keys}
+        try:
+            for key in env_keys:
+                os.environ.pop(key, None)
+            os.environ["HTXBOT_DRY_RUN"] = "false"
+            profile = config._make_profile("alias", "long", ("test",))
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertFalse(profile.runtime.dry_run)
 
     def test_entry_ladder_does_not_retry_with_lower_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

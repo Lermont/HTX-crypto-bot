@@ -724,6 +724,12 @@ class MonitoringMixin:
         else:
             log_method = getattr(self.log, str(level).lower(), self.log.info)
         log_method(message)
+        try:
+            self._append_csv(level=level.upper(), event=event, **kwargs)
+        except Exception as exc:
+            if not getattr(self, "_csv_log_failed_once", False):
+                self._csv_log_failed_once = True
+                self.log.warning("Could not append CSV event log: %s", exc)
         self._append_csv(level=level_upper, event=event, **kwargs)
         if level_upper in {"WARNING", "ERROR", "FAULT", "CRITICAL"}:
             severity = "fault" if level_upper in {"FAULT", "CRITICAL"} else level_upper.lower()
