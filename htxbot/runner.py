@@ -182,6 +182,8 @@ class RunnerMixin:
         if state.position_size > 0:
             if not signal_valid:
                 self._freeze_no_more_buys(symbol, reason="signal_invalid_or_missing")
+            if self._maybe_apply_account_profit_unload(symbol, signal):
+                return
             time_exit_applied = self._maybe_apply_time_based_exit(symbol, signal)
             if not time_exit_applied:
                 self._maybe_manage_exit_runner(symbol, signal)

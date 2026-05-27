@@ -54,6 +54,12 @@ class HtxFuturesBot(
         "spread_bps_zscore", "htx_change_30s_bps", "mexc_change_30s_bps",
         "htx_change_1m_bps", "mexc_change_1m_bps", "age_ms", "reason",
     ]
+    ACCOUNT_PNL_CSV_HEADER = [
+        "ts", "profile", "open_pnl", "unrealized_pnl", "realized_open_pnl",
+        "open_notional", "open_pnl_rate", "position_count", "history_samples",
+        "min_open_pnl", "p25_open_pnl", "median_open_pnl", "p75_open_pnl",
+        "max_open_pnl", "previous_open_pnl", "delta_open_pnl", "reason",
+    ]
 
     def __init__(self, profile=None, exchange=None, external_price_feed=None):
         self.profile = config.resolve_profile(profile)
@@ -71,6 +77,7 @@ class HtxFuturesBot(
                 self.markets_cache_path = self.state_path.with_name(f"{self.state_path.stem}_markets_cache.json")
             self.csv_path = Path(config.MONITORING.csv_log_file)
             self.cycle_stats_path = Path(config.MONITORING.cycle_stats_csv_file)
+            self.account_pnl_csv_path = Path(config.MONITORING.account_pnl_csv_file)
             self.timeframe_sec = self._timeframe_to_seconds(config.SIGNALS.timeframe)
             self.states = self._load_state()
             self.symbols: List[str] = []
@@ -116,6 +123,9 @@ class HtxFuturesBot(
             self.external_price_csv_path = Path(config.MONITORING.external_price_csv_file)
             self._ensure_macro_csv_file()
             self._ensure_external_price_csv_file()
+            self._ensure_account_pnl_csv_file()
+            self.account_pnl_runtime = {"history": [], "last_sample_at": 0.0}
+            self.account_pnl_bots = [self]
 
     def run(self):
         profile = getattr(self, "profile", None) or config.current_profile()

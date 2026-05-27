@@ -20,6 +20,7 @@ class CombinedHtxFuturesBot:
         self.bots: List[HtxFuturesBot] = []
         shared_exchange = None
         shared_external_price_feeds: Dict[config.ExternalPriceFeedSettings, object] = {}
+        shared_account_pnl_runtime = {"history": [], "last_sample_at": 0.0}
         for profile in self.profiles:
             feed_settings = profile.external_price_feed
             shared_external_price_feed = shared_external_price_feeds.get(feed_settings)
@@ -30,7 +31,10 @@ class CombinedHtxFuturesBot:
             shared_external_price_feeds.setdefault(feed_settings, bot.external_price_feed)
             bot.skip_futures_account_setup = bool(self.bots)
             bot.skip_live_balance_log = bool(self.bots)
+            bot.account_pnl_runtime = shared_account_pnl_runtime
             self.bots.append(bot)
+        for bot in self.bots:
+            bot.account_pnl_bots = list(self.bots)
 
     def setup(self):
         for bot in self.bots:
