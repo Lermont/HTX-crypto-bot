@@ -24,6 +24,16 @@ class StateMixin:
         except Exception as exc:
             logger = getattr(self, "log", logging.getLogger(__name__))
             logger.warning("Could not read futures state; starting with empty state: %s", exc)
+            record_diagnostic = getattr(self, "_record_diagnostic", None)
+            if record_diagnostic:
+                record_diagnostic(
+                    "fault",
+                    "state",
+                    "state_load_failed",
+                    f"Could not read futures state; starting with empty state: {exc}",
+                    reason="state_load_failed",
+                    exception=exc,
+                )
             return {}
 
         known_fields = {item.name for item in fields(TradeState)}
@@ -48,6 +58,7 @@ class StateMixin:
                 self._refresh_net_open_pnl(state)
             else:
                 self._recalculate_proportional_pnl_from_totals(state)
+            self._ensure_entry_buckets_initialized(symbol, state)
             result[symbol] = state
         return result
 
@@ -159,6 +170,7 @@ class StateMixin:
         if state.position_size <= 0 or self._safe_float(state.leverage, 0.0) <= 0:
             state.leverage = config.RISK.leverage
         state.margin_mode = config.RISK.margin_mode
+        self._ensure_entry_buckets_initialized(symbol, state)
         return state
 
     def _reset_state(self, symbol: str, preserve_cooldown: Optional[float] = None):
@@ -504,6 +516,10 @@ class StateMixin:
             "fee_quote": delta_fee,
             "fee_currency": snapshot.get("fee_currency") or config.EXCHANGE.quote_currency,
             "source": snapshot.get("source") or "exchange",
+            "operation_id": ref.get("operation_id", ""),
+            "cycle_id": ref.get("cycle_id", ""),
+            "ref_reason": ref.get("reason", ""),
+            "exit_scope": ref.get("exit_scope", ""),
         }
 
     def _scale_fill_details(self, symbol: str, details: List[dict], expected_contracts: float) -> List[dict]:
@@ -593,6 +609,178 @@ class StateMixin:
         state.remaining_buy_fees_quote = max(0.0, self._safe_float(state.remaining_buy_fees_quote, 0.0))
         state.net_open_pnl = self._safe_float(state.realized_pnl, 0.0) + self._safe_float(state.unrealized_pnl, 0.0)
 
+    def _entry_bucket_total_amount(self, state: TradeState) -> float:
+        return (
+            self._safe_float(getattr(state, "base_entry_amount", 0.0), 0.0)
+            + self._safe_float(getattr(state, "averaging_entry_amount", 0.0), 0.0)
+        )
+
+    def _refresh_entry_bucket_prices(self, symbol: str, state: TradeState):
+        if state.base_entry_amount > 0 and state.base_entry_quote > 0:
+            state.base_entry_price = self._average_price_from_notional(symbol, state.base_entry_amount, state.base_entry_quote)
+        elif state.base_entry_amount <= 0:
+            state.base_entry_amount = 0.0
+            state.base_entry_quote = 0.0
+            state.base_entry_fees_quote = 0.0
+            state.base_entry_price = 0.0
+
+        if state.averaging_entry_amount <= 0:
+            state.averaging_entry_amount = 0.0
+            state.averaging_entry_quote = 0.0
+            state.averaging_entry_fees_quote = 0.0
+
+    def _ensure_entry_buckets_initialized(self, symbol: str, state: TradeState):
+        if state.position_size <= 0:
+            return
+        if self._entry_bucket_total_amount(state) > 0:
+            self._refresh_entry_bucket_prices(symbol, state)
+            return
+
+        entry_quote = self._safe_float(state.remaining_entry_quote, 0.0)
+        if entry_quote <= 0 and state.entry_price > 0:
+            entry_quote = self._contracts_to_notional(symbol, state.position_size, state.entry_price)
+        if entry_quote <= 0:
+            return
+
+        state.base_entry_amount = max(0.0, self._safe_float(state.position_size, 0.0))
+        state.base_entry_quote = entry_quote
+        state.base_entry_fees_quote = max(0.0, self._safe_float(state.remaining_buy_fees_quote, 0.0))
+        state.base_entry_price = self._average_price_from_notional(symbol, state.base_entry_amount, entry_quote) or state.entry_price
+        state.averaging_entry_amount = 0.0
+        state.averaging_entry_quote = 0.0
+        state.averaging_entry_fees_quote = 0.0
+
+    def _order_ref_by_id(self, refs: list, order_id: str) -> Optional[dict]:
+        if not order_id:
+            return None
+        for ref in refs or []:
+            if str(ref.get("id") or "") == order_id:
+                return ref
+        return None
+
+    def _entry_fill_is_averaging(self, state: TradeState, detail: dict, reason: str) -> bool:
+        text = ";".join(
+            str(item or "")
+            for item in (
+                reason,
+                detail.get("ref_reason"),
+                detail.get("reason"),
+            )
+        )
+        if "ema_averaging_stage_" in text:
+            return True
+
+        order_id = str(detail.get("order_id") or "")
+        ref = self._order_ref_by_id(state.entry_orders, order_id)
+        if ref and "ema_averaging_stage_" in str(ref.get("reason") or ""):
+            return True
+
+        if not order_id and "position_increased" in str(reason or ""):
+            return any("ema_averaging_stage_" in str(ref.get("reason") or "") for ref in state.entry_orders or [])
+        return False
+
+    def _record_entry_bucket_fills(self, symbol: str, state: TradeState, details: List[dict], reason: str):
+        self._ensure_entry_buckets_initialized(symbol, state)
+        for detail in details:
+            contracts = self._safe_float(detail.get("contracts"), 0.0)
+            quote = self._safe_float(detail.get("quote"), 0.0)
+            fee = self._safe_float(detail.get("fee_quote"), 0.0)
+            if contracts <= 0 or quote <= 0:
+                continue
+            if self._entry_fill_is_averaging(state, detail, reason):
+                state.averaging_entry_amount += contracts
+                state.averaging_entry_quote += quote
+                state.averaging_entry_fees_quote += fee
+            else:
+                state.base_entry_amount += contracts
+                state.base_entry_quote += quote
+                state.base_entry_fees_quote += fee
+        self._refresh_entry_bucket_prices(symbol, state)
+
+    def _exit_scope_for_detail(self, state: TradeState, detail: dict) -> str:
+        scope = str(detail.get("exit_scope") or "")
+        if scope:
+            return scope
+        ref = self._order_ref_by_id(state.sell_ladder_orders, str(detail.get("order_id") or ""))
+        return str((ref or {}).get("exit_scope") or "")
+
+    def _take_entry_bucket(self, state: TradeState, bucket: str, contracts: float) -> Tuple[float, float, float]:
+        if contracts <= 0:
+            return 0.0, 0.0, 0.0
+        if bucket == "average":
+            amount_attr = "averaging_entry_amount"
+            quote_attr = "averaging_entry_quote"
+            fee_attr = "averaging_entry_fees_quote"
+        else:
+            amount_attr = "base_entry_amount"
+            quote_attr = "base_entry_quote"
+            fee_attr = "base_entry_fees_quote"
+
+        available = self._safe_float(getattr(state, amount_attr, 0.0), 0.0)
+        if available <= 0:
+            return 0.0, 0.0, 0.0
+        used = min(max(0.0, contracts), available)
+        ratio = used / available if available > 0 else 0.0
+        quote = self._safe_float(getattr(state, quote_attr, 0.0), 0.0) * ratio
+        fees = self._safe_float(getattr(state, fee_attr, 0.0), 0.0) * ratio
+        setattr(state, amount_attr, max(0.0, available - used))
+        setattr(state, quote_attr, max(0.0, self._safe_float(getattr(state, quote_attr, 0.0), 0.0) - quote))
+        setattr(state, fee_attr, max(0.0, self._safe_float(getattr(state, fee_attr, 0.0), 0.0) - fees))
+        return used, quote, fees
+
+    def _allocate_exit_entry_buckets(self, symbol: str, state: TradeState, details: List[dict]) -> Tuple[float, float]:
+        self._ensure_entry_buckets_initialized(symbol, state)
+        if self._entry_bucket_total_amount(state) <= 0:
+            return 0.0, 0.0
+
+        allocated_quote = 0.0
+        allocated_fees = 0.0
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+        for detail in details:
+            contracts = self._safe_float(detail.get("contracts"), 0.0)
+            if contracts <= 0:
+                continue
+            scope = self._exit_scope_for_detail(state, detail)
+            remaining = contracts
+            if scope == "average_recovery":
+                used, quote, fees = self._take_entry_bucket(state, "average", remaining)
+                remaining -= used
+                allocated_quote += quote
+                allocated_fees += fees
+                detail["exit_scope"] = "average_recovery"
+            elif scope == "base":
+                used, quote, fees = self._take_entry_bucket(state, "base", remaining)
+                remaining -= used
+                allocated_quote += quote
+                allocated_fees += fees
+                detail["exit_scope"] = "base"
+            else:
+                total_amount = self._entry_bucket_total_amount(state)
+                if total_amount > 0:
+                    base_target = remaining * self._safe_float(state.base_entry_amount, 0.0) / total_amount
+                    avg_target = remaining - base_target
+                    used_base, quote, fees = self._take_entry_bucket(state, "base", base_target)
+                    allocated_quote += quote
+                    allocated_fees += fees
+                    used_avg, quote, fees = self._take_entry_bucket(state, "average", avg_target + max(0.0, base_target - used_base))
+                    allocated_quote += quote
+                    allocated_fees += fees
+                    remaining -= used_base + used_avg
+                    detail["exit_scope"] = "proportional"
+
+            if remaining > eps:
+                used, quote, fees = self._take_entry_bucket(state, "base", remaining)
+                remaining -= used
+                allocated_quote += quote
+                allocated_fees += fees
+            if remaining > eps:
+                _, quote, fees = self._take_entry_bucket(state, "average", remaining)
+                allocated_quote += quote
+                allocated_fees += fees
+
+        self._refresh_entry_bucket_prices(symbol, state)
+        return allocated_quote, allocated_fees
+
     def _recalculate_proportional_pnl_from_totals(self, state: TradeState):
         bought_amount = max(0.0, self._safe_float(state.total_bought_amount, 0.0))
         sold_amount = max(0.0, self._safe_float(state.total_sold_amount, 0.0))
@@ -642,13 +830,16 @@ class StateMixin:
             return
         if state.remaining_entry_quote > 0 or state.remaining_buy_fees_quote > 0:
             self._refresh_net_open_pnl(state)
+            self._ensure_entry_buckets_initialized(state.symbol or state.market_symbol, state)
             return
         if exit_amount <= 0:
             state.remaining_entry_quote = max(0.0, entry_quote)
             state.remaining_buy_fees_quote = max(0.0, entry_fees)
             self._refresh_net_open_pnl(state)
+            self._ensure_entry_buckets_initialized(state.symbol or state.market_symbol, state)
             return
         self._recalculate_proportional_pnl_from_totals(state)
+        self._ensure_entry_buckets_initialized(state.symbol or state.market_symbol, state)
 
     def _side_fee_rate(self, side: str) -> float:
         return config.SELLING.buy_fee_rate if side == "buy" else config.SELLING.sell_fee_rate
@@ -678,6 +869,8 @@ class StateMixin:
             fee += self._safe_float(item_fee, 0.0)
 
         avg_entry = self._average_price_from_notional(symbol, contracts, notional) or entry_price
+        if not state.cycle_id:
+            state.cycle_id = self._new_cycle_id(symbol, {"ts": state.last_signal_timestamp, "strategy_name": state.strategy_name})
         if state.initial_entry_notional <= 0:
             leverage = max(self._safe_float(state.leverage, 0.0), self._safe_float(config.RISK.leverage, 1.0), 1.0)
             planned_notional = self._safe_float(state.planned_quote_budget, 0.0) * leverage
@@ -692,6 +885,7 @@ class StateMixin:
             state.paid_sell_fees_quote += fee
         state.remaining_entry_quote += notional
         state.remaining_buy_fees_quote += fee
+        self._record_entry_bucket_fills(symbol, state, details, reason)
         state.last_buy_amount = contracts
         state.last_buy_price = avg_entry
         state.buy_stage = min(config.STRATEGY.max_buy_stages, max(state.buy_stage + 1, 1))
@@ -705,6 +899,36 @@ class StateMixin:
             detail_price = self._safe_float(detail.get("price"), 0.0) or self._average_price_from_notional(symbol, detail_contracts, detail_quote)
             detail_fee = self._safe_float(detail.get("fee_quote"), 0.0)
             source = str(detail.get("source") or "exchange")
+            fill_signal = {
+                "ts": state.last_signal_timestamp or state.last_entry_ladder_signal_timestamp,
+                "strategy_name": state.strategy_name or "ema_pullback",
+                "rs30": state.last_rs30,
+                "rs60": state.last_rs60,
+                "ema50": state.last_ema50,
+                "ema100": state.last_ema100,
+                "ema25d": state.last_ema25d,
+                "ema50d": state.last_ema50d,
+                "btc_return_30m": state.last_btc_return_30m,
+                "valid": True,
+            }
+            self._record_signal_analytics(
+                "fill_synced",
+                symbol=symbol,
+                signal=fill_signal,
+                filled_notional=detail_quote,
+                operation_id=str(detail.get("operation_id") or self._operation_id("fill_sync", symbol=symbol, order_id=str(detail.get("order_id") or ""))),
+                order_id=str(detail.get("order_id") or ""),
+                cycle_id=state.cycle_id,
+                context={
+                    "fill_kind": "entry",
+                    "side": side,
+                    "contracts": detail_contracts,
+                    "price": detail_price,
+                    "fee_quote": detail_fee,
+                    "fill_source": source,
+                    "aggregate_avg": avg_entry,
+                },
+            )
             self._log_event(
                 "INFO",
                 f"{side.title()} entry fill synced for {symbol}: contracts={detail_contracts} avg={detail_price}",
@@ -769,9 +993,11 @@ class StateMixin:
             entry_amount - exit_amount,
             contracts,
         )
-        close_ratio = min(1.0, contracts / open_contracts) if open_contracts > 0 else 1.0
-        allocated_entry_quote = state.remaining_entry_quote * close_ratio
-        allocated_entry_fees = state.remaining_buy_fees_quote * close_ratio
+        allocated_entry_quote, allocated_entry_fees = self._allocate_exit_entry_buckets(symbol, state, details)
+        if allocated_entry_quote <= 0 and allocated_entry_fees <= 0:
+            close_ratio = min(1.0, contracts / open_contracts) if open_contracts > 0 else 1.0
+            allocated_entry_quote = state.remaining_entry_quote * close_ratio
+            allocated_entry_fees = state.remaining_buy_fees_quote * close_ratio
 
         if side == "buy":
             state.total_bought_amount += contracts
@@ -781,8 +1007,14 @@ class StateMixin:
             state.total_sold_amount += contracts
             state.total_sold_quote += exit_quote
             state.paid_sell_fees_quote += fee
-        state.remaining_entry_quote = max(0.0, state.remaining_entry_quote - allocated_entry_quote)
-        state.remaining_buy_fees_quote = max(0.0, state.remaining_buy_fees_quote - allocated_entry_fees)
+        bucket_entry_quote = state.base_entry_quote + state.averaging_entry_quote
+        bucket_entry_fees = state.base_entry_fees_quote + state.averaging_entry_fees_quote
+        if bucket_entry_quote > 0 or self._entry_bucket_total_amount(state) > 0:
+            state.remaining_entry_quote = max(0.0, bucket_entry_quote)
+            state.remaining_buy_fees_quote = max(0.0, bucket_entry_fees)
+        else:
+            state.remaining_entry_quote = max(0.0, state.remaining_entry_quote - allocated_entry_quote)
+            state.remaining_buy_fees_quote = max(0.0, state.remaining_buy_fees_quote - allocated_entry_fees)
         if config.POSITION_SIDE == "short":
             state.realized_pnl += allocated_entry_quote - exit_quote - allocated_entry_fees - fee
         else:
@@ -795,6 +1027,38 @@ class StateMixin:
             detail_price = self._safe_float(detail.get("price"), 0.0) or self._average_price_from_notional(symbol, detail_contracts, detail_quote)
             detail_fee = self._safe_float(detail.get("fee_quote"), 0.0)
             source = str(detail.get("source") or "exchange")
+            fill_signal = {
+                "ts": state.last_signal_timestamp,
+                "strategy_name": state.strategy_name or "ema_pullback",
+                "rs30": state.last_rs30,
+                "rs60": state.last_rs60,
+                "ema50": state.last_ema50,
+                "ema100": state.last_ema100,
+                "ema25d": state.last_ema25d,
+                "ema50d": state.last_ema50d,
+                "btc_return_30m": state.last_btc_return_30m,
+                "valid": True,
+            }
+            self._record_signal_analytics(
+                "fill_synced",
+                symbol=symbol,
+                signal=fill_signal,
+                filled_notional=detail_quote,
+                realized_pnl_quote=state.realized_pnl,
+                operation_id=str(detail.get("operation_id") or self._operation_id("fill_sync", symbol=symbol, order_id=str(detail.get("order_id") or ""))),
+                order_id=str(detail.get("order_id") or ""),
+                cycle_id=state.cycle_id,
+                context={
+                    "fill_kind": "exit",
+                    "side": side,
+                    "contracts": detail_contracts,
+                    "price": detail_price,
+                    "fee_quote": detail_fee,
+                    "fill_source": source,
+                    "aggregate_avg": avg_exit,
+                    "exit_scope": str(detail.get("exit_scope") or ""),
+                },
+            )
             self._log_event(
                 "INFO",
                 f"{side.title()} exit fill synced for {symbol}: contracts={detail_contracts} avg={detail_price}",
@@ -810,7 +1074,7 @@ class StateMixin:
                 fee_currency=str(detail.get("fee_currency") or config.EXCHANGE.quote_currency),
                 fill_source=source,
                 position_size=max(0.0, state.position_size - contracts),
-                reason=f"{reason};exit_fill=1;aggregate_avg={avg_exit:.12f};fee_source={source}",
+                reason=f"{reason};exit_fill=1;exit_scope={str(detail.get('exit_scope') or '')};aggregate_avg={avg_exit:.12f};fee_source={source}",
             )
 
     def _record_buy_fill(
@@ -1087,6 +1351,38 @@ class StateMixin:
                 }
             )
 
+        self._record_signal_analytics(
+            "cycle_closed",
+            symbol=symbol,
+            signal={
+                "ts": state.last_signal_timestamp,
+                "strategy_name": state.strategy_name or "ema_pullback",
+                "rs30": state.last_rs30,
+                "rs60": state.last_rs60,
+                "ema50": state.last_ema50,
+                "ema100": state.last_ema100,
+                "ema25d": state.last_ema25d,
+                "ema50d": state.last_ema50d,
+                "btc_return_30m": state.last_btc_return_30m,
+                "valid": True,
+            },
+            filled_notional=exit_notional,
+            realized_pnl_quote=realized,
+            operation_id=self._operation_id("cycle_closed", symbol=symbol),
+            cycle_id=state.cycle_id,
+            context={
+                "opened_at": opened_at,
+                "closed_at": closed_at,
+                "holding_minutes": (closed_at - opened_at) / 60.0,
+                "entry_notional": entry_notional,
+                "exit_notional": exit_notional,
+                "avg_entry": avg_entry,
+                "avg_exit": avg_exit,
+                "close_reason": reason,
+                "max_buy_stage": state.buy_stage,
+                "max_averaging_stage": state.average_stage,
+            },
+        )
         self._log_event(
             "INFO",
             f"Cycle closed for {symbol}: pnl={realized:.8f}",
@@ -1094,5 +1390,11 @@ class StateMixin:
             symbol=symbol,
             reason=reason,
         )
-        cooldown_until = time.time() + config.RISK.cooldown_minutes_after_close * 60
+        cooldown_minutes = max(0.0, self._safe_float(config.RISK.cooldown_minutes_after_close, 0.0))
+        if realized > 0:
+            cooldown_minutes = max(
+                cooldown_minutes,
+                max(0.0, self._safe_float(getattr(config.RISK, "post_win_cooldown_minutes_after_close", 0.0), 0.0)),
+            )
+        cooldown_until = time.time() + cooldown_minutes * 60.0 if cooldown_minutes > 0 else None
         self._reset_state(symbol, preserve_cooldown=cooldown_until)

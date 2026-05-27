@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 
 import csv
+import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import config
 
@@ -46,11 +48,13 @@ class MonitoringMixin:
             tmp_path = path.with_name(f"{path.name}.tmp")
             try:
                 with path.open("r", newline="", encoding="utf-8") as src, tmp_path.open("w", newline="", encoding="utf-8") as dst:
-                    reader = csv.reader(src)
-                    writer = csv.writer(dst)
-                    next(reader, None)
-                    writer.writerow(header)
-                    writer.writerows(reader)
+                    reader = csv.DictReader(src)
+                    if reader.fieldnames:
+                        reader.fieldnames = normalized_first_row
+                    writer = csv.DictWriter(dst, fieldnames=header, extrasaction="ignore")
+                    writer.writeheader()
+                    for row in reader:
+                        writer.writerow({name: row.get(name, "") for name in header})
                 os.replace(tmp_path, path)
                 return
             except Exception as exc:
@@ -91,6 +95,26 @@ class MonitoringMixin:
         if path:
             self._ensure_headered_csv_file(path, self.EXTERNAL_PRICE_CSV_HEADER)
 
+    def _ensure_jsonl_file(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+
+    def _ensure_signal_analytics_files(self):
+        csv_path = getattr(self, "signal_analytics_csv_path", None)
+        if csv_path:
+            self._ensure_headered_csv_file(csv_path, self.SIGNAL_ANALYTICS_CSV_HEADER)
+        jsonl_path = getattr(self, "signal_analytics_jsonl_path", None)
+        if jsonl_path:
+            self._ensure_jsonl_file(jsonl_path)
+
+    def _ensure_diagnostics_files(self):
+        csv_path = getattr(self, "diagnostics_csv_path", None)
+        if csv_path:
+            self._ensure_headered_csv_file(csv_path, self.DIAGNOSTICS_CSV_HEADER)
+        jsonl_path = getattr(self, "diagnostics_jsonl_path", None)
+        if jsonl_path:
+            self._ensure_jsonl_file(jsonl_path)
+
     def _csv_archive_path(self, path: Path) -> Path:
         archive_dir = Path(config.MONITORING.csv_archive_dir)
         if not archive_dir.is_absolute():
@@ -114,6 +138,226 @@ class MonitoringMixin:
         except Exception as exc:
             self.log.warning("Could not rotate CSV log %s: %s", path, exc)
 
+    def _rotate_jsonl_if_needed(self, path: Path):
+        max_bytes = max(0, int(config.MONITORING.csv_rotate_max_bytes or 0))
+        if max_bytes <= 0 or not path.exists() or path.stat().st_size < max_bytes:
+            return
+
+        archive_path = self._csv_archive_path(path)
+        try:
+            os.replace(path, archive_path)
+            self._ensure_jsonl_file(path)
+            self.log.info("JSONL log rotated: %s -> %s", path, archive_path)
+        except Exception as exc:
+            self.log.warning("Could not rotate JSONL log %s: %s", path, exc)
+
+    def _append_jsonl(self, path: Optional[Path], payload: Dict[str, Any]):
+        if not path:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._rotate_jsonl_if_needed(path)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, sort_keys=True) + "\n")
+
+    def _sanitize_for_log(self, value: Any, depth: int = 0) -> Any:
+        if depth > 8:
+            return "<max_depth>"
+        if isinstance(value, dict):
+            clean = {}
+            for key, item in value.items():
+                key_text = str(key)
+                lowered = key_text.lower()
+                if any(secret in lowered for secret in ("apikey", "api_key", "secret", "password", "token", "signature")):
+                    clean[key_text] = "<redacted>"
+                else:
+                    clean[key_text] = self._sanitize_for_log(item, depth + 1)
+            return clean
+        if isinstance(value, (list, tuple, set)):
+            return [self._sanitize_for_log(item, depth + 1) for item in list(value)[:200]]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            if isinstance(value, str) and len(value) > 4000:
+                return value[:4000] + "...<truncated>"
+            return value
+        return str(value)
+
+    def _monitoring_float(self, value: Any, default: float = 0.0) -> float:
+        safe_float = getattr(self, "_safe_float", None)
+        if safe_float:
+            return safe_float(value, default)
+        try:
+            if value is None:
+                return float(default)
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _fmt_monitoring_float(self, value: Any, precision: int = 8) -> str:
+        numeric = self._monitoring_float(value, 0.0)
+        return f"{numeric:.{precision}f}" if numeric else ""
+
+    def _current_profile_name(self) -> str:
+        return str(getattr(self, "profile_name", config.BOT_NAME) or config.BOT_NAME)
+
+    def _signal_id(self, symbol: str = "", signal: Optional[dict] = None) -> str:
+        signal = signal or {}
+        signal_ts = signal.get("ts") or signal.get("signal_ts") or ""
+        strategy = signal.get("strategy_name") or "ema_pullback"
+        if not symbol:
+            symbol = str(signal.get("symbol") or "")
+        return f"{self._current_profile_name()}:{symbol}:{signal_ts}:{strategy}"
+
+    def _operation_id(
+        self,
+        event: str,
+        symbol: str = "",
+        order_id: str = "",
+        signal: Optional[dict] = None,
+        suffix: str = "",
+    ) -> str:
+        signal_ts = (signal or {}).get("ts") or ""
+        millis = int(time.time() * 1000)
+        parts = [self._current_profile_name(), event, symbol, order_id or str(signal_ts), str(millis)]
+        if suffix:
+            parts.append(str(suffix))
+        return ":".join(str(part).replace(":", "_") for part in parts if part not in (None, ""))
+
+    def _new_cycle_id(self, symbol: str, signal: Optional[dict] = None) -> str:
+        return self._operation_id("cycle", symbol=symbol, signal=signal)
+
+    def _selected_config_snapshot(self) -> dict:
+        return {
+            "dry_run": bool(config.RUNTIME.dry_run),
+            "position_side": config.POSITION_SIDE,
+            "entry_side": config.ENTRY_SIDE,
+            "exit_side": config.EXIT_SIDE,
+            "leverage": config.RISK.leverage,
+            "margin_mode": config.RISK.margin_mode,
+            "max_active_positions": config.RISK.max_active_positions,
+            "position_budget_fraction": config.BUYING.position_budget_fraction,
+            "ladder_fractions": tuple(config.BUYING.ladder_fractions),
+            "ladder_offsets": tuple(config.BUYING.ladder_offsets),
+        }
+
+    def _signal_block_reason(self, signal: Optional[dict]) -> str:
+        if not signal:
+            return "signal_missing"
+        if not signal.get("valid"):
+            return "signal_invalid"
+        if signal.get("entry_valid"):
+            return ""
+        for key in ("macro_valid", "pullback_valid", "trigger_valid", "rs_confirm_valid", "btc_entry_valid"):
+            if key in signal and not signal.get(key):
+                return key
+        return "entry_valid_false"
+
+    def _external_context_from_cache(self, symbol: str) -> dict:
+        cache = getattr(self, "_external_price_context_cache", None)
+        if isinstance(cache, dict) and symbol in cache:
+            cached = cache.get(symbol)
+            return dict(cached) if isinstance(cached, dict) else {}
+        return {}
+
+    def _record_signal_analytics(
+        self,
+        decision: str,
+        symbol: str = "",
+        signal: Optional[dict] = None,
+        block_reason: str = "",
+        external_context: Optional[dict] = None,
+        planned_budget: float = 0.0,
+        planned_orders: int = 0,
+        planned_notional: float = 0.0,
+        placed_orders: int = 0,
+        filled_notional: float = 0.0,
+        realized_pnl_quote: float = 0.0,
+        operation_id: str = "",
+        order_id: str = "",
+        cycle_id: str = "",
+        context: Optional[dict] = None,
+    ):
+        signal = signal or {}
+        symbol = symbol or str(signal.get("symbol") or "")
+        external_context = external_context if isinstance(external_context, dict) else self._external_context_from_cache(symbol)
+        signal_id = self._signal_id(symbol, signal)
+        signal_ts = signal.get("ts") or ""
+        strategy_name = signal.get("strategy_name") or "ema_pullback"
+        side = config.POSITION_SIDE
+        block_reason = block_reason or self._signal_block_reason(signal)
+        state = None
+        if symbol and hasattr(self, "states") and symbol in self.states:
+            state = self.states[symbol]
+        if not cycle_id and state is not None:
+            cycle_id = str(getattr(state, "cycle_id", "") or "")
+
+        row = [
+            int(time.time()),
+            self._current_profile_name(),
+            symbol,
+            side,
+            signal_id,
+            signal_ts,
+            strategy_name,
+            int(bool(signal.get("valid", False))),
+            int(bool(signal.get("entry_valid", False))),
+            int(bool(signal.get("add_valid", False))),
+            decision,
+            block_reason,
+            self._fmt_monitoring_float(signal.get("score"), 8),
+            self._fmt_monitoring_float(signal.get("rs30"), 8),
+            self._fmt_monitoring_float(signal.get("rs60"), 8),
+            self._fmt_monitoring_float(signal.get("ema50", signal.get("ema_trigger_fast")), 12),
+            self._fmt_monitoring_float(signal.get("ema100", signal.get("ema_trigger_slow")), 12),
+            self._fmt_monitoring_float(signal.get("ema25d", signal.get("ema_macro_fast")), 12),
+            self._fmt_monitoring_float(signal.get("ema50d", signal.get("ema_macro_slow")), 12),
+            self._fmt_monitoring_float(signal.get("btc_return_30m"), 8),
+            self._fmt_monitoring_float(signal.get("volatility"), 8),
+            self._fmt_monitoring_float(signal.get("budget_multiplier"), 8),
+            self._fmt_monitoring_float(signal.get("ladder_multiplier"), 8),
+            signal.get("macro_regime", ""),
+            int(bool(external_context.get("valid", False))) if external_context else "",
+            int(bool(external_context.get("stale", False))) if external_context else "",
+            self._fmt_monitoring_float(external_context.get("spread_bps"), 8) if external_context else "",
+            self._fmt_monitoring_float(planned_budget, 8),
+            int(planned_orders or 0),
+            self._fmt_monitoring_float(planned_notional, 8),
+            int(placed_orders or 0),
+            self._fmt_monitoring_float(filled_notional, 8),
+            self._fmt_monitoring_float(realized_pnl_quote, 8),
+        ]
+
+        csv_path = getattr(self, "signal_analytics_csv_path", None)
+        if csv_path:
+            self._rotate_csv_if_needed(csv_path, self.SIGNAL_ANALYTICS_CSV_HEADER)
+            with csv_path.open("a", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(row)
+
+        payload = {
+            "ts": int(time.time()),
+            "profile": self._current_profile_name(),
+            "symbol": symbol,
+            "side": side,
+            "decision": decision,
+            "block_reason": block_reason,
+            "signal_id": signal_id,
+            "operation_id": operation_id,
+            "order_id": order_id,
+            "cycle_id": cycle_id,
+            "signal": signal,
+            "external_context": external_context,
+            "macro_context": (getattr(self, "signal_cache", {}) or {}).get("macro", {}),
+            "config": self._selected_config_snapshot(),
+            "metrics": {
+                "planned_budget": planned_budget,
+                "planned_orders": planned_orders,
+                "planned_notional": planned_notional,
+                "placed_orders": placed_orders,
+                "filled_notional": filled_notional,
+                "realized_pnl_quote": realized_pnl_quote,
+            },
+            "context": context or {},
+        }
+        self._append_jsonl(getattr(self, "signal_analytics_jsonl_path", None), payload)
+
     def _append_csv(
         self,
         level: str,
@@ -136,8 +380,9 @@ class MonitoringMixin:
         ema30: float = 0.0,
         ema60: float = 0.0,
         reason: str = "",
+        **_ignored,
     ):
-        if symbol and symbol in self.states:
+        if symbol and hasattr(self, "states") and symbol in self.states:
             state = self.states[symbol]
             if not position_size:
                 position_size = state.position_size
@@ -227,6 +472,7 @@ class MonitoringMixin:
         path = getattr(self, "macro_csv_path", None)
         if not path:
             return
+
         def fmt(value: object) -> str:
             try:
                 return f"{float(value):.8f}"
@@ -257,7 +503,6 @@ class MonitoringMixin:
                 ]
             )
 
-
     def _append_external_price_csv(self, context: dict):
         path = getattr(self, "external_price_csv_path", None)
         if not path:
@@ -286,6 +531,10 @@ class MonitoringMixin:
                     fmt(context.get("mexc_bid", 0.0)),
                     fmt(context.get("mexc_ask", 0.0)),
                     fmt(context.get("mexc_mid", 0.0)),
+                    fmt(context.get("mexc_bid_qty", 0.0)),
+                    fmt(context.get("mexc_ask_qty", 0.0)),
+                    fmt(context.get("mexc_bid_notional", 0.0)),
+                    fmt(context.get("mexc_ask_notional", 0.0)),
                     fmt(context.get("spread_bps", 0.0)),
                     fmt(context.get("spread_bps_30s_avg", 0.0)),
                     fmt(context.get("spread_bps_2m_avg", 0.0)),
@@ -300,14 +549,180 @@ class MonitoringMixin:
                 ]
             )
 
+    def _diagnostic_error_code(self, exc: Optional[Exception], message: str = "") -> str:
+        text = f"{message} {exc or ''}"
+        for pattern in (
+            r'"err_code"\s*:\s*"?([0-9A-Za-z_-]+)"?',
+            r'"code"\s*:\s*"?([0-9A-Za-z_-]+)"?',
+            r"\berr(?:or)?[_ -]?code[=:]\s*([0-9A-Za-z_-]+)",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return ""
+
+    def _diagnostic_category(
+        self,
+        event: str,
+        reason: str = "",
+        message: str = "",
+        exception: Optional[Exception] = None,
+        category: str = "",
+    ) -> str:
+        if category:
+            return category
+        is_transient = bool(getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exception)) if exception else False
+        text = f"{event} {reason} {message} {exception or ''}".lower()
+        if is_transient or any(item in text for item in ("timeout", "network", "connection", "rate limit")):
+            return "network"
+        if "config" in text or "credential" in text:
+            return "config"
+        if any(item in text for item in ("csv", "file", "cache", "lock", "read", "write", "json")):
+            return "io"
+        if "state" in text or "position" in text or "sync" in text:
+            return "state"
+        if any(item in text for item in ("htx", "exchange", "api", "fetch", "order", "leverage", "balance", "ticker")):
+            return "api"
+        if any(item in text for item in ("signal", "ema", "strategy", "macro", "external_price")):
+            return "strategy"
+        return "environment"
+
+    def _diagnostic_from_exception(self, exc: Optional[Exception], message: str = "", retryable: Optional[bool] = None) -> dict:
+        if exc is None:
+            return {
+                "exception_type": "",
+                "error_code": self._diagnostic_error_code(None, message),
+                "retryable": bool(retryable) if retryable is not None else False,
+            }
+        if retryable is None:
+            retryable = bool(getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc))
+        return {
+            "exception_type": type(exc).__name__,
+            "error_code": self._diagnostic_error_code(exc, message),
+            "retryable": bool(retryable),
+        }
+
+    def _record_diagnostic(
+        self,
+        severity: str,
+        category: str,
+        event: str,
+        message: str,
+        symbol: str = "",
+        operation_id: str = "",
+        signal_id: str = "",
+        order_id: str = "",
+        reason: str = "",
+        exception: Optional[Exception] = None,
+        retryable: Optional[bool] = None,
+        attempt: Any = "",
+        hostname: str = "",
+        context: Optional[dict] = None,
+    ):
+        severity = str(severity or "").lower()
+        if severity == "critical":
+            severity = "fault"
+        category = self._diagnostic_category(event, reason=reason, message=message, exception=exception, category=category)
+        exception_info = self._diagnostic_from_exception(exception, message=message, retryable=retryable)
+        retryable_value = bool(exception_info.get("retryable", False))
+        row = [
+            int(time.time()),
+            self._current_profile_name(),
+            severity,
+            category,
+            event,
+            symbol,
+            operation_id,
+            signal_id,
+            order_id,
+            exception_info.get("exception_type", ""),
+            exception_info.get("error_code", ""),
+            message,
+            reason,
+            int(retryable_value),
+            attempt,
+            hostname,
+            int(bool(config.RUNTIME.dry_run)),
+        ]
+
+        csv_path = getattr(self, "diagnostics_csv_path", None)
+        if csv_path:
+            self._rotate_csv_if_needed(csv_path, self.DIAGNOSTICS_CSV_HEADER)
+            with csv_path.open("a", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(row)
+
+        payload = {
+            "ts": int(time.time()),
+            "profile": self._current_profile_name(),
+            "severity": severity,
+            "category": category,
+            "event": event,
+            "symbol": symbol,
+            "operation_id": operation_id,
+            "signal_id": signal_id,
+            "order_id": order_id,
+            "message": message,
+            "reason": reason,
+            "attempt": attempt,
+            "hostname": hostname,
+            "dry_run": bool(config.RUNTIME.dry_run),
+            "exception": {
+                **exception_info,
+                "message": str(exception) if exception else "",
+            },
+            "context": context or {},
+        }
+        self._append_jsonl(getattr(self, "diagnostics_jsonl_path", None), payload)
+
+    def _record_config_warnings(self):
+        seen = getattr(self, "_recorded_config_warnings", set())
+        for message in getattr(config, "CONFIG_WARNINGS", []):
+            if message in seen:
+                continue
+            seen.add(message)
+            self._record_diagnostic(
+                "warning",
+                "config",
+                "config_warning",
+                str(message),
+                reason="config_warning",
+            )
+        self._recorded_config_warnings = seen
+
+    def _compact_log_message(self, message: str) -> str:
+        text = str(message)
+        html_markers = ("<!DOCTYPE html", "<html", "<head", "<body")
+        marker_positions = [text.find(marker) for marker in html_markers if marker in text]
+        if marker_positions:
+            head = text[: min(marker_positions)].strip()
+            if len(head) > 500:
+                head = f"{head[:500]}..."
+            return f"{head} [html response omitted]" if head else "[html response omitted]"
+        if len(text) > 2000:
+            return f"{text[:2000]}... [truncated]"
+        return text
+
     def _log_event(self, level: str, message: str, event: str, **kwargs):
+        diagnostic_exception = kwargs.pop("exception", None)
+        diagnostic_category = kwargs.pop("category", "")
+        diagnostic_retryable = kwargs.pop("retryable", None)
+        diagnostic_attempt = kwargs.pop("attempt", "")
+        diagnostic_hostname = kwargs.pop("hostname", "")
+        operation_id = kwargs.pop("operation_id", "")
+        signal_id = kwargs.pop("signal_id", "")
+        diagnostic_context = kwargs.pop("diagnostic_context", None)
         reason = str(kwargs.get("reason") or "")
         if config.RUNTIME.dry_run and not message.startswith("[DRY-RUN]"):
             message = f"[DRY-RUN] {message}"
             if not reason:
                 kwargs["reason"] = "dry_run"
 
-        log_method = getattr(self.log, level.lower(), self.log.info)
+        message = self._compact_log_message(message)
+        level_upper = str(level or "INFO").upper()
+        if level_upper in {"FAULT", "CRITICAL"}:
+            log_method = self.log.critical
+        else:
+            log_method = getattr(self.log, str(level).lower(), self.log.info)
         log_method(message)
         try:
             self._append_csv(level=level.upper(), event=event, **kwargs)
@@ -315,3 +730,22 @@ class MonitoringMixin:
             if not getattr(self, "_csv_log_failed_once", False):
                 self._csv_log_failed_once = True
                 self.log.warning("Could not append CSV event log: %s", exc)
+        self._append_csv(level=level_upper, event=event, **kwargs)
+        if level_upper in {"WARNING", "ERROR", "FAULT", "CRITICAL"}:
+            severity = "fault" if level_upper in {"FAULT", "CRITICAL"} else level_upper.lower()
+            self._record_diagnostic(
+                severity,
+                diagnostic_category,
+                event,
+                message,
+                symbol=str(kwargs.get("symbol") or ""),
+                operation_id=operation_id,
+                signal_id=signal_id,
+                order_id=str(kwargs.get("order_id") or ""),
+                reason=str(kwargs.get("reason") or ""),
+                exception=diagnostic_exception,
+                retryable=diagnostic_retryable,
+                attempt=diagnostic_attempt,
+                hostname=diagnostic_hostname,
+                context=diagnostic_context,
+            )

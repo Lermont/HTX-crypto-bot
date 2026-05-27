@@ -67,11 +67,12 @@ class CombinedHtxFuturesBot:
                             log_step_exception(symbol, exc)
                         else:
                             bot._log_event(
-                                "ERROR",
+                                "FAULT",
                                 f"Step failed for {symbol}: {exc}",
                                 event="state_exchange_mismatch",
                                 symbol=symbol,
                                 reason="step_error",
+                                exception=exc,
                             )
                 bot._save_state()
 
