@@ -34,6 +34,8 @@ long/bot_futures_state*.json
 long/bot_futures_trades.csv
 long/bot_futures_cycle_stats.csv
 long/bot_futures_markets_cache.json
+long/bot_futures_macro.csv
+long/external_price_feed.csv
 long/bot_futures_state.lock
 long/csv_archive/
 
@@ -48,6 +50,8 @@ short/bot_futures_short_state*.json
 short/bot_futures_short_trades.csv
 short/bot_futures_short_cycle_stats.csv
 short/bot_futures_short_state.lock
+short/bot_futures_macro.csv
+short/external_price_feed.csv
 short/csv_archive/
 
 output*.txt

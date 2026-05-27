@@ -9,11 +9,13 @@ class RunnerMixin:
     def _log_step_exception(self, symbol: str, exc: Exception):
         is_transient = bool(getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc))
         self._log_event(
-            "WARNING" if is_transient else "ERROR",
+            "WARNING" if is_transient else "FAULT",
             f"Step failed for {symbol}: {exc}",
             event="state_exchange_mismatch",
             symbol=symbol,
             reason="step_network_error" if is_transient else "step_error",
+            exception=exc,
+            retryable=is_transient,
         )
 
     def setup(self):

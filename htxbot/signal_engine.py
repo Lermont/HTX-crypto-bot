@@ -1117,7 +1117,10 @@ class SignalMixin:
     ) -> list:
         timeframe = timeframe or config.SIGNALS.timeframe
         client = exchange or self.exchange
-        ohlcv = client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if exchange is None and hasattr(self, "_fetch_ohlcv_with_retry"):
+            ohlcv = self._fetch_ohlcv_with_retry(symbol, timeframe=timeframe, limit=limit)
+        else:
+            ohlcv = client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         now_ms = int(time.time() * 1000)
         timeframe_ms = self._signal_timeframe_seconds(timeframe) * 1000
         current_bucket = (now_ms // timeframe_ms) * timeframe_ms

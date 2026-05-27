@@ -16,6 +16,7 @@ class TradeState:
     position_available: float = 0.0
     position_frozen: float = 0.0
     entry_price: float = 0.0
+    cycle_id: str = ""
     last_buy_price: float = 0.0
     last_buy_amount: float = 0.0
     buy_stage: int = 0
@@ -42,6 +43,13 @@ class TradeState:
     remaining_entry_quote: float = 0.0
     remaining_buy_fees_quote: float = 0.0
     net_open_pnl: float = 0.0
+    base_entry_amount: float = 0.0
+    base_entry_quote: float = 0.0
+    base_entry_fees_quote: float = 0.0
+    base_entry_price: float = 0.0
+    averaging_entry_amount: float = 0.0
+    averaging_entry_quote: float = 0.0
+    averaging_entry_fees_quote: float = 0.0
     leverage: int = config.RISK.leverage
     margin_mode: str = config.RISK.margin_mode
     last_signal_timestamp: Optional[float] = None
