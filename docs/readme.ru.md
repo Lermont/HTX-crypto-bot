@@ -183,7 +183,7 @@ EXTERNAL_PRICE_MAX_HTX_PREMIUM_FOR_LONG_BPS=15
 EXTERNAL_PRICE_MAX_HTX_DISCOUNT_FOR_SHORT_BPS=15
 EXTERNAL_PRICE_BLOCK_IF_DIVERGENCE_1M_BPS=50
 EXTERNAL_PRICE_MEXC_LEAD_THRESHOLD_BPS_30S=5
-EXTERNAL_PRICE_IMPULSE_SCORE_BONUS=1.0
+EXTERNAL_PRICE_IMPULSE_SCORE_BONUS=0.02
 EXTERNAL_PRICE_EXIT_ADJUSTMENT_ENABLED=true
 ```
 
@@ -227,14 +227,14 @@ python -m pytest -q
 Текущий локальный baseline:
 
 ```text
-90 passed, 4 subtests passed
+82 passed, 4 subtests passed
 ```
 
 ## Структура Проекта
 
 ```text
 bot.py                 CLI entrypoint
-config.py              Pydantic-конфигурация и профили
+config.py              dataclass-конфигурация и профили
 htxbot/                Движок, биржа, сигналы, стратегия, state, monitoring
 tests/                 Единый pytest-suite
 .env.example           Безопасный шаблон конфигурации

@@ -183,7 +183,7 @@ EXTERNAL_PRICE_MAX_HTX_PREMIUM_FOR_LONG_BPS=15
 EXTERNAL_PRICE_MAX_HTX_DISCOUNT_FOR_SHORT_BPS=15
 EXTERNAL_PRICE_BLOCK_IF_DIVERGENCE_1M_BPS=50
 EXTERNAL_PRICE_MEXC_LEAD_THRESHOLD_BPS_30S=5
-EXTERNAL_PRICE_IMPULSE_SCORE_BONUS=1.0
+EXTERNAL_PRICE_IMPULSE_SCORE_BONUS=0.02
 EXTERNAL_PRICE_EXIT_ADJUSTMENT_ENABLED=true
 ```
 
@@ -227,14 +227,14 @@ python -m pytest -q
 当前本地 baseline：
 
 ```text
-90 passed, 4 subtests passed
+82 passed, 4 subtests passed
 ```
 
 ## 项目结构
 
 ```text
 bot.py                 CLI entrypoint
-config.py              基于 Pydantic 的配置和 profile 解析
+config.py              基于 dataclass 的配置和 profile 解析
 htxbot/                Bot engine、exchange、signals、strategy、state、monitoring
 tests/                 统一 pytest suite
 .env.example           安全配置模板

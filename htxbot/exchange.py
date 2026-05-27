@@ -129,6 +129,51 @@ class ExchangeMixin:
     def _is_transient_exchange_error(self, exc: Exception) -> bool:
         return isinstance(exc, (ccxt.RequestTimeout, ccxt.NetworkError))
 
+    def _fetch_ohlcv_with_retry(self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None):
+        hostnames = list(self._contract_hostnames())
+        current = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
+        ordered_hostnames = []
+        if current:
+            ordered_hostnames.append(current)
+        ordered_hostnames.extend(hostname for hostname in hostnames if hostname and hostname != current)
+        if not ordered_hostnames:
+            ordered_hostnames = [""]
+
+        attempts = max(1, config.EXCHANGE.market_load_retries)
+        last_exc = None
+        for attempt in range(1, attempts + 1):
+            hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
+            if hostname:
+                self._set_contract_hostname(self.exchange, hostname)
+            try:
+                return self.exchange.fetch_ohlcv(
+                    symbol,
+                    timeframe=timeframe,
+                    since=since,
+                    limit=limit,
+                    params=params or {},
+                )
+            except Exception as exc:
+                if not self._is_transient_exchange_error(exc):
+                    raise
+                last_exc = exc
+                if attempt >= attempts:
+                    break
+                self._log_event(
+                    "WARNING",
+                    f"Transient HTX public API failure while fetching candles for {symbol}; "
+                    f"retry {attempt}/{attempts} via {hostname or 'default'}: {exc}",
+                    event="signal_invalid",
+                    symbol=symbol,
+                    reason="ohlcv_network_retry",
+                    exception=exc,
+                    retryable=True,
+                    attempt=attempt,
+                    hostname=hostname or "default",
+                )
+                time.sleep(min(0.5 * attempt, 2.0))
+        raise last_exc
+
     def _private_fetch_with_retry(self, symbol: str, reason: str, description: str, fetch):
         hostnames = list(self._contract_hostnames())
         current = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
@@ -434,6 +479,7 @@ class ExchangeMixin:
         self._private_open_orders_by_symbol = None
         self._private_positions_bulk_failed = False
         self._private_open_orders_bulk_failed = False
+        self._external_price_context_cache = {}
 
     def _payload_symbol(self, payload: dict) -> str:
         if not isinstance(payload, dict):
@@ -767,6 +813,60 @@ class ExchangeMixin:
             or "position mode cannot be adjusted for open orders" in text
         )
 
+    def _position_mode_values_from_payload(self, payload) -> List[str]:
+        values: List[str] = []
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                normalized_key = str(key).lower()
+                if normalized_key in {"position_mode", "positionmode"} and value:
+                    values.append(str(value))
+                else:
+                    values.extend(self._position_mode_values_from_payload(value))
+        elif isinstance(payload, list):
+            for item in payload:
+                values.extend(self._position_mode_values_from_payload(item))
+        return values
+
+    def _position_mode_is_one_way_value(self, value: str) -> Optional[bool]:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        if normalized in {"single_side", "single", "one_way", "oneway"}:
+            return True
+        if normalized in {"dual_side", "dual", "hedge", "hedged"}:
+            return False
+        return None
+
+    def _fetch_current_position_mode_is_one_way(self) -> Tuple[Optional[bool], str]:
+        endpoints = [
+            (
+                "cross_account_position_info",
+                getattr(self.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo", None),
+            ),
+            (
+                "cross_account_info",
+                getattr(self.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountInfo", None),
+            ),
+        ]
+        last_reason = "position_mode_query_unavailable"
+        request = {"margin_account": config.EXCHANGE.quote_currency}
+        for endpoint_name, method in endpoints:
+            if not method:
+                continue
+            try:
+                response = method(request)
+            except Exception as exc:
+                last_reason = f"{endpoint_name}_failed:{exc}"
+                continue
+
+            values = self._position_mode_values_from_payload(response)
+            parsed = [self._position_mode_is_one_way_value(value) for value in values]
+            known = [value for value in parsed if value is not None]
+            if known:
+                if all(known):
+                    return True, f"{endpoint_name}:position_mode=single_side"
+                return False, f"{endpoint_name}:position_mode={','.join(values)}"
+            last_reason = f"{endpoint_name}:position_mode_missing"
+        return None, last_reason
+
     def _ensure_one_way_position_mode(self, force: bool = False) -> bool:
         if config.RUNTIME.dry_run:
             return True
@@ -781,13 +881,28 @@ class ExchangeMixin:
                     self.exchange.set_position_mode(False, symbol, params=self._position_params())
         except Exception as exc:
             if self._is_position_mode_locked_error(exc):
+                mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()
+                if mode_is_one_way is not True:
+                    self._log_event(
+                        "ERROR",
+                        "HTX position mode switch is locked by existing positions or open orders, "
+                        "and current one-way mode could not be confirmed",
+                        event="futures_setup",
+                        reason=(
+                            "position_mode_locked_unverified"
+                            if mode_is_one_way is None
+                            else "position_mode_locked_hedge_mode"
+                        ),
+                        exception=exc,
+                    )
+                    return False
                 self.one_way_mode_checked = True
                 self._log_event(
                     "INFO",
                     "HTX position mode switch skipped because existing positions or open orders "
-                    f"lock mode changes; continuing with one-way order parameters: {exc}",
+                    f"lock mode changes; confirmed one-way mode; continuing with one-way order parameters: {exc}",
                     event="futures_setup",
-                    reason="position_mode_existing_positions",
+                    reason=f"position_mode_existing_positions;{mode_reason}",
                 )
                 return True
 
@@ -1072,9 +1187,24 @@ class ExchangeMixin:
                     symbol=symbol,
                     order_id=order_id,
                     reason="cancel_failed",
+                    exception=exc,
                 )
                 return False
 
+        self._record_signal_analytics(
+            "order_canceled",
+            symbol=symbol,
+            signal={"ts": ref.get("signal_ts"), "strategy_name": "ema_pullback"},
+            block_reason=reason,
+            operation_id=str(ref.get("operation_id") or self._operation_id("order_cancel", symbol=symbol, order_id=order_id)),
+            order_id=order_id,
+            cycle_id=str(ref.get("cycle_id") or getattr(self._get_state(symbol), "cycle_id", "")),
+            context={
+                "side": ref.get("side", ""),
+                "price": self._safe_float(ref.get("price"), 0.0),
+                "amount": self._safe_float(ref.get("amount"), 0.0),
+            },
+        )
         self._log_event(
             "INFO",
             f"Order canceled for {symbol}: {order_id}",

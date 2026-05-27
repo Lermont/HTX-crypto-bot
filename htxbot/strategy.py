@@ -194,6 +194,7 @@ class StrategyMixin:
         close_reason: str,
         reason_detail: str,
         event_prefix: str,
+        open_orders: Optional[List[dict]] = None,
     ) -> bool:
         state = self._get_state(symbol)
         notional = self._position_notional(symbol, state)
@@ -227,19 +228,67 @@ class StrategyMixin:
             )
             return True
 
-        close_amount = self._amount_to_precision(symbol, state.position_size)
+        visible_exit_remaining = 0.0
+        for order in open_orders or []:
+            if (order.get("side") or "").lower() == config.EXIT_SIDE:
+                visible_exit_remaining += self._order_remaining_amount(order)
+
+        closeable = state.position_size
+        if state.position_available > 0:
+            closeable = min(closeable, state.position_available)
+        elif state.position_frozen > 0:
+            closeable = 0.0
+
+        if visible_exit_remaining > 0:
+            closeable = min(closeable, max(0.0, state.position_size - visible_exit_remaining))
+
+        close_amount = self._amount_to_precision(symbol, closeable)
         if close_amount <= 0:
+            no_closeable = closeable <= 0
             self._log_event(
                 "WARNING",
-                f"Small position close skipped for {symbol}: amount below exchange minimum",
+                (
+                    f"Small position close delayed for {symbol}: no closeable amount"
+                    if no_closeable
+                    else f"Small position close skipped for {symbol}: amount below exchange minimum"
+                ),
                 event=f"{event_prefix}_failed",
                 symbol=symbol,
                 side=config.EXIT_SIDE,
                 position_size=state.position_size,
                 entry_price=state.entry_price,
-                reason=f"{close_reason}_amount_below_minimum;notional={notional:.8f};{reason_detail}",
+                reason=(
+                    f"{close_reason}_{'no_closeable_amount' if no_closeable else 'amount_below_minimum'};"
+                    f"notional={notional:.8f};"
+                    f"available={state.position_available:.12f};"
+                    f"frozen={state.position_frozen:.12f};"
+                    f"visible_exit_remaining={visible_exit_remaining:.12f};"
+                    f"{reason_detail}"
+                ),
             )
+            state.frozen_no_more_buys = True
+            self._refresh_active_side(state)
+            self._save_state()
             return True
+
+        if close_amount + max(self._get_min_contracts(symbol) * 1e-9, 1e-12) < state.position_size:
+            self._log_event(
+                "INFO",
+                f"Small position close capped for {symbol}: closeable={close_amount} position={state.position_size}",
+                event=f"{event_prefix}_amount_capped",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                amount=close_amount,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=(
+                    f"{close_reason}_closeable_amount_cap;notional={notional:.8f};"
+                    f"available={state.position_available:.12f};"
+                    f"frozen={state.position_frozen:.12f};"
+                    f"visible_exit_remaining={visible_exit_remaining:.12f};"
+                    f"{reason_detail}"
+                ),
+            )
 
         try:
             order = self._create_one_way_order(
@@ -251,16 +300,35 @@ class StrategyMixin:
                 reduce_only=True,
             )
         except Exception as exc:
+            closeable_rejected = self._is_reduce_only_amount_exceeds_closeable_error(exc)
+            if closeable_rejected:
+                state.position_available = 0.0
+                state.position_frozen = max(state.position_frozen, state.position_size)
+                state.frozen_no_more_buys = True
+                self._refresh_active_side(state)
+                self._save_state()
             self._log_event(
                 "WARNING",
-                f"Small position close order failed for {symbol}: {exc}",
+                (
+                    f"Small position close delayed for {symbol}: HTX reports no closeable amount"
+                    if closeable_rejected
+                    else f"Small position close order failed for {symbol}: {exc}"
+                ),
                 event=f"{event_prefix}_failed",
                 symbol=symbol,
                 side=config.EXIT_SIDE,
                 amount=close_amount,
                 position_size=state.position_size,
                 entry_price=state.entry_price,
-                reason=f"{close_reason}_order_failed;notional={notional:.8f};{reason_detail}",
+                reason=(
+                    f"{close_reason}_closeable_amount_rejected;notional={notional:.8f};"
+                    f"available={state.position_available:.12f};"
+                    f"frozen={state.position_frozen:.12f};"
+                    f"visible_exit_remaining={visible_exit_remaining:.12f};"
+                    f"{reason_detail}"
+                    if closeable_rejected
+                    else f"{close_reason}_order_failed;notional={notional:.8f};{reason_detail}"
+                ),
             )
             return True
 
@@ -294,6 +362,7 @@ class StrategyMixin:
             close_reason="dust_position_close",
             reason_detail=f"dust_threshold={max(0.0, config.RISK.dust_position_notional):.8f}",
             event_prefix="dust_close",
+            open_orders=open_orders,
         )
 
     def _tiny_partial_entry_close_detail(self, symbol: str, state: TradeState) -> str:
@@ -324,7 +393,7 @@ class StrategyMixin:
             f"match_notional={int(by_notional)};match_fraction={int(by_fraction)}"
         )
 
-    def _maybe_close_tiny_partial_entry_after_timeout(self, symbol: str) -> bool:
+    def _maybe_close_tiny_partial_entry_after_timeout(self, symbol: str, open_orders: Optional[List[dict]] = None) -> bool:
         state = self._get_state(symbol)
         detail = self._tiny_partial_entry_close_detail(symbol, state)
         if not detail:
@@ -334,6 +403,7 @@ class StrategyMixin:
             close_reason="tiny_partial_entry_timeout_close",
             reason_detail=detail,
             event_prefix="tiny_entry_close",
+            open_orders=open_orders,
         )
 
     def _aggressive_exit_limit_price(self, symbol: str) -> float:
@@ -644,9 +714,16 @@ class StrategyMixin:
             state.entry_ema50 = state.last_ema50
             state.entry_ema100 = state.last_ema100
             state.entry_btc_return_30m = state.last_btc_return_30m
+        if not state.cycle_id:
+            state.cycle_id = self._new_cycle_id(symbol, signal)
+        cycle_id = state.cycle_id
 
         ladder_multiplier = self._safe_float(signal.get("ladder_multiplier"), 1.0) * max(0.0, offset_multiplier)
         created_at = time.time()
+        operation_id = self._operation_id("entry_ladder", symbol=symbol, signal=signal, suffix=reason)
+        planned_orders = 0
+        planned_notional = 0.0
+        placed_orders = 0
         configured_leverage = max(self._safe_float(config.RISK.leverage, 0.0), 1.0)
         account_leverage = configured_leverage if config.RUNTIME.dry_run else self._fetch_account_order_leverage(symbol)
         entry_side = config.ENTRY_SIDE
@@ -689,6 +766,8 @@ class StrategyMixin:
                 )
                 continue
 
+            planned_orders += 1
+            planned_notional += notional
             order_id = f"dry_{entry_side}_{symbol}_{int(created_at)}_{index}"
             order_leverage = account_leverage
             if not config.RUNTIME.dry_run:
@@ -771,10 +850,35 @@ class StrategyMixin:
                 "stage": index,
                 "signal_ts": signal.get("ts"),
                 "reason": reason,
+                "operation_id": operation_id,
+                "cycle_id": cycle_id,
             }
             state.entry_orders.append(ref)
+            placed_orders += 1
             event = "entry_ladder_planned" if config.RUNTIME.dry_run else "entry_ladder_placed"
             action = "planned" if config.RUNTIME.dry_run else "placed"
+            self._record_signal_analytics(
+                event,
+                symbol=symbol,
+                signal=signal,
+                planned_budget=margin_budget,
+                planned_orders=planned_orders,
+                planned_notional=planned_notional,
+                placed_orders=placed_orders,
+                operation_id=operation_id,
+                order_id=order_id,
+                cycle_id=cycle_id,
+                context={
+                    "stage": index,
+                    "price": price,
+                    "contracts": contracts,
+                    "stage_notional": notional,
+                    "ladder_multiplier": ladder_multiplier,
+                    "sizing_leverage": sizing_leverage,
+                    "account_leverage": order_leverage,
+                    "reason": reason,
+                },
+            )
             self._log_event(
                 "INFO",
                 f"{entry_label} entry ladder {action} for {symbol}: stage={index} contracts={contracts} price={price}",
@@ -798,6 +902,18 @@ class StrategyMixin:
             last_ema30 = state.last_ema30
             last_ema60 = state.last_ema60
             state.active_side = None
+            self._record_signal_analytics(
+                "entry_ladder_rejected",
+                symbol=symbol,
+                signal=signal,
+                block_reason="no_valid_ladder_orders",
+                planned_budget=margin_budget,
+                planned_orders=planned_orders,
+                planned_notional=planned_notional,
+                placed_orders=placed_orders,
+                operation_id=operation_id,
+                cycle_id=cycle_id,
+            )
             self._log_event(
                 "INFO",
                 f"No {entry_side} entry ladder orders placed for {symbol}",
@@ -1203,6 +1319,59 @@ class StrategyMixin:
             f"{strategy.ema_exit_decay_max_markup:.8f}"
         )
 
+    def _should_use_split_exit_ladder(self, symbol: str, state: Optional[TradeState], mode: str) -> bool:
+        if mode != "normal" or not state or state.position_size <= 0:
+            return False
+        self._ensure_entry_buckets_initialized(symbol, state)
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+        base_contracts = max(0.0, min(state.base_entry_amount, state.position_size))
+        recovery_contracts = max(0.0, min(state.averaging_entry_amount, max(0.0, state.position_size - base_contracts)))
+        return (
+            base_contracts > eps
+            and recovery_contracts > eps
+            and state.base_entry_price > 0
+        )
+
+    def _split_sell_ladder_signature(self, symbol: str, state: TradeState) -> str:
+        self._ensure_entry_buckets_initialized(symbol, state)
+        base_contracts = max(0.0, min(state.base_entry_amount, state.position_size))
+        recovery_contracts = max(0.0, min(state.averaging_entry_amount, max(0.0, state.position_size - base_contracts)))
+        base_price = state.base_entry_price or state.entry_price
+        base_signature = self._sell_ladder_signature(
+            "normal",
+            symbol,
+            state,
+            total_contracts=base_contracts,
+            avg_entry_price=base_price,
+        )
+        recovery_price = self._sell_price_floor(
+            symbol,
+            base_price,
+            0.0,
+            context=self._sell_ladder_context(symbol, mode="normal"),
+        )
+        return (
+            f"{base_signature}|split_exit=1|"
+            f"base_contracts={base_contracts:.12f}|"
+            f"average_recovery_contracts={recovery_contracts:.12f}|"
+            f"base_entry_price={base_price:.12f}|"
+            f"average_recovery_price={recovery_price:.12f}"
+        )
+
+    def _exit_ladder_signature(
+        self,
+        mode: str = "normal",
+        symbol: str = "",
+        state: Optional[TradeState] = None,
+        total_contracts: Optional[float] = None,
+        avg_entry_price: Optional[float] = None,
+    ) -> str:
+        if state is None and symbol:
+            state = self._get_state(symbol)
+        if symbol and self._should_use_split_exit_ladder(symbol, state, mode):
+            return self._split_sell_ladder_signature(symbol, state)
+        return self._sell_ladder_signature(mode, symbol, state, total_contracts, avg_entry_price)
+
     def _pending_exit_ladder_signature(
         self,
         mode: str = "normal",
@@ -1211,7 +1380,7 @@ class StrategyMixin:
         total_contracts: Optional[float] = None,
         avg_entry_price: Optional[float] = None,
     ) -> str:
-        return f"pending_closeable:{self._sell_ladder_signature(mode, symbol, state, total_contracts, avg_entry_price)}"
+        return f"pending_closeable:{self._exit_ladder_signature(mode, symbol, state, total_contracts, avg_entry_price)}"
 
     def _is_exit_ladder_waiting_for_closeable(
         self,
@@ -1344,6 +1513,8 @@ class StrategyMixin:
         rebuild: bool,
         closeable_contracts: Optional[float] = None,
         mode: str = "normal",
+        exit_scope: Optional[str] = None,
+        signature_override: str = "",
     ):
         state = self._get_state(symbol)
         exit_side = config.EXIT_SIDE
@@ -1394,11 +1565,12 @@ class StrategyMixin:
                 reason="closeable_amount_cap",
             )
 
+        ref_exit_scope = exit_scope or ("base" if mode == "normal" else "position")
         state.sell_ladder_orders = []
         state.sell_ladder_mode = mode
         steps, plan_context = self._sell_ladder_plan(symbol, total_contracts, avg_entry_price, mode=mode, state=state)
         allocations, runner_contracts = self._exit_ladder_contract_allocations(symbol, ladder_contracts, steps, state)
-        state.sell_ladder_signature = self._sell_ladder_signature(
+        state.sell_ladder_signature = signature_override or self._sell_ladder_signature(
             mode,
             symbol,
             state,
@@ -1411,6 +1583,9 @@ class StrategyMixin:
             self._reset_exit_runner_state(state)
         allocated = 0.0
         created_at = time.time()
+        operation_id = self._operation_id("exit_ladder", symbol=symbol)
+        exit_planned_orders = 0
+        exit_planned_notional = 0.0
         sell_context = self._sell_ladder_context(symbol, mode=mode)
         sell_context["external_spread_bps"] = self._safe_float(plan_context.get("external_spread_bps"), 0.0)
         sell_context["external_reason"] = str(plan_context.get("external_reason") or sell_context.get("external_reason") or "unavailable")
@@ -1535,7 +1710,10 @@ class StrategyMixin:
                 "mode": mode,
                 "markup": markup,
                 "ladder_name": plan_context.get("ladder_name", mode),
+                "exit_scope": ref_exit_scope,
                 "external_spread_bps": self._safe_float(plan_context.get("external_spread_bps"), 0.0),
+                "operation_id": operation_id,
+                "cycle_id": state.cycle_id,
             }
             if mode == "controlled_loss_exit":
                 ref["loss_move_fraction"] = markup
@@ -1544,6 +1722,32 @@ class StrategyMixin:
             state.sell_ladder_orders.append(ref)
             event = "exit_ladder_planned" if config.RUNTIME.dry_run else ("exit_ladder_rebuilt" if rebuild else "exit_ladder_placed")
             action = "planned" if config.RUNTIME.dry_run else ("rebuilt" if rebuild else "placed")
+            stage_notional = self._contracts_to_notional(symbol, contracts, price)
+            exit_planned_orders += 1
+            exit_planned_notional += stage_notional
+            self._record_signal_analytics(
+                event,
+                symbol=symbol,
+                signal={},
+                planned_orders=exit_planned_orders,
+                planned_notional=exit_planned_notional,
+                placed_orders=0 if config.RUNTIME.dry_run else exit_planned_orders,
+                operation_id=operation_id,
+                order_id=order_id,
+                cycle_id=state.cycle_id,
+                context={
+                    "stage": index,
+                    "mode": mode,
+                    "price": price,
+                    "contracts": contracts,
+                    "stage_notional": stage_notional,
+                    "markup": markup,
+                    "adaptive_markup": adaptive_markup,
+                    "exit_scope": ref_exit_scope,
+                    "plan_context": plan_context,
+                    "sell_context": sell_context,
+                },
+            )
             self._log_event(
                 "INFO",
                 f"{exit_label} exit ladder {action} for {symbol}: stage={index} contracts={contracts} price={price}",
@@ -1565,6 +1769,7 @@ class StrategyMixin:
                     f"vol_floor={sell_context.get('volatility_floor', 0.0):.6f};"
                     f"funding={sell_context.get('funding_rate', 0.0):.6f};"
                     f"mode={mode};"
+                    f"exit_scope={ref_exit_scope};"
                     f"ladder={plan_context.get('ladder_name', mode)};"
                     f"position_ratio={plan_context.get('position_ratio', 1.0):.4f};"
                     f"position_age_hours={plan_context.get('position_age_hours', 0.0):.2f};"
@@ -1593,6 +1798,274 @@ class StrategyMixin:
         self._refresh_active_side(state)
         self._save_state()
 
+    def _place_average_recovery_exit_order(
+        self,
+        symbol: str,
+        contracts: float,
+        price: float,
+        rebuild: bool,
+        operation_id: str,
+        signature: str,
+    ) -> bool:
+        state = self._get_state(symbol)
+        contracts = self._amount_to_precision(symbol, contracts)
+        if contracts <= 0 or price <= 0:
+            return False
+
+        exit_side = config.EXIT_SIDE
+        exit_label = "Buy" if exit_side == "buy" else "Sell"
+        created_at = time.time()
+        order_id = f"dry_{exit_side}_{symbol}_{int(created_at)}_average_recovery"
+        if not config.RUNTIME.dry_run:
+            try:
+                order = self._create_one_way_order(
+                    symbol=symbol,
+                    order_type="limit",
+                    side=exit_side,
+                    amount=contracts,
+                    price=price,
+                    reduce_only=True,
+                )
+                order_id = str(order.get("id"))
+            except Exception as exc:
+                band_limit = self._price_band_limit_from_error(exc, side=exit_side)
+                if band_limit > 0:
+                    adjusted_price = self._price_inside_htx_band(symbol, price, side=exit_side, limit=band_limit)
+                    try:
+                        order = self._create_one_way_order(
+                            symbol=symbol,
+                            order_type="limit",
+                            side=exit_side,
+                            amount=contracts,
+                            price=adjusted_price,
+                            reduce_only=True,
+                        )
+                        price = adjusted_price
+                        order_id = str(order.get("id"))
+                    except Exception as retry_exc:
+                        reason = "average_recovery_price_band_retry_rejected"
+                        if self._is_reduce_only_amount_exceeds_closeable_error(retry_exc):
+                            reason = "average_recovery_closeable_unavailable"
+                        self._log_event(
+                            "WARNING",
+                            f"{exit_label} average recovery order failed for {symbol}: {retry_exc}",
+                            event="reduce_only_violation_prevented",
+                            symbol=symbol,
+                            side=exit_side,
+                            price=adjusted_price,
+                            amount=contracts,
+                            reason=reason,
+                        )
+                        return False
+                else:
+                    reason = "average_recovery_order_rejected"
+                    if self._is_reduce_only_amount_exceeds_closeable_error(exc):
+                        reason = "average_recovery_closeable_unavailable"
+                    self._log_event(
+                        "WARNING",
+                        f"{exit_label} average recovery order failed for {symbol}: {exc}",
+                        event="reduce_only_violation_prevented",
+                        symbol=symbol,
+                        side=exit_side,
+                        price=price,
+                        amount=contracts,
+                        reason=reason,
+                    )
+                    return False
+
+        ref = {
+            "id": order_id,
+            "side": exit_side,
+            "price": price,
+            "amount": contracts,
+            "created_at": created_at,
+            "stage": len(state.sell_ladder_orders) + 1,
+            "mode": "normal",
+            "markup": 0.0,
+            "ladder_name": "average_recovery",
+            "exit_scope": "average_recovery",
+            "operation_id": operation_id,
+            "cycle_id": state.cycle_id,
+        }
+        state.sell_ladder_orders.append(ref)
+        state.sell_ladder_signature = signature
+        self._refresh_active_side(state)
+        self._save_state()
+
+        event = "exit_ladder_planned" if config.RUNTIME.dry_run else ("exit_ladder_rebuilt" if rebuild else "exit_ladder_placed")
+        stage_notional = self._contracts_to_notional(symbol, contracts, price)
+        self._record_signal_analytics(
+            event,
+            symbol=symbol,
+            signal={},
+            planned_orders=len(state.sell_ladder_orders),
+            planned_notional=stage_notional,
+            placed_orders=0 if config.RUNTIME.dry_run else len(state.sell_ladder_orders),
+            operation_id=operation_id,
+            order_id=order_id,
+            cycle_id=state.cycle_id,
+            context={
+                "stage": ref["stage"],
+                "mode": "normal",
+                "price": price,
+                "contracts": contracts,
+                "stage_notional": stage_notional,
+                "markup": 0.0,
+                "exit_scope": "average_recovery",
+            },
+        )
+        action = "planned" if config.RUNTIME.dry_run else ("rebuilt" if rebuild else "placed")
+        self._log_event(
+            "INFO",
+            f"{exit_label} average recovery exit {action} for {symbol}: contracts={contracts} price={price}",
+            event=event,
+            symbol=symbol,
+            side=exit_side,
+            order_id=order_id,
+            price=price,
+            amount=contracts,
+            reason="reduce_only_close;mode=normal;exit_scope=average_recovery;fee_floor_protected=1",
+        )
+        return True
+
+    def _place_split_exit_ladder(
+        self,
+        symbol: str,
+        total_contracts: float,
+        avg_entry_price: float,
+        rebuild: bool,
+        closeable_contracts: Optional[float] = None,
+        mode: str = "normal",
+    ):
+        state = self._get_state(symbol)
+        if not self._should_use_split_exit_ladder(symbol, state, mode):
+            self._place_sell_ladder(
+                symbol,
+                total_contracts,
+                avg_entry_price,
+                rebuild,
+                closeable_contracts=closeable_contracts,
+                mode=mode,
+            )
+            return
+
+        total_contracts = max(0.0, min(total_contracts, state.position_size))
+        closeable_total = total_contracts
+        if closeable_contracts is not None:
+            closeable_total = min(total_contracts, max(0.0, closeable_contracts))
+        closeable_total = self._amount_to_precision(symbol, closeable_total)
+        if closeable_total <= 0:
+            self._mark_exit_ladder_waiting_for_closeable(symbol, mode, "no_closeable_position_available")
+            return
+
+        base_contracts = max(0.0, min(state.base_entry_amount, state.position_size))
+        recovery_contracts_raw = max(0.0, min(state.averaging_entry_amount, max(0.0, state.position_size - base_contracts)))
+        recovery_contracts = self._amount_to_precision(symbol, min(recovery_contracts_raw, closeable_total))
+        base_closeable = self._amount_to_precision(symbol, min(base_contracts, max(0.0, closeable_total - recovery_contracts)))
+        signature = self._split_sell_ladder_signature(symbol, state)
+        base_price = state.base_entry_price or state.entry_price
+
+        if base_closeable <= 0 and recovery_contracts <= 0:
+            self._mark_exit_ladder_waiting_for_closeable(symbol, mode, "no_closeable_position_available")
+            return
+
+        if closeable_total + max(self._get_min_contracts(symbol) * 1e-9, 1e-12) < total_contracts:
+            self._log_event(
+                "INFO",
+                f"{config.EXIT_SIDE.title()} split exit ladder capped for {symbol}: closeable={closeable_total} position={total_contracts}",
+                event="exit_ladder_rebuilt" if rebuild else "exit_ladder_placed",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                amount=closeable_total,
+                position_size=total_contracts,
+                reason="split_closeable_amount_cap",
+            )
+
+        state.sell_ladder_orders = []
+        state.sell_ladder_mode = mode
+        state.sell_ladder_signature = signature
+        if base_closeable <= 0:
+            self._reset_exit_runner_state(state)
+        self._refresh_active_side(state)
+        self._save_state()
+
+        if base_closeable > 0:
+            self._place_sell_ladder(
+                symbol,
+                base_contracts,
+                base_price,
+                rebuild,
+                closeable_contracts=base_closeable,
+                mode=mode,
+                exit_scope="base",
+                signature_override=signature,
+            )
+
+        state = self._get_state(symbol)
+        if recovery_contracts > 0:
+            recovery_price = self._sell_price_floor(
+                symbol,
+                base_price,
+                0.0,
+                context=self._sell_ladder_context(symbol, mode=mode),
+            )
+            self._place_average_recovery_exit_order(
+                symbol,
+                recovery_contracts,
+                recovery_price,
+                rebuild,
+                operation_id=self._operation_id("average_recovery_exit", symbol=symbol),
+                signature=signature,
+            )
+
+        state = self._get_state(symbol)
+        sell_total = sum(self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders)
+        if sell_total > closeable_total + max(self._get_min_contracts(symbol) * 1e-9, 1e-12):
+            self._log_event(
+                "ERROR",
+                f"{config.EXIT_SIDE.title()} split exit ladder total exceeds closeable position for {symbol}; canceling",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                amount=sell_total,
+                position_size=closeable_total,
+                reason="split_exit_amount_exceeds_position",
+            )
+            self._cancel_sell_orders(symbol, reason="split_exit_amount_exceeds_position")
+            return
+        state.sell_ladder_signature = signature
+        self._refresh_active_side(state)
+        self._save_state()
+
+    def _place_position_exit_ladder(
+        self,
+        symbol: str,
+        total_contracts: float,
+        avg_entry_price: float,
+        rebuild: bool,
+        closeable_contracts: Optional[float] = None,
+        mode: str = "normal",
+    ):
+        state = self._get_state(symbol)
+        if self._should_use_split_exit_ladder(symbol, state, mode):
+            self._place_split_exit_ladder(
+                symbol,
+                total_contracts,
+                avg_entry_price,
+                rebuild,
+                closeable_contracts=closeable_contracts,
+                mode=mode,
+            )
+            return
+        self._place_sell_ladder(
+            symbol,
+            total_contracts,
+            avg_entry_price,
+            rebuild,
+            closeable_contracts=closeable_contracts,
+            mode=mode,
+        )
+
     def _manage_entry_orders(self, symbol: str, signal: Optional[dict], open_orders: List[dict]):
         state = self._get_state(symbol)
         if not state.entry_orders:
@@ -1613,13 +2086,23 @@ class StrategyMixin:
         )
         signal_for_quality = dict(signal or {})
         signal_for_quality["symbol"] = symbol
-        signal_valid = (
-            self._is_add_signal_valid(signal)
-            if is_average_ladder
-            else self._is_entry_signal_valid(signal_for_quality)
-        )
+        signal_valid = self._is_entry_signal_valid(signal_for_quality)
         if not signal_valid:
-            self._cancel_entry_orders(symbol, reason="ema_add_signal_invalid" if is_average_ladder else "ema_entry_signal_invalid")
+            self._cancel_entry_orders(symbol, reason="ema_average_entry_signal_invalid" if is_average_ladder else "ema_entry_signal_invalid")
+            if state.position_size <= 0:
+                last_ladder_ts = state.last_entry_ladder_signal_timestamp
+                self._reset_state(symbol)
+                reset_state = self._get_state(symbol)
+                reset_state.last_entry_ladder_signal_timestamp = last_ladder_ts
+                self._save_state()
+            return
+
+        external_directional_reason = self._external_directional_1m_block_reason(
+            symbol,
+            scope="averaging" if is_average_ladder else "entry",
+        )
+        if external_directional_reason:
+            self._cancel_entry_orders(symbol, reason=external_directional_reason)
             if state.position_size <= 0:
                 last_ladder_ts = state.last_entry_ladder_signal_timestamp
                 self._reset_state(symbol)
@@ -1631,7 +2114,7 @@ class StrategyMixin:
         oldest = min(self._safe_float(ref.get("created_at"), time.time()) for ref in state.entry_orders)
         if time.time() - oldest > config.RUNTIME.order_timeout_sec:
             self._cancel_entry_orders(symbol, reason="order_timeout")
-            self._maybe_close_tiny_partial_entry_after_timeout(symbol)
+            self._maybe_close_tiny_partial_entry_after_timeout(symbol, open_orders=open_orders)
             return
 
         if config.RUNTIME.dry_run:
@@ -1869,7 +2352,7 @@ class StrategyMixin:
 
         state.sell_ladder_orders = adopted
         state.sell_ladder_mode = state.sell_ladder_mode or "normal"
-        state.sell_ladder_signature = self._sell_ladder_signature(state.sell_ladder_mode, symbol, state)
+        state.sell_ladder_signature = self._exit_ladder_signature(state.sell_ladder_mode, symbol, state)
         self._reset_exit_runner_state(state)
         self._refresh_active_side(state)
         self._log_event(
@@ -2416,14 +2899,34 @@ class StrategyMixin:
         return bool(getattr(config.EXTERNAL_PRICE_FEED, "enabled", False) and getattr(self, "external_price_feed", None))
 
     def _external_price_context(self, symbol: str) -> dict:
+        cache = getattr(self, "_external_price_context_cache", None)
+        if cache is None:
+            cache = {}
+            self._external_price_context_cache = cache
+        if symbol in cache:
+            return dict(cache[symbol])
+
         if not self._external_price_settings_enabled():
-            return {"valid": False, "stale": True, "reason": "disabled", "symbol": symbol}
+            context = {"valid": False, "stale": True, "reason": "disabled", "symbol": symbol}
+            cache[symbol] = dict(context)
+            return context
+        def remember(context: dict) -> dict:
+            cache[symbol] = dict(context)
+            return dict(context)
+
+        if not self._external_price_settings_enabled():
+            return remember({"valid": False, "stale": True, "reason": "disabled", "symbol": symbol})
         try:
             ticker = self.exchange.fetch_ticker(symbol)
             market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
             context = self.external_price_feed.get_context(symbol, ticker, market=market)
         except Exception as exc:
-            return {"valid": False, "stale": True, "reason": f"external_price_error:{exc}", "symbol": symbol}
+            context = {"valid": False, "stale": True, "reason": f"external_price_error:{exc}", "symbol": symbol}
+            cache[symbol] = dict(context)
+            return context
+            return remember({"valid": False, "stale": True, "reason": f"external_price_error:{exc}", "symbol": symbol})
+        if not isinstance(context, dict):
+            return remember({"valid": False, "stale": True, "reason": "external_price_context_invalid", "symbol": symbol})
         try:
             self._append_external_price_csv(context)
         except Exception as exc:
@@ -2434,13 +2937,19 @@ class StrategyMixin:
                 symbol=symbol,
                 reason="external_price_csv_failed",
             )
+        cache[symbol] = dict(context)
         return context
+        return remember(context)
 
     def _external_context_tradable(self, context: dict) -> bool:
-        if not context or not context.get("valid"):
-            settings = config.EXTERNAL_PRICE_FEED
-            return bool(getattr(settings, "ignore_reference_if_stale", True) and not getattr(settings, "disable_trading_if_reference_stale", False))
-        return True
+        if not context:
+            return False
+        if context.get("valid"):
+            return True
+        settings = config.EXTERNAL_PRICE_FEED
+        if not context.get("stale"):
+            return False
+        return bool(getattr(settings, "ignore_reference_if_stale", True) and not getattr(settings, "disable_trading_if_reference_stale", False))
 
     def _external_price_reason(self, context: dict) -> str:
         return (
@@ -2489,15 +2998,66 @@ class StrategyMixin:
             return max(0.0, self._safe_float(settings.impulse_score_bonus, 0.0))
         return 0.0
 
+    def _external_directional_1m_block_reason(
+        self,
+        symbol: str,
+        context: Optional[dict] = None,
+        *,
+        scope: str = "entry",
+    ) -> str:
+        settings = config.EXTERNAL_PRICE_FEED
+        if not getattr(settings, "directional_1m_gate_enabled", True):
+            return ""
+        if not self._external_price_settings_enabled():
+            return ""
+        if context is None:
+            context = self._external_price_context(symbol)
+        if not context.get("valid"):
+            return ""
+
+        threshold_attr = (
+            "directional_averaging_1m_block_bps"
+            if scope == "averaging"
+            else "directional_entry_1m_block_bps"
+        )
+        threshold = max(0.0, self._safe_float(getattr(settings, threshold_attr, 0.0), 0.0))
+        if threshold <= 0:
+            return ""
+
+        htx_change = self._safe_float(context.get("htx_change_1m_bps"), 0.0)
+        mexc_change = self._safe_float(context.get("mexc_change_1m_bps"), 0.0)
+        direction = -1.0 if config.POSITION_SIDE == "short" else 1.0
+        directional_htx_change = htx_change * direction
+        directional_mexc_change = mexc_change * direction
+
+        adverse_sources = []
+        if directional_htx_change < -threshold:
+            adverse_sources.append("htx")
+        if directional_mexc_change < -threshold:
+            adverse_sources.append("mexc")
+        if not adverse_sources:
+            return ""
+
+        return (
+            "external_directional_1m_blocked;"
+            f"scope={scope};limit_bps={threshold:.4f};side={config.POSITION_SIDE};"
+            f"adverse_sources={','.join(adverse_sources)};"
+            f"directional_htx_change_1m_bps={directional_htx_change:.4f};"
+            f"directional_mexc_change_1m_bps={directional_mexc_change:.4f};"
+            f"htx_change_1m_bps={htx_change:.4f};mexc_change_1m_bps={mexc_change:.4f};"
+            f"{self._external_price_reason(context)}"
+        )
+
     def _external_entry_block_reason(self, symbol: str) -> str:
         settings = config.EXTERNAL_PRICE_FEED
         if not self._external_price_settings_enabled() or not getattr(settings, "entry_filter_enabled", True):
             return ""
         context = self._external_price_context(symbol)
         if not context.get("valid"):
-            if getattr(settings, "disable_trading_if_reference_stale", False):
-                return f"external_reference_stale;{self._external_price_reason(context)}"
-            return ""
+            if self._external_context_tradable(context):
+                return ""
+            reason = "external_reference_stale" if context.get("stale") else "external_reference_invalid"
+            return f"{reason};{self._external_price_reason(context)}"
 
         htx_change = self._safe_float(context.get("htx_change_1m_bps"), 0.0)
         mexc_change = self._safe_float(context.get("mexc_change_1m_bps"), 0.0)
@@ -2513,6 +3073,10 @@ class StrategyMixin:
                 f"mexc_change_1m_bps={mexc_change:.4f};cooldown_sec={int(settings.block_duration_sec)};"
                 f"{self._external_price_reason(context)}"
             )
+
+        directional_reason = self._external_directional_1m_block_reason(symbol, context=context, scope="entry")
+        if directional_reason:
+            return directional_reason
 
         spread_bps = self._safe_float(context.get("spread_bps"), 0.0)
         if config.POSITION_SIDE == "short":
@@ -2925,6 +3489,16 @@ class StrategyMixin:
             closeable = min(closeable, state.position_available)
         return self._amount_to_precision(symbol, closeable)
 
+    def _exit_runner_reference_entry_price(self, symbol: str, state: TradeState) -> float:
+        if self._should_use_split_exit_ladder(symbol, state, "normal") and state.base_entry_price > 0:
+            return state.base_entry_price
+        return state.entry_price
+
+    def _exit_runner_base_contracts(self, symbol: str, state: TradeState) -> float:
+        if self._should_use_split_exit_ladder(symbol, state, "normal"):
+            return max(0.0, min(state.base_entry_amount, state.position_size))
+        return state.position_size
+
     def _place_exit_runner_close_order(self, symbol: str, current_price: float, reason: str) -> bool:
         state = self._get_state(symbol)
         if any(ref.get("runner") for ref in state.sell_ladder_orders):
@@ -2943,7 +3517,8 @@ class StrategyMixin:
             return True
 
         contracts = self._exit_runner_close_contracts(symbol, state)
-        price = self._exit_runner_close_price(symbol, state.entry_price, current_price)
+        runner_entry_price = self._exit_runner_reference_entry_price(symbol, state)
+        price = self._exit_runner_close_price(symbol, runner_entry_price, current_price)
         if contracts <= 0 or price <= 0:
             self._log_event(
                 "WARNING",
@@ -2996,11 +3571,12 @@ class StrategyMixin:
             "stage": len(state.sell_ladder_orders) + 1,
             "mode": "normal",
             "runner": True,
+            "exit_scope": "base",
             "reason": reason,
         }
         state.sell_ladder_orders.append(ref)
         state.exit_runner_contracts = contracts
-        state.sell_ladder_signature = self._sell_ladder_signature("normal", symbol, state)
+        state.sell_ladder_signature = self._exit_ladder_signature("normal", symbol, state)
         self._refresh_active_side(state)
         self._save_state()
         self._log_event(
@@ -3028,7 +3604,9 @@ class StrategyMixin:
         if any(ref.get("runner") for ref in state.sell_ladder_orders):
             return False
 
-        steps, plan_context = self._sell_ladder_plan(symbol, state.position_size, state.entry_price, mode="normal", state=state)
+        runner_base_contracts = self._exit_runner_base_contracts(symbol, state)
+        runner_entry_price = self._exit_runner_reference_entry_price(symbol, state)
+        steps, plan_context = self._sell_ladder_plan(symbol, runner_base_contracts, runner_entry_price, mode="normal", state=state)
         if not plan_context.get("runner_enabled"):
             if state.exit_runner_contracts > 0 or state.exit_runner_active:
                 self._reset_exit_runner_state(state)
@@ -3036,7 +3614,7 @@ class StrategyMixin:
             return False
 
         if state.exit_runner_contracts <= 0:
-            _, runner_contracts = self._exit_ladder_contract_allocations(symbol, state.position_size, steps, state)
+            _, runner_contracts = self._exit_ladder_contract_allocations(symbol, runner_base_contracts, steps, state)
             state.exit_runner_contracts = runner_contracts
         if state.exit_runner_contracts <= 0:
             return False
@@ -3098,7 +3676,7 @@ class StrategyMixin:
             changed = changed or state.exit_runner_bottom_price != previous_bottom
             if pullback > 0 and current_price >= state.exit_runner_bottom_price * (1 + pullback):
                 close_reason = f"runner_trailing_pullback;bottom={state.exit_runner_bottom_price:.12f};pullback={pullback:.5f}"
-            elif take_profit > 0 and current_price <= state.entry_price * (1 - take_profit):
+            elif take_profit > 0 and current_price <= runner_entry_price * (1 - take_profit):
                 close_reason = f"runner_take_profit;target_markup={take_profit:.5f}"
         else:
             previous_peak = state.exit_runner_peak_price or current_price
@@ -3106,7 +3684,7 @@ class StrategyMixin:
             changed = changed or state.exit_runner_peak_price != previous_peak
             if pullback > 0 and current_price <= state.exit_runner_peak_price * (1 - pullback):
                 close_reason = f"runner_trailing_pullback;peak={state.exit_runner_peak_price:.12f};pullback={pullback:.5f}"
-            elif take_profit > 0 and current_price >= state.entry_price * (1 + take_profit):
+            elif take_profit > 0 and current_price >= runner_entry_price * (1 + take_profit):
                 close_reason = f"runner_take_profit;target_markup={take_profit:.5f}"
 
         if not close_reason and self._trigger_ema_broken_against_position(signal):
@@ -3174,6 +3752,19 @@ class StrategyMixin:
             * effective_scale
         )
         desired_notional = desired_margin * leverage
+        base_notional = self._safe_float(state.initial_entry_notional, 0.0)
+        if base_notional <= 0:
+            base_notional = self._contracts_to_notional(symbol, state.base_entry_amount, state.base_entry_price)
+        if base_notional <= 0:
+            base_notional = self._contracts_to_notional(symbol, state.position_size, state.entry_price)
+        if current_position_notional <= 0 or base_notional <= 0:
+            return 0.0, "position_notional_unavailable"
+
+        base_fraction = max(0.0, self._safe_float(config.STRATEGY.ema_averaging_base_fraction, 0.0))
+        power = max(0.0, self._safe_float(config.STRATEGY.ema_averaging_power, 0.0))
+        ratio = max(current_position_notional / base_notional, 1.0)
+        desired_notional = base_fraction * base_notional * (ratio ** power)
+        desired_margin = desired_notional / leverage
 
         total_cap_notional = equity * leverage * config.RISK.max_total_notional_fraction
         position_cap_notional = equity * leverage * config.RISK.max_position_notional_fraction
@@ -3259,6 +3850,20 @@ class StrategyMixin:
                 f"account_pnl={current:.8f};trough={trough:.8f};bounce={bounce_quote:.8f};delta={delta:.8f}"
             )
         return ""
+            f"ok:ema_average_base_fraction={base_fraction:.3f};"
+            f"ema_average_power={power:.3f};"
+            f"base_notional={base_notional:.8f};"
+            f"current_notional={current_position_notional:.8f};"
+            f"ratio={ratio:.6f};"
+            f"desired_margin={desired_margin:.8f};planned_margin={planned_margin:.8f}"
+        )
+
+    def _ema_averaging_drawdown_threshold(self, stage_index: int) -> float:
+        steps = tuple(config.STRATEGY.averaging_drawdown_steps or ())
+        if steps:
+            index = min(max(0, stage_index), len(steps) - 1)
+            return max(0.0, self._safe_float(steps[index], 0.0))
+        return max(0.0, self._safe_float(config.STRATEGY.ema_averaging_drawdown_step, 0.0))
 
     def _maybe_place_average_buy(self, symbol: str, signal: Optional[dict]):
         if symbol not in self.entry_symbols:
@@ -3275,7 +3880,17 @@ class StrategyMixin:
             return
         if state.sell_ladder_orders == []:
             return
-        if not self._is_add_signal_valid(signal):
+        signal_for_quality = dict(signal or {})
+        signal_for_quality["symbol"] = symbol
+        quality_reason = self._entry_signal_quality_block_reason(signal_for_quality)
+        if quality_reason:
+            self._record_signal_analytics(
+                "averaging_checked",
+                symbol=symbol,
+                signal=signal_for_quality,
+                block_reason=quality_reason,
+                context={"position_size": state.position_size, "entry_price": state.entry_price},
+            )
             if signal and not signal.get("macro_valid", False):
                 self._log_event(
                     "DEBUG",
@@ -3285,11 +3900,18 @@ class StrategyMixin:
                     position_size=state.position_size,
                     entry_price=state.entry_price,
                     reason="ema_macro_broken_no_average",
-            )
+                )
             return
 
         macro_context = self._macro_guard_context()
         if macro_context.get("disable_averaging"):
+            self._record_signal_analytics(
+                "averaging_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason="macro_disable_averaging",
+                context={"macro_context": macro_context},
+            )
             self._log_macro_action_blocked("macro_averaging_blocked", symbol, signal, macro_context)
             return
 
@@ -3307,6 +3929,13 @@ class StrategyMixin:
             return
 
         if state.average_stage >= max(0, int(strategy.ema_max_averaging_stages)):
+            self._record_signal_analytics(
+                "averaging_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason="ema_max_averaging_stages_reached",
+                context={"average_stage": state.average_stage},
+            )
             self._log_event(
                 "DEBUG",
                 f"EMA averaging skipped for {symbol}: max stages reached",
@@ -3329,8 +3958,40 @@ class StrategyMixin:
             return
 
         drawdown = self._position_drawdown(state, reference_price)
-        drawdown_threshold = max(0.0, strategy.ema_averaging_drawdown_step)
+        drawdown_threshold = self._ema_averaging_drawdown_threshold(state.average_stage)
         if drawdown < drawdown_threshold:
+            self._record_signal_analytics(
+                "averaging_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason="drawdown_below_threshold",
+                context={"drawdown": drawdown, "threshold": drawdown_threshold, "stage": state.average_stage + 1},
+            )
+            return
+
+        external_directional_reason = self._external_directional_1m_block_reason(symbol, scope="averaging")
+        if external_directional_reason:
+            self._record_signal_analytics(
+                "averaging_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason=external_directional_reason,
+                external_context=self._external_context_from_cache(symbol),
+                context={
+                    "drawdown": drawdown,
+                    "threshold": drawdown_threshold,
+                    "stage": state.average_stage + 1,
+                },
+            )
+            self._log_event(
+                "INFO",
+                f"EMA averaging skipped for {symbol}: external 1m gate",
+                event="ema_average_skipped",
+                symbol=symbol,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=external_directional_reason,
+            )
             return
 
         account_budget_scale = (
@@ -3343,6 +4004,20 @@ class StrategyMixin:
             state,
             reference_price,
             budget_scale=account_budget_scale,
+        budget, budget_reason = self._ema_averaging_budget(symbol, state, reference_price)
+        self._record_signal_analytics(
+            "averaging_checked",
+            symbol=symbol,
+            signal=signal,
+            block_reason="" if budget > 0 else budget_reason,
+            planned_budget=budget,
+            planned_notional=budget * max(float(config.RISK.leverage), 1.0),
+            context={
+                "drawdown": drawdown,
+                "threshold": drawdown_threshold,
+                "stage": state.average_stage + 1,
+                "budget_reason": budget_reason,
+            },
         )
         if budget <= 0:
             self._log_event(
@@ -3583,16 +4258,36 @@ class StrategyMixin:
             return
         signal_for_quality = dict(signal or {})
         signal_for_quality["symbol"] = symbol
-        if not self._is_entry_signal_valid(signal_for_quality):
+        quality_reason = self._entry_signal_quality_block_reason(signal_for_quality)
+        if quality_reason:
+            self._record_signal_analytics(
+                "entry_gate_checked",
+                symbol=symbol,
+                signal=signal_for_quality,
+                block_reason=quality_reason,
+            )
             return
         if state.last_entry_ladder_signal_timestamp == signal.get("ts"):
             return
         macro_context = self._macro_guard_context()
         if macro_context.get("disable_new_entries"):
+            self._record_signal_analytics(
+                "entry_gate_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason="macro_disable_new_entries",
+                context={"macro_context": macro_context},
+            )
             self._log_macro_action_blocked("macro_entry_blocked", symbol, signal, macro_context)
             return
         gate_reason = self._entry_gate_block_reason(symbol, signal)
         if gate_reason:
+            self._record_signal_analytics(
+                "entry_gate_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason=gate_reason,
+            )
             logged = getattr(self, "_entry_gate_skip_logged", set())
             key = (symbol, signal.get("ts"), gate_reason)
             if key not in logged:
@@ -3608,6 +4303,12 @@ class StrategyMixin:
             return
         health_reason = self._profile_health_block_reason()
         if health_reason:
+            self._record_signal_analytics(
+                "entry_gate_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason=health_reason,
+            )
             self._log_event(
                 "INFO",
                 f"Signal skipped for {symbol}: profile health gate",
@@ -3619,6 +4320,12 @@ class StrategyMixin:
 
         reference_price, _ = self._fetch_reference_price(symbol)
         if reference_price <= 0:
+            self._record_signal_analytics(
+                "entry_gate_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason="reference_price_unavailable",
+            )
             self._log_event(
                 "WARNING",
                 f"No reference bid/last price for {symbol}",
@@ -3630,6 +4337,13 @@ class StrategyMixin:
 
         external_block_reason = self._external_entry_block_reason(symbol)
         if external_block_reason:
+            self._record_signal_analytics(
+                "entry_gate_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason=external_block_reason,
+                external_context=self._external_context_from_cache(symbol),
+            )
             self._log_event(
                 "INFO",
                 f"Signal skipped for {symbol}: external price filter",
@@ -3639,6 +4353,12 @@ class StrategyMixin:
             )
             return
 
+        self._record_signal_analytics(
+            "entry_gate_checked",
+            symbol=symbol,
+            signal=signal,
+            external_context=self._external_context_from_cache(symbol),
+        )
         budget, budget_reason = self._risk_budget(
             symbol,
             state,
@@ -3646,6 +4366,17 @@ class StrategyMixin:
             is_new_position=True,
             signal=signal,
             budget_scale=1.0,
+        )
+        planned_notional = budget * max(float(config.RISK.leverage), 1.0)
+        self._record_signal_analytics(
+            "entry_budget_calculated" if budget > 0 else "entry_budget_blocked",
+            symbol=symbol,
+            signal=signal,
+            block_reason="" if budget > 0 else budget_reason,
+            external_context=self._external_context_from_cache(symbol),
+            planned_budget=budget,
+            planned_notional=planned_notional,
+            context={"reference_price": reference_price, "budget_reason": budget_reason},
         )
         if budget <= 0:
             self._log_event(
@@ -3664,7 +4395,7 @@ class StrategyMixin:
         if state.position_size <= 0:
             return
         mode = state.sell_ladder_mode if self._is_managed_exit_mode(state.sell_ladder_mode) else "normal"
-        desired_signature = self._sell_ladder_signature(mode, symbol, state)
+        desired_signature = self._exit_ladder_signature(mode, symbol, state)
         if state.sell_ladder_orders:
             if state.sell_ladder_signature == desired_signature:
                 return
@@ -3692,7 +4423,7 @@ class StrategyMixin:
             if self._is_exit_ladder_waiting_for_closeable(symbol, mode, state):
                 return
             had_sell_ladder = False
-        self._place_sell_ladder(
+        self._place_position_exit_ladder(
             symbol,
             state.position_size,
             state.entry_price,
