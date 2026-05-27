@@ -302,7 +302,16 @@ class SignalMixin:
         )
         append_macro = getattr(self, "_append_macro_csv", None)
         if append_macro:
-            append_macro(context)
+            try:
+                append_macro(context)
+            except Exception as exc:
+                self._log_event(
+                    "WARNING",
+                    f"Could not append macro context CSV: {exc}",
+                    event="macro_context_csv_failed",
+                    symbol=context.get("gold_symbol", ""),
+                    reason="macro_csv_failed",
+                )
 
     def _gold_btc_ratio_return(
         self,
@@ -1117,7 +1126,10 @@ class SignalMixin:
     ) -> list:
         timeframe = timeframe or config.SIGNALS.timeframe
         client = exchange or self.exchange
-        ohlcv = client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if exchange is None and hasattr(self, "_fetch_ohlcv_with_retry"):
+            ohlcv = self._fetch_ohlcv_with_retry(symbol, timeframe=timeframe, limit=limit)
+        else:
+            ohlcv = client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         now_ms = int(time.time() * 1000)
         timeframe_ms = self._signal_timeframe_seconds(timeframe) * 1000
         current_bucket = (now_ms // timeframe_ms) * timeframe_ms

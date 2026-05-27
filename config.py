@@ -41,6 +41,7 @@ def _env(name: str, profile: str = "") -> str:
         candidates.extend((f"{prefix}_{name}", f"HTXBOT_{prefix}_{name}"))
     candidates.append(f"HTXBOT_{name}")
     candidates.append(name)
+    candidates.append(f"HTXBOT_{name}")
     for candidate in candidates:
         value = os.getenv(candidate, "").strip()
         if value:
@@ -211,7 +212,8 @@ class RiskSettings:
     account_leverage: int
     margin_mode: str
     position_mode: str
-    cooldown_minutes_after_close: int
+    cooldown_minutes_after_close: float
+    post_win_cooldown_minutes_after_close: float
 
 
 @dataclass(frozen=True)
@@ -261,6 +263,8 @@ class StrategySettings:
     ema_averaging_enabled: bool
     ema_averaging_drawdown_step: float
     ema_averaging_position_fraction: float
+    ema_averaging_base_fraction: float
+    ema_averaging_power: float
     ema_averaging_interval_hours: float
     ema_max_averaging_stages: int
     ema_breakeven_enabled: bool
@@ -444,6 +448,9 @@ class ExternalPriceFeedSettings:
     max_htx_discount_for_short_bps: float
     block_if_exchange_divergence_1m_bps: float
     block_duration_sec: int
+    directional_1m_gate_enabled: bool
+    directional_entry_1m_block_bps: float
+    directional_averaging_1m_block_bps: float
     impulse_confirmation_enabled: bool
     mexc_lead_threshold_bps_30s: float
     impulse_score_bonus: float
@@ -466,6 +473,10 @@ class MonitoringSettings:
     csv_log_file: str
     macro_csv_file: str
     external_price_csv_file: str
+    signal_analytics_csv_file: str
+    signal_analytics_jsonl_file: str
+    diagnostics_csv_file: str
+    diagnostics_jsonl_file: str
     csv_archive_dir: str
     csv_rotate_max_bytes: int
     equity_csv_ttl_sec: float
@@ -800,7 +811,12 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         account_leverage=_env_int("ACCOUNT_LEVERAGE", _env_int("ORDER_LEVERAGE", 0, profile=name), profile=name),
         margin_mode="cross",
         position_mode="one-way",
-        cooldown_minutes_after_close=10,
+        cooldown_minutes_after_close=_env_float("COOLDOWN_MINUTES_AFTER_CLOSE", 10.0, profile=name),
+        post_win_cooldown_minutes_after_close=_env_float(
+            "POST_WIN_COOLDOWN_MINUTES_AFTER_CLOSE",
+            _env_float("WIN_COOLDOWN_MINUTES_AFTER_CLOSE", 90.0, profile=name),
+            profile=name,
+        ),
     )
     strategy = StrategySettings(
         ema_strategy_enabled=_env_bool("EMA_STRATEGY_ENABLED", True, profile=name),
@@ -846,10 +862,20 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_exit_runner_trailing_pullback=_env_float("EMA_EXIT_RUNNER_TRAILING_PULLBACK", 0.010, profile=name),
         ema_exit_runner_take_profit_markup=_env_float("EMA_EXIT_RUNNER_TAKE_PROFIT_MARKUP", 0.050, profile=name),
         ema_averaging_enabled=_env_bool("EMA_AVERAGING_ENABLED", True, profile=name),
-        ema_averaging_drawdown_step=_env_float("EMA_AVERAGING_DRAWDOWN_STEP", 0.01, profile=name),
-        ema_averaging_position_fraction=_env_float("EMA_AVERAGING_POSITION_FRACTION", 0.50, profile=name),
+        ema_averaging_drawdown_step=_env_float("EMA_AVERAGING_DRAWDOWN_STEP", 0.02, profile=name),
+        ema_averaging_position_fraction=_env_float(
+            "EMA_AVERAGING_POSITION_FRACTION",
+            _env_float("EMA_AVERAGING_BASE_FRACTION", 0.45, profile=name),
+            profile=name,
+        ),
+        ema_averaging_base_fraction=_env_float(
+            "EMA_AVERAGING_BASE_FRACTION",
+            _env_float("EMA_AVERAGING_POSITION_FRACTION", 0.45, profile=name),
+            profile=name,
+        ),
+        ema_averaging_power=_env_float("EMA_AVERAGING_POWER", 0.80, profile=name),
         ema_averaging_interval_hours=_env_float("EMA_AVERAGING_INTERVAL_HOURS", 8.0, profile=name),
-        ema_max_averaging_stages=_env_int("EMA_MAX_AVERAGING_STAGES", 5, profile=name),
+        ema_max_averaging_stages=_env_int("EMA_MAX_AVERAGING_STAGES", 2, profile=name),
         ema_breakeven_enabled=_env_bool("EMA_BREAKEVEN_ENABLED", True, profile=name),
         ema_breakeven_after_hours=_env_float("EMA_BREAKEVEN_AFTER_HOURS", 48.0, profile=name),
         ema_breakeven_reprice_minutes=_env_float("EMA_BREAKEVEN_REPRICE_MINUTES", 15.0, profile=name),
@@ -900,13 +926,25 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         entry_btc_return_window=30,
         entry_btc_min_return=0.0,
         enable_averaging=_env_bool("EMA_AVERAGING_ENABLED", True, profile=name),
-        max_buy_stages=_env_int("MAX_BUY_STAGES", _env_int("EMA_MAX_AVERAGING_STAGES", 5, profile=name) + 1, profile=name),
+        max_buy_stages=_env_int("MAX_BUY_STAGES", _env_int("EMA_MAX_AVERAGING_STAGES", 2, profile=name) + 1, profile=name),
         averaging_drawdown_steps=tuple(
-            _env_float(f"AVERAGING_DRAWDOWN_STEP_{index}", _env_float("EMA_AVERAGING_DRAWDOWN_STEP", 0.01, profile=name), profile=name)
+            _env_float(
+                f"AVERAGING_DRAWDOWN_STEP_{index}",
+                _env_float("EMA_AVERAGING_DRAWDOWN_STEP", (0.02, 0.04)[index - 1], profile=name),
+                profile=name,
+            )
             for index in range(1, 3)
         ),
         averaging_budget_fractions=tuple(
-            _env_float(f"AVERAGING_BUDGET_FRACTION_{index}", _env_float("EMA_AVERAGING_POSITION_FRACTION", 0.50, profile=name), profile=name)
+            _env_float(
+                f"AVERAGING_BUDGET_FRACTION_{index}",
+                _env_float(
+                    "EMA_AVERAGING_BASE_FRACTION",
+                    _env_float("EMA_AVERAGING_POSITION_FRACTION", 0.45, profile=name),
+                    profile=name,
+                ),
+                profile=name,
+            )
             for index in range(1, 3)
         ),
         averaging_ladder_offset_multiplier=1.0,
@@ -1023,6 +1061,10 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         csv_log_file=_path(name, f"bot_futures{'_short' if name == 'short' else ''}_trades.csv"),
         macro_csv_file=_path(name, "bot_futures_macro.csv"),
         external_price_csv_file=_path(name, "external_price_feed.csv"),
+        signal_analytics_csv_file=_path(name, "signal_analytics.csv"),
+        signal_analytics_jsonl_file=_path(name, "signal_analytics.jsonl"),
+        diagnostics_csv_file=_path(name, "diagnostics.csv"),
+        diagnostics_jsonl_file=_path(name, "diagnostics.jsonl"),
         csv_archive_dir=archive_dir,
         csv_rotate_max_bytes=_env_int("CSV_ROTATE_MAX_BYTES", 1 * 1024 * 1024, profile=name),
         equity_csv_ttl_sec=_env_float("EQUITY_CSV_TTL_SEC", 30.0, profile=name),
@@ -1046,6 +1088,13 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         max_htx_discount_for_short_bps=_env_float("EXTERNAL_PRICE_MAX_HTX_DISCOUNT_FOR_SHORT_BPS", 15.0, profile=name),
         block_if_exchange_divergence_1m_bps=_env_float("EXTERNAL_PRICE_BLOCK_IF_DIVERGENCE_1M_BPS", 50.0, profile=name),
         block_duration_sec=_env_int("EXTERNAL_PRICE_BLOCK_DURATION_SEC", 300, profile=name),
+        directional_1m_gate_enabled=_env_bool("EXTERNAL_PRICE_DIRECTIONAL_1M_GATE_ENABLED", True, profile=name),
+        directional_entry_1m_block_bps=_env_float("EXTERNAL_PRICE_DIRECTIONAL_ENTRY_1M_BLOCK_BPS", 50.0, profile=name),
+        directional_averaging_1m_block_bps=_env_float(
+            "EXTERNAL_PRICE_DIRECTIONAL_AVERAGING_1M_BLOCK_BPS",
+            _env_float("EXTERNAL_PRICE_DIRECTIONAL_ENTRY_1M_BLOCK_BPS", 50.0, profile=name),
+            profile=name,
+        ),
         impulse_confirmation_enabled=_env_bool("EXTERNAL_PRICE_IMPULSE_CONFIRMATION_ENABLED", True, profile=name),
         mexc_lead_threshold_bps_30s=_env_float("EXTERNAL_PRICE_MEXC_LEAD_THRESHOLD_BPS_30S", 5.0, profile=name),
         impulse_score_bonus=_env_float("EXTERNAL_PRICE_IMPULSE_SCORE_BONUS", 0.02, profile=name),

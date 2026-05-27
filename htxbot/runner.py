@@ -9,11 +9,13 @@ class RunnerMixin:
     def _log_step_exception(self, symbol: str, exc: Exception):
         is_transient = bool(getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc))
         self._log_event(
-            "WARNING" if is_transient else "ERROR",
+            "WARNING" if is_transient else "FAULT",
             f"Step failed for {symbol}: {exc}",
             event="state_exchange_mismatch",
             symbol=symbol,
             reason="step_network_error" if is_transient else "step_error",
+            exception=exc,
+            retryable=is_transient,
         )
 
     def setup(self):
@@ -210,17 +212,20 @@ class RunnerMixin:
 
     def run(self):
         self._acquire_runtime_lock()
-        self.setup()
-        self._log_event("INFO", "HTX futures bot loop started", event="futures_setup", reason="bot_started")
+        try:
+            self.setup()
+            self._log_event("INFO", "HTX futures bot loop started", event="futures_setup", reason="bot_started")
 
-        while True:
-            self._reset_private_caches()
-            self._update_signal_cache_if_needed()
-            self._prepare_new_entry_gate()
-            for symbol in self.symbols:
-                try:
-                    self.step_symbol(symbol)
-                except Exception as exc:
-                    self._log_step_exception(symbol, exc)
-            self._save_state()
-            time.sleep(config.RUNTIME.poll_interval_sec)
+            while True:
+                self._reset_private_caches()
+                self._update_signal_cache_if_needed()
+                self._prepare_new_entry_gate()
+                for symbol in self.symbols:
+                    try:
+                        self.step_symbol(symbol)
+                    except Exception as exc:
+                        self._log_step_exception(symbol, exc)
+                self._save_state()
+                time.sleep(config.RUNTIME.poll_interval_sec)
+        finally:
+            self._release_runtime_lock()

@@ -78,7 +78,7 @@ class ExternalPriceFeed:
             return self._empty_context(symbol, now, unsupported_reason)
 
         htx_book = self._book_from_htx(htx_ticker, now)
-        if not self._book_valid(htx_book, require_qty=False):
+        if self._book_invalid_reason(htx_book, require_qty=False):
             return self._empty_context(symbol, now, "htx_book_invalid")
 
         mexc_symbol = self.htx_symbol_to_mexc(symbol, market)
@@ -86,10 +86,12 @@ class ExternalPriceFeed:
             return self._empty_context(symbol, now, "mexc_symbol_unavailable")
 
         mexc_book, reason = self._mexc_book(symbol, mexc_symbol, now)
-        if not self._book_valid(mexc_book, require_qty=True):
-            context = self._context_from_books(symbol, mexc_symbol, htx_book, mexc_book, now, reason or "mexc_book_invalid")
+        mexc_invalid_reason = self._book_invalid_reason(mexc_book, require_qty=True)
+        if mexc_invalid_reason:
+            invalid_reason = reason if reason and reason != "ok" else mexc_invalid_reason
+            context = self._context_from_books(symbol, mexc_symbol, htx_book, mexc_book, now, invalid_reason)
             context["valid"] = False
-            context["stale"] = True
+            context["reason"] = invalid_reason
             return context
 
         context = self._context_from_books(symbol, mexc_symbol, htx_book, mexc_book, now, "ok")
@@ -160,6 +162,8 @@ class ExternalPriceFeed:
             "mexc_mid": mexc_mid,
             "mexc_bid_qty": mexc.bid_qty,
             "mexc_ask_qty": mexc.ask_qty,
+            "mexc_bid_notional": mexc.bid * mexc.bid_qty,
+            "mexc_ask_notional": mexc.ask * mexc.ask_qty,
             "spread_bps": spread_bps,
             "age_ms": age_ms,
             **stats,
@@ -228,16 +232,25 @@ class ExternalPriceFeed:
         )
 
     def _book_valid(self, book: BookTicker, require_qty: bool) -> bool:
+        return not self._book_invalid_reason(book, require_qty)
+
+    def _book_invalid_reason(self, book: BookTicker, require_qty: bool) -> str:
         if book.mid <= 0:
-            return False
+            return "mexc_book_invalid" if require_qty else "book_invalid"
         if require_qty:
             bid_notional = book.bid * book.bid_qty
             ask_notional = book.ask * book.ask_qty
-            if bid_notional < max(0.0, getattr(self.settings, "min_valid_bid_qty_usdt", 0.0)):
-                return False
-            if ask_notional < max(0.0, getattr(self.settings, "min_valid_ask_qty_usdt", 0.0)):
-                return False
-        return True
+            bid_min = max(0.0, getattr(self.settings, "min_valid_bid_qty_usdt", 0.0))
+            ask_min = max(0.0, getattr(self.settings, "min_valid_ask_qty_usdt", 0.0))
+            bid_low = bid_notional < bid_min
+            ask_low = ask_notional < ask_min
+            if bid_low and ask_low:
+                return "mexc_bid_ask_notional_below_min"
+            if bid_low:
+                return "mexc_bid_notional_below_min"
+            if ask_low:
+                return "mexc_ask_notional_below_min"
+        return ""
 
     def _internal_spreads_ok(self, htx: BookTicker, mexc: BookTicker) -> bool:
         max_spread = max(0.0, float(getattr(self.settings, "max_internal_spread_bps", 0.0) or 0.0))
@@ -261,6 +274,8 @@ class ExternalPriceFeed:
             "mexc_mid": 0.0,
             "mexc_bid_qty": 0.0,
             "mexc_ask_qty": 0.0,
+            "mexc_bid_notional": 0.0,
+            "mexc_ask_notional": 0.0,
             "spread_bps": 0.0,
             "age_ms": 10**12,
             "spread_bps_now": 0.0,

@@ -67,11 +67,12 @@ class CombinedHtxFuturesBot:
                             log_step_exception(symbol, exc)
                         else:
                             bot._log_event(
-                                "ERROR",
+                                "FAULT",
                                 f"Step failed for {symbol}: {exc}",
                                 event="state_exchange_mismatch",
                                 symbol=symbol,
                                 reason="step_error",
+                                exception=exc,
                             )
                 bot._save_state()
 
@@ -103,22 +104,27 @@ class CombinedHtxFuturesBot:
         return min(intervals) if intervals else 3
 
     def run(self):
-        self.setup()
-        names = ", ".join(bot.profile.name for bot in self.bots)
-        for bot in self.bots:
-            with config.use_profile(bot.profile):
-                bot._log_event(
-                    "INFO",
-                    f"Combined HTX futures bot loop started for profiles: {names}",
-                    event="futures_setup",
-                    reason="combined_bot_started",
-                )
+        try:
+            self.setup()
+            names = ", ".join(bot.profile.name for bot in self.bots)
+            for bot in self.bots:
+                with config.use_profile(bot.profile):
+                    bot._log_event(
+                        "INFO",
+                        f"Combined HTX futures bot loop started for profiles: {names}",
+                        event="futures_setup",
+                        reason="combined_bot_started",
+                    )
 
-        while True:
-            started_at = time.time()
-            self.run_once()
-            elapsed = time.time() - started_at
-            time.sleep(max(0.0, self.poll_interval() - elapsed))
+            while True:
+                started_at = time.time()
+                self.run_once()
+                elapsed = time.time() - started_at
+                time.sleep(max(0.0, self.poll_interval() - elapsed))
+        finally:
+            for bot in getattr(self, "bots", []):
+                with config.use_profile(bot.profile):
+                    bot._release_runtime_lock()
 
 
 __all__ = ["CombinedHtxFuturesBot"]
