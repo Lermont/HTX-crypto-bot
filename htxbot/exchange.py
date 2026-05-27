@@ -434,6 +434,7 @@ class ExchangeMixin:
         self._private_open_orders_by_symbol = None
         self._private_positions_bulk_failed = False
         self._private_open_orders_bulk_failed = False
+        self._external_price_context_cache = {}
 
     def _payload_symbol(self, payload: dict) -> str:
         if not isinstance(payload, dict):

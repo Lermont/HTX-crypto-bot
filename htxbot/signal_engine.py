@@ -302,7 +302,16 @@ class SignalMixin:
         )
         append_macro = getattr(self, "_append_macro_csv", None)
         if append_macro:
-            append_macro(context)
+            try:
+                append_macro(context)
+            except Exception as exc:
+                self._log_event(
+                    "WARNING",
+                    f"Could not append macro context CSV: {exc}",
+                    event="macro_context_csv_failed",
+                    symbol=context.get("gold_symbol", ""),
+                    reason="macro_csv_failed",
+                )
 
     def _gold_btc_ratio_return(
         self,

@@ -55,7 +55,17 @@ class StateMixin:
         if config.RUNTIME.dry_run:
             return
         payload = {symbol: asdict(state) for symbol, state in self.states.items()}
-        self.state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp_path, self.state_path)
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def _pid_is_running(self, pid: int) -> bool:
         if pid <= 0:
@@ -91,17 +101,44 @@ class StateMixin:
             return ""
 
     def _acquire_runtime_lock(self):
-        if self.lock_path.exists():
-            raw_pid = self.lock_path.read_text(encoding="utf-8").strip()
-            existing_pid = int(raw_pid) if raw_pid.isdigit() else 0
-            if existing_pid and self._pid_is_running(existing_pid):
-                raise RuntimeError(
-                    f"Another bot instance is already running with PID {existing_pid}. "
-                    f"Remove {self.lock_path} only after that process exits."
-                )
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                try:
+                    raw_pid = self.lock_path.read_text(encoding="utf-8").strip()
+                except FileNotFoundError:
+                    continue
+                existing_pid = int(raw_pid) if raw_pid.isdigit() else 0
+                if existing_pid and self._pid_is_running(existing_pid):
+                    raise RuntimeError(
+                        f"Another bot instance is already running with PID {existing_pid}. "
+                        f"Remove {self.lock_path} only after that process exits."
+                    )
+                try:
+                    self.lock_path.unlink()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise RuntimeError(f"Could not remove stale runtime lock {self.lock_path}: {exc}") from exc
+                continue
 
-        self.lock_path.write_text(str(os.getpid()), encoding="utf-8")
-        atexit.register(self._release_runtime_lock)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(str(os.getpid()))
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                try:
+                    self.lock_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
+            atexit.register(self._release_runtime_lock)
+            return
 
     def _release_runtime_lock(self):
         try:

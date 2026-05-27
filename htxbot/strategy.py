@@ -2055,14 +2055,25 @@ class StrategyMixin:
         return bool(getattr(config.EXTERNAL_PRICE_FEED, "enabled", False) and getattr(self, "external_price_feed", None))
 
     def _external_price_context(self, symbol: str) -> dict:
+        cache = getattr(self, "_external_price_context_cache", None)
+        if cache is None:
+            cache = {}
+            self._external_price_context_cache = cache
+        if symbol in cache:
+            return dict(cache[symbol])
+
         if not self._external_price_settings_enabled():
-            return {"valid": False, "stale": True, "reason": "disabled", "symbol": symbol}
+            context = {"valid": False, "stale": True, "reason": "disabled", "symbol": symbol}
+            cache[symbol] = dict(context)
+            return context
         try:
             ticker = self.exchange.fetch_ticker(symbol)
             market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
             context = self.external_price_feed.get_context(symbol, ticker, market=market)
         except Exception as exc:
-            return {"valid": False, "stale": True, "reason": f"external_price_error:{exc}", "symbol": symbol}
+            context = {"valid": False, "stale": True, "reason": f"external_price_error:{exc}", "symbol": symbol}
+            cache[symbol] = dict(context)
+            return context
         try:
             self._append_external_price_csv(context)
         except Exception as exc:
@@ -2073,6 +2084,7 @@ class StrategyMixin:
                 symbol=symbol,
                 reason="external_price_csv_failed",
             )
+        cache[symbol] = dict(context)
         return context
 
     def _external_context_tradable(self, context: dict) -> bool:
