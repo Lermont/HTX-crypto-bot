@@ -212,11 +212,16 @@ class ExchangeMixin:
 
     def _price_tick(self, symbol: str) -> float:
         market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
-        precision = self._safe_float((market.get("precision") or {}).get("price"), 0.0)
+        raw_precision = (market.get("precision") or {}).get("price")
+        precision = self._safe_float(raw_precision, -1.0)
+        precision_mode = getattr(self.exchange, "precisionMode", None)
+        fallback_tick = max(abs(self._safe_float(market.get("last"), 1.0)) * 1e-10, 1e-12)
+        if precision_mode == ccxt.TICK_SIZE:
+            return precision if precision > 0 else fallback_tick
+        if precision_mode == ccxt.DECIMAL_PLACES and precision >= 0 and float(precision).is_integer():
+            return 10 ** (-int(precision))
         if precision <= 0:
-            return max(abs(self._safe_float(market.get("last"), 1.0)) * 1e-10, 1e-12)
-        if getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE:
-            return precision
+            return fallback_tick
         if precision >= 1 and float(precision).is_integer():
             return 10 ** (-int(precision))
         return precision
@@ -290,6 +295,13 @@ class ExchangeMixin:
         precision_amount = self._safe_float(precision, 0.0)
         if precision_amount > 0 and getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE:
             candidates.append(precision_amount)
+        if (
+            precision is not None
+            and getattr(self.exchange, "precisionMode", None) == ccxt.DECIMAL_PLACES
+            and precision_amount >= 0
+            and float(precision_amount).is_integer()
+        ):
+            candidates.append(10 ** (-int(precision_amount)))
         return max(candidates) if candidates else 0.0
 
     def _contract_size(self, symbol: str) -> float:

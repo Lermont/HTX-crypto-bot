@@ -23,13 +23,13 @@ class HtxFuturesBot(
     StrategyMixin,
     RunnerMixin,
 ):
-    CSV_HEADER = [
+    CSV_HEADER = (
         "ts", "level", "event", "symbol", "side", "order_id",
         "price", "amount", "filled", "remaining", "position_size",
         "entry_price", "notional", "fee_quote", "fee_currency",
         "fill_source", "rs30", "rs60", "ema30", "ema60", "reason",
-    ]
-    CYCLE_STATS_HEADER = [
+    )
+    CYCLE_STATS_HEADER = (
         "symbol", "opened_at", "closed_at", "leverage", "margin_mode",
         "planned_budget", "total_entry_notional", "total_exit_notional",
         "average_entry_price", "average_exit_price", "buy_fees", "sell_fees",
@@ -40,20 +40,21 @@ class HtxFuturesBot(
         "strategy_name", "entry_ema25d", "entry_ema50d", "entry_ema1d",
         "entry_ema2d", "entry_ema50", "entry_ema100", "entry_btc_return_30m",
         "max_averaging_stage", "breakeven_activated",
-    ]
-    MACRO_CSV_HEADER = [
+    )
+    MACRO_CSV_HEADER = (
         "ts", "profile", "regime", "gold_symbol", "btc_symbol",
         "gold_rsi", "btc_rsi", "rsi_spread", "gold_btc_ratio_return",
         "long_budget_multiplier", "short_budget_multiplier", "ladder_multiplier",
         "disable_new_entries", "disable_averaging", "disable_recovery", "reason",
-    ]
-    EXTERNAL_PRICE_CSV_HEADER = [
+    )
+    EXTERNAL_PRICE_CSV_HEADER = (
         "ts", "profile", "symbol", "mexc_symbol", "valid", "stale",
         "htx_bid", "htx_ask", "htx_mid", "mexc_bid", "mexc_ask", "mexc_mid",
         "mexc_bid_qty", "mexc_ask_qty", "mexc_bid_notional", "mexc_ask_notional",
         "spread_bps", "spread_bps_30s_avg", "spread_bps_2m_avg", "spread_bps_10m_avg",
         "spread_bps_zscore", "htx_change_30s_bps", "mexc_change_30s_bps",
         "htx_change_1m_bps", "mexc_change_1m_bps", "age_ms", "reason",
+    )
     ]
     ACCOUNT_PNL_CSV_HEADER = [
         "ts", "profile", "open_pnl", "unrealized_pnl", "realized_open_pnl",

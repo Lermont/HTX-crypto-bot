@@ -73,6 +73,9 @@ class ExternalPriceFeed:
         now = self.clock()
         if not getattr(self.settings, "enabled", False):
             return self._empty_context(symbol, now, "disabled")
+        supported, unsupported_reason = self._settings_supported()
+        if not supported:
+            return self._empty_context(symbol, now, unsupported_reason)
 
         htx_book = self._book_from_htx(htx_ticker, now)
         if self._book_invalid_reason(htx_book, require_qty=False):
@@ -94,6 +97,19 @@ class ExternalPriceFeed:
         context = self._context_from_books(symbol, mexc_symbol, htx_book, mexc_book, now, "ok")
         self._record_history(symbol, context, now)
         return context
+
+    def _settings_supported(self) -> Tuple[bool, str]:
+        primary = str(getattr(self.settings, "primary_exchange", "htx") or "htx").strip().lower()
+        references = tuple(
+            str(item or "").strip().lower()
+            for item in getattr(self.settings, "reference_exchanges", ("mexc",))
+            if str(item or "").strip()
+        )
+        if primary != "htx":
+            return False, "primary_exchange_unsupported"
+        if references and "mexc" not in references:
+            return False, "reference_exchange_unsupported"
+        return True, ""
 
     def _mexc_book(self, symbol: str, mexc_symbol: str, now: float) -> Tuple[BookTicker, str]:
         cached = self.cache.get(symbol)

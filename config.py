@@ -39,6 +39,7 @@ def _env(name: str, profile: str = "") -> str:
     if profile:
         prefix = profile.upper()
         candidates.extend((f"{prefix}_{name}", f"HTXBOT_{prefix}_{name}"))
+    candidates.append(f"HTXBOT_{name}")
     candidates.append(name)
     candidates.append(f"HTXBOT_{name}")
     for candidate in candidates:

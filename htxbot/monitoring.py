@@ -7,6 +7,7 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import Sequence
 from typing import Any, Dict, List, Optional
 
 import config
@@ -24,7 +25,7 @@ class MonitoringMixin:
         logger.addHandler(handler)
         return logger
 
-    def _ensure_headered_csv_file(self, path: Path, header: List[str]):
+    def _ensure_headered_csv_file(self, path: Path, header: Sequence[str]):
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists() or path.stat().st_size == 0:
             with path.open("w", newline="", encoding="utf-8") as f:
@@ -41,7 +42,7 @@ class MonitoringMixin:
         normalized_first_row = list(first_row)
         if normalized_first_row:
             normalized_first_row[0] = normalized_first_row[0].lstrip("\ufeff")
-        if normalized_first_row == header:
+        if normalized_first_row == list(header):
             return
 
         if normalized_first_row and normalized_first_row[0] == header[0]:
@@ -129,7 +130,7 @@ class MonitoringMixin:
         millis = int((time.time() % 1) * 1000)
         return archive_dir / f"{path.stem}.{timestamp}_{millis:03d}{path.suffix}"
 
-    def _rotate_csv_if_needed(self, path: Path, header: List[str]):
+    def _rotate_csv_if_needed(self, path: Path, header: Sequence[str]):
         max_bytes = max(0, int(config.MONITORING.csv_rotate_max_bytes or 0))
         if max_bytes <= 0 or not path.exists() or path.stat().st_size < max_bytes:
             return
