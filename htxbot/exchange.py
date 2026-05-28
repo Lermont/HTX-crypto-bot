@@ -55,12 +55,15 @@ class ExchangeMixin:
         urls["contract"] = hostname
 
     def _save_markets_cache(self, markets: dict):
+        if not getattr(self, "markets_cache_path", None):
+            return
         try:
             payload = {
                 "saved_at": time.time(),
                 "contract_hostname": (self.exchange.urls.get("hostnames") or {}).get("contract", ""),
                 "markets": markets,
             }
+            self.markets_cache_path.parent.mkdir(parents=True, exist_ok=True)
             self.markets_cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         except Exception as exc:
             self._log_event(
@@ -71,10 +74,11 @@ class ExchangeMixin:
             )
 
     def _load_markets_from_cache(self) -> Optional[dict]:
-        if not self.markets_cache_path.exists():
+        markets_cache_path = getattr(self, "markets_cache_path", None)
+        if not markets_cache_path or not markets_cache_path.exists():
             return None
         try:
-            payload = json.loads(self.markets_cache_path.read_text(encoding="utf-8"))
+            payload = json.loads(markets_cache_path.read_text(encoding="utf-8"))
             saved_at = self._safe_float(payload.get("saved_at"), 0.0)
             max_age = max(config.EXCHANGE.markets_cache_max_age_sec, 0)
             if max_age and time.time() - saved_at > max_age:
@@ -100,6 +104,9 @@ class ExchangeMixin:
             return None
 
     def _load_markets_with_retry(self, reload: bool = False) -> dict:
+        if not reload and self._markets_loaded():
+            return getattr(self.exchange, "markets", {}) or {}
+
         last_exc = None
         retries = max(1, config.EXCHANGE.market_load_retries)
         hostnames = self._contract_hostnames()
@@ -127,6 +134,41 @@ class ExchangeMixin:
 
     def _is_transient_exchange_error(self, exc: Exception) -> bool:
         return isinstance(exc, (ccxt.RequestTimeout, ccxt.NetworkError))
+
+    def _markets_loaded(self) -> bool:
+        markets = getattr(self.exchange, "markets", None)
+        return isinstance(markets, dict) and bool(markets)
+
+    def _ensure_markets_loaded(self) -> dict:
+        if self._markets_loaded():
+            return getattr(self.exchange, "markets", {}) or {}
+        return self._load_markets_with_retry()
+
+    def _market(self, symbol: str) -> dict:
+        if not symbol:
+            raise ValueError("symbol is required")
+
+        market_by_symbol = getattr(self, "market_by_symbol", None)
+        if isinstance(market_by_symbol, dict):
+            market = market_by_symbol.get(symbol)
+            if isinstance(market, dict) and market:
+                return market
+
+        self._ensure_markets_loaded()
+
+        market = None
+        try:
+            market = self.exchange.market(symbol)
+        except Exception:
+            markets = getattr(self.exchange, "markets", None) or {}
+            if isinstance(markets, dict):
+                market = markets.get(symbol)
+            if not market:
+                raise
+
+        if isinstance(market_by_symbol, dict) and isinstance(market, dict) and market:
+            market_by_symbol[symbol] = market
+        return market
 
     def _fetch_ohlcv_with_retry(self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None):
         hostnames = list(self._contract_hostnames())
@@ -214,7 +256,7 @@ class ExchangeMixin:
         return float(self.exchange.price_to_precision(symbol, price))
 
     def _price_tick(self, symbol: str) -> float:
-        market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
+        market = self._market(symbol)
         raw_precision = (market.get("precision") or {}).get("price")
         precision = self._safe_float(raw_precision, -1.0)
         precision_mode = getattr(self.exchange, "precisionMode", None)
@@ -287,7 +329,7 @@ class ExchangeMixin:
         return amount
 
     def _get_min_contracts(self, symbol: str) -> float:
-        market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
+        market = self._market(symbol)
         limits = market.get("limits") or {}
         precision = (market.get("precision") or {}).get("amount")
         candidates = []
@@ -315,7 +357,7 @@ class ExchangeMixin:
         return max(candidates) if candidates else 0.0
 
     def _contract_size(self, symbol: str) -> float:
-        market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
+        market = self._market(symbol)
         return self._safe_float(market.get("contractSize"), 1.0) or 1.0
 
     def _contracts_to_notional(self, symbol: str, contracts: float, price: float) -> float:
@@ -635,7 +677,7 @@ class ExchangeMixin:
         if not isinstance(payload, dict):
             return 0.0
 
-        market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
+        market = self._market(symbol)
         market_id = str((market or {}).get("id") or "")
 
         def item_matches(item: dict) -> bool:
@@ -712,7 +754,7 @@ class ExchangeMixin:
             return 0.0
 
         try:
-            market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
+            market = self._market(symbol)
             payload = {
                 "contract_code": market.get("id") or symbol,
                 "margin_account": config.EXCHANGE.quote_currency,

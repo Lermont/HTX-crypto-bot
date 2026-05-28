@@ -77,7 +77,7 @@ class RunnerMixin:
             if symbol in seen:
                 continue
             seen.add(symbol)
-            market = self.exchange.market(symbol)
+            market = self._market(symbol)
             self.symbols.append(symbol)
             self.market_by_symbol[symbol] = market
             state = self._get_state(symbol)
@@ -90,7 +90,7 @@ class RunnerMixin:
             has_local_exposure = bool(state.position_size > 0 or state.entry_orders or state.sell_ladder_orders)
             if not has_local_exposure:
                 continue
-            market = self.exchange.market(symbol)
+            market = self._market(symbol)
             if not (market.get("linear") and (market.get("swap") or market.get("future"))):
                 continue
             seen.add(symbol)
