@@ -120,10 +120,9 @@ class CombinedHtxFuturesBot:
         remaining_amount = getattr(bot, "_order_remaining_amount", None)
         if remaining_amount:
             return remaining_amount(order)
-        remaining = CombinedHtxFuturesBot._safe_float(bot, order.get("remaining"), 0.0)
-        if remaining <= 0:
-            remaining = CombinedHtxFuturesBot._safe_float(bot, order.get("amount"), 0.0)
-        return remaining
+        if isinstance(order, dict) and "remaining" in order and order.get("remaining") is not None:
+            return max(0.0, CombinedHtxFuturesBot._safe_float(bot, order.get("remaining"), 0.0))
+        return max(0.0, CombinedHtxFuturesBot._safe_float(bot, order.get("amount"), 0.0))
 
     def _exchange_reserved_symbols(self, bot: HtxFuturesBot) -> set:
         reserved = set()

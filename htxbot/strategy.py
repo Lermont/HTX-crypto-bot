@@ -2572,7 +2572,12 @@ class StrategyMixin:
     def _exit_order_exposure(self, symbol: str, open_orders: List[dict]) -> dict:
         state = self._get_state(symbol)
         exit_side = config.EXIT_SIDE
-        open_exit_orders = [order for order in open_orders if (order.get("side") or "").lower() == exit_side]
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+        open_exit_orders = [
+            order for order in open_orders
+            if (order.get("side") or "").lower() == exit_side
+            and self._order_remaining_amount(order) > eps
+        ]
         known_exit_ids = self._order_ids(state.sell_ladder_orders)
         tracked_exit_orders = [order for order in open_exit_orders if str(order.get("id")) in known_exit_ids]
         unknown_exit_orders = [order for order in open_exit_orders if str(order.get("id")) not in known_exit_ids]
@@ -2717,6 +2722,41 @@ class StrategyMixin:
                         tracked_sell_orders + unknown_sells,
                         reason=f"{adopt_reason};tracked_unknown_exit_orders_merged",
                     )
+                if self._should_cancel_hidden_exit_orders(unknown_sells, adopt_reason):
+                    self._log_event(
+                        "WARNING",
+                        f"Unsafe hidden {exit_side} close orders found next to tracked exits for {symbol}; canceling before continuing",
+                        event="reduce_only_violation_prevented",
+                        symbol=symbol,
+                        side=exit_side,
+                        amount=unknown_remaining,
+                        position_size=state.position_size,
+                        reason=f"{adopt_reason};tracked_hidden_close_order_cancel",
+                    )
+                    state.frozen_no_more_buys = True
+                    self._cancel_exchange_orders(
+                        symbol,
+                        unknown_sells,
+                        side=exit_side,
+                        reason=f"{adopt_reason};tracked_hidden_close_order_cancel",
+                    )
+                    self._save_state()
+                    return False
+                self._log_event(
+                    "WARNING",
+                    f"Untracked {exit_side} orders next to tracked exits for {symbol} cannot be proven safe; waiting",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=exit_side,
+                    amount=unknown_remaining,
+                    position_size=state.position_size,
+                    reason=f"tracked_unknown_exit_orders_unadoptable;{adopt_reason}",
+                )
+                self._freeze_no_more_buys(
+                    symbol,
+                    reason=f"tracked_unknown_exit_orders_unadoptable;{adopt_reason}",
+                )
+                return False
 
             if not state.sell_ladder_orders and not tracked_sell_orders:
                 can_adopt, adopt_reason = self._unknown_exit_adoption_reason(symbol, unknown_sells, unknown_remaining)

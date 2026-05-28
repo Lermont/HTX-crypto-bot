@@ -224,10 +224,11 @@ class StateMixin:
         return {str(item.get("id")) for item in refs or [] if item.get("id") is not None}
 
     def _order_remaining_amount(self, order: dict) -> float:
-        amount = self._safe_float(order.get("remaining"), 0.0)
-        if amount <= 0:
-            amount = self._safe_float(order.get("amount"), 0.0)
-        return amount
+        if not isinstance(order, dict):
+            return 0.0
+        if "remaining" in order and order.get("remaining") is not None:
+            return max(0.0, self._safe_float(order.get("remaining"), 0.0))
+        return max(0.0, self._safe_float(order.get("amount"), 0.0))
 
     def _order_reduce_only_flag(self, order: dict) -> Optional[bool]:
         if not isinstance(order, dict):

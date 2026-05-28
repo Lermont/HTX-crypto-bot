@@ -293,10 +293,17 @@ class ExchangeMixin:
         precision = (market.get("precision") or {}).get("amount")
         candidates = []
         contract_size = self._safe_float(market.get("contractSize"), 1.0) or 1.0
-        min_base_amount = self._safe_float((limits.get("amount") or {}).get("min"), 0.0)
-        if min_base_amount > 0:
-            candidates.append(min_base_amount / contract_size)
         precision_amount = self._safe_float(precision, 0.0)
+        min_amount = self._safe_float((limits.get("amount") or {}).get("min"), 0.0)
+        if min_amount > 0:
+            min_contracts = min_amount
+            if contract_size > 0:
+                eps = max(abs(min_amount), abs(contract_size), 1.0) * 1e-12
+                if abs(min_amount - contract_size) <= eps or (
+                    precision_amount > 0 and min_amount < precision_amount - eps
+                ):
+                    min_contracts = min_amount / contract_size
+            candidates.append(min_contracts)
         if precision_amount > 0 and getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE:
             candidates.append(precision_amount)
         if (

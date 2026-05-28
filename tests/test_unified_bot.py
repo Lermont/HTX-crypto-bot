@@ -1511,6 +1511,37 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(bot._amount_to_precision(SYMBOL, 5.9), 5.0)
             self.assertEqual(bot._amount_to_precision(SYMBOL, 0.9), 0.0)
 
+    def test_min_contracts_handles_htx_base_limit_and_contract_limit_shapes(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+
+            htx_base_limit_market = {
+                **MARKET,
+                "contractSize": 0.01,
+                "limits": {"amount": {"min": 0.01}},
+                "precision": {"price": 0.01, "amount": 1.0},
+            }
+            bot.exchange.markets[SYMBOL] = htx_base_limit_market
+            bot.market_by_symbol[SYMBOL] = htx_base_limit_market
+            self.assertEqual(bot._get_min_contracts(SYMBOL), 1.0)
+
+            contract_limit_market = {
+                **MARKET,
+                "contractSize": 0.01,
+                "limits": {"amount": {"min": 1.0}},
+                "precision": {"price": 0.01, "amount": 1.0},
+            }
+            bot.exchange.markets[SYMBOL] = contract_limit_market
+            bot.market_by_symbol[SYMBOL] = contract_limit_market
+            self.assertEqual(bot._get_min_contracts(SYMBOL), 1.0)
+
+    def test_order_remaining_amount_respects_explicit_zero_remaining(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+
+            self.assertEqual(bot._order_remaining_amount({"amount": 5.0, "remaining": 0.0}), 0.0)
+            self.assertEqual(bot._order_remaining_amount({"amount": 5.0}), 5.0)
+
     def test_profile_validation_rejects_mismatched_ema_ladder_lengths(self):
         profile = config.resolve_profile("long")
         invalid = replace(
@@ -3379,6 +3410,85 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["tracked_sell", "safe_manual_sell"])
                 self.assertAlmostEqual(sum(order["amount"] for order in state.sell_ladder_orders), 5.0)
                 self.assertEqual(bot.exchange.canceled_orders, [])
+
+    def test_tracked_ladder_with_unadoptable_unknown_exit_waits(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 5.0
+                state.entry_price = 100.0
+                state.sell_ladder_orders = [
+                    {"id": "tracked_sell", "side": "sell", "price": 101.0, "amount": 3.0}
+                ]
+
+                valid = bot._validate_sell_orders(
+                    SYMBOL,
+                    [
+                        {
+                            "id": "tracked_sell",
+                            "symbol": SYMBOL,
+                            "side": "sell",
+                            "price": 101.0,
+                            "amount": 3.0,
+                            "remaining": 3.0,
+                            "reduceOnly": True,
+                        },
+                        {
+                            "id": "manual_sell",
+                            "symbol": SYMBOL,
+                            "side": "sell",
+                            "price": 102.0,
+                            "amount": 1.0,
+                            "remaining": 1.0,
+                            "reduceOnly": False,
+                        },
+                    ],
+                )
+
+                self.assertFalse(valid)
+                self.assertTrue(state.frozen_no_more_buys)
+                self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["tracked_sell"])
+                self.assertEqual(bot.exchange.canceled_orders, [])
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertTrue(
+                    any(
+                        row["event"] == "reduce_only_violation_prevented"
+                        and row["reason"].startswith(
+                            "tracked_unknown_exit_orders_unadoptable;unknown_exit_order_not_reduce_only"
+                        )
+                        for row in rows
+                    )
+                )
+
+    def test_zero_remaining_exit_order_is_not_counted_as_open_exposure(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 5.0
+                state.entry_price = 100.0
+
+                exposure = bot._exit_order_exposure(
+                    SYMBOL,
+                    [
+                        {
+                            "id": "filled_manual_sell",
+                            "symbol": SYMBOL,
+                            "side": "sell",
+                            "price": 101.0,
+                            "amount": 5.0,
+                            "remaining": 0.0,
+                            "reduceOnly": False,
+                        }
+                    ],
+                )
+
+                self.assertEqual(exposure["open_exit_orders"], [])
+                self.assertEqual(exposure["unknown_remaining"], 0.0)
 
     def test_exit_ladder_rebuild_ignores_stale_frozen_state_without_tracked_orders(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
