@@ -287,7 +287,6 @@ class MonitoringMixin:
 
     def _selected_config_snapshot(self) -> dict:
         return {
-            "dry_run": bool(config.RUNTIME.dry_run),
             "position_side": config.POSITION_SIDE,
             "entry_side": config.ENTRY_SIDE,
             "exit_side": config.EXIT_SIDE,
@@ -763,7 +762,7 @@ class MonitoringMixin:
             int(retryable_value),
             attempt,
             hostname,
-            int(bool(config.RUNTIME.dry_run)),
+            0,
         ]
 
         csv_path = getattr(self, "diagnostics_csv_path", None)
@@ -786,7 +785,7 @@ class MonitoringMixin:
             "reason": reason,
             "attempt": attempt,
             "hostname": hostname,
-            "dry_run": bool(config.RUNTIME.dry_run),
+            "dry_run": False,
             "exception": {
                 **exception_info,
                 "message": self._redact_sensitive_text(exception) if exception else "",
@@ -832,11 +831,6 @@ class MonitoringMixin:
         operation_id = kwargs.pop("operation_id", "")
         signal_id = kwargs.pop("signal_id", "")
         diagnostic_context = kwargs.pop("diagnostic_context", None)
-        reason = str(kwargs.get("reason") or "")
-        if config.RUNTIME.dry_run and not message.startswith("[DRY-RUN]"):
-            message = f"[DRY-RUN] {message}"
-            if not reason:
-                kwargs["reason"] = "dry_run"
 
         message = self._compact_log_message(message)
         exception_info = self._diagnostic_from_exception(

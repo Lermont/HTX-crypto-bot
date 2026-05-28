@@ -121,7 +121,7 @@ class RunnerMixin:
             )
         else:
             self._setup_futures_account()
-        if not config.RUNTIME.dry_run and not getattr(self, "skip_live_balance_log", False):
+        if not getattr(self, "skip_live_balance_log", False):
             account = self._account_snapshot()
             self._log_event(
                 "INFO",

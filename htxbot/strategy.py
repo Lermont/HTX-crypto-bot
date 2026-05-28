@@ -366,7 +366,7 @@ class StrategyMixin:
 
     def _maybe_close_dust_position(self, symbol: str, open_orders: List[dict]) -> bool:
         state = self._get_state(symbol)
-        if not config.RISK.dust_close_enabled or config.RUNTIME.dry_run:
+        if not config.RISK.dust_close_enabled:
             return False
         if not self._is_dust_position(symbol, state):
             return False
@@ -380,7 +380,7 @@ class StrategyMixin:
         )
 
     def _tiny_partial_entry_close_detail(self, symbol: str, state: TradeState) -> str:
-        if not config.RISK.tiny_entry_close_enabled or config.RUNTIME.dry_run:
+        if not config.RISK.tiny_entry_close_enabled:
             return ""
         if state.position_size <= 0:
             return ""
@@ -502,33 +502,31 @@ class StrategyMixin:
             return True
 
         created_at = time.time()
-        order_id = f"dry_{config.EXIT_SIDE}_{symbol}_{int(created_at)}_account_unload"
-        if not config.RUNTIME.dry_run:
-            try:
-                order = self._create_one_way_order(
-                    symbol=symbol,
-                    order_type="limit",
-                    side=config.EXIT_SIDE,
-                    amount=contracts,
-                    price=price,
-                    reduce_only=True,
-                )
-                order_id = str(order.get("id"))
-            except Exception as exc:
-                self._log_event(
-                    "ERROR",
-                    f"Account unload reduce-only order failed for {symbol}: {exc}",
-                    event="reduce_only_violation_prevented",
-                    symbol=symbol,
-                    side=config.EXIT_SIDE,
-                    price=price,
-                    amount=contracts,
-                    position_size=state.position_size,
-                    entry_price=state.entry_price,
-                    reason=f"{reason};account_unload_order_rejected",
-                    exception=exc,
-                )
-                return True
+        try:
+            order = self._create_one_way_order(
+                symbol=symbol,
+                order_type="limit",
+                side=config.EXIT_SIDE,
+                amount=contracts,
+                price=price,
+                reduce_only=True,
+            )
+            order_id = str(order.get("id"))
+        except Exception as exc:
+            self._log_event(
+                "ERROR",
+                f"Account unload reduce-only order failed for {symbol}: {exc}",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                price=price,
+                amount=contracts,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"{reason};account_unload_order_rejected",
+                exception=exc,
+            )
+            return True
 
         ref = {
             "id": order_id,
@@ -552,7 +550,7 @@ class StrategyMixin:
         self._log_event(
             "INFO",
             f"Account profit unload placed for {symbol}: contracts={contracts} price={price}",
-            event="account_profit_unload_planned" if config.RUNTIME.dry_run else "account_profit_unload_placed",
+            event="account_profit_unload_placed",
             symbol=symbol,
             side=config.EXIT_SIDE,
             order_id=order_id,
@@ -696,7 +694,7 @@ class StrategyMixin:
         signal: dict,
         reason: str,
         offset_multiplier: float = 1.0,
-    ):
+    ) -> int:
         state = self._get_state(symbol)
         was_frozen_no_more_buys = bool(state.frozen_no_more_buys)
         state.entry_orders = []
@@ -744,7 +742,9 @@ class StrategyMixin:
         planned_notional = 0.0
         placed_orders = 0
         configured_leverage = max(self._safe_float(config.RISK.leverage, 0.0), 1.0)
-        account_leverage = configured_leverage if config.RUNTIME.dry_run else self._fetch_account_order_leverage(symbol)
+        self._set_leverage_safe(symbol, int(configured_leverage))
+
+        account_leverage = self._fetch_account_order_leverage(symbol)
         entry_side = config.ENTRY_SIDE
         entry_label = "Sell" if entry_side == "sell" else "Buy"
         if account_leverage <= 0:
@@ -757,9 +757,9 @@ class StrategyMixin:
                 reason="manual_account_leverage_unavailable",
             )
             self._reset_state(symbol)
-            return
+            return 0
 
-        sizing_leverage = min(configured_leverage, max(account_leverage, 1.0))
+        sizing_leverage = max(account_leverage, 1.0)
         notional_budget = margin_budget * sizing_leverage
         if state.position_size <= 0 and state.initial_entry_notional <= 0:
             state.initial_entry_notional = notional_budget
@@ -787,78 +787,76 @@ class StrategyMixin:
 
             planned_orders += 1
             planned_notional += notional
-            order_id = f"dry_{entry_side}_{symbol}_{int(created_at)}_{index}"
             order_leverage = account_leverage
-            if not config.RUNTIME.dry_run:
-                try:
-                    order = self._create_one_way_order(
-                        symbol=symbol,
-                        order_type="limit",
-                        side=entry_side,
-                        amount=contracts,
-                        price=price,
-                        post_only=config.RUNTIME.post_only_enabled,
-                        leverage=order_leverage,
-                    )
-                    order_id = str(order.get("id"))
-                except Exception as exc:
-                    band_limit = self._price_band_limit_from_error(exc, side=entry_side)
-                    if band_limit > 0:
-                        adjusted_price = self._price_inside_htx_band(symbol, price, side=entry_side, limit=band_limit)
-                        try:
-                            order = self._create_one_way_order(
-                                symbol=symbol,
-                                order_type="limit",
-                                side=entry_side,
-                                amount=contracts,
-                                price=adjusted_price,
-                                post_only=config.RUNTIME.post_only_enabled,
-                                leverage=order_leverage,
-                            )
-                            price = adjusted_price
-                            order_id = str(order.get("id"))
-                            self._log_event(
-                                "WARNING",
-                                f"{entry_label} entry order price adjusted for HTX band {symbol}: {price}",
-                                event="entry_ladder_placed",
-                                symbol=symbol,
-                                side=entry_side,
-                                price=price,
-                                amount=contracts,
-                                reason=f"htx_price_band_adjusted;limit={band_limit:.12f}",
-                            )
-                        except Exception as retry_exc:
-                            self._log_event(
-                                "WARNING",
-                                f"{entry_label} entry order rejected for {symbol} after HTX band adjustment: {retry_exc}",
-                                event="entry_order_canceled",
-                                symbol=symbol,
-                                side=entry_side,
-                                price=adjusted_price,
-                                amount=contracts,
-                                reason="price_band_retry_rejected",
-                                exception=retry_exc,
-                            )
-                            continue
-                    else:
-                        if self._is_high_leverage_risk_error(exc):
-                            reject_reason = "manual_account_leverage_rejected"
-                        elif self._is_hedge_mode_error(exc):
-                            reject_reason = "hedge_mode_error"
-                        else:
-                            reject_reason = "entry_order_rejected"
+            try:
+                order = self._create_one_way_order(
+                    symbol=symbol,
+                    order_type="limit",
+                    side=entry_side,
+                    amount=contracts,
+                    price=price,
+                    post_only=config.RUNTIME.post_only_enabled,
+                    leverage=order_leverage,
+                )
+                order_id = str(order.get("id"))
+            except Exception as exc:
+                band_limit = self._price_band_limit_from_error(exc, side=entry_side)
+                if band_limit > 0:
+                    adjusted_price = self._price_inside_htx_band(symbol, price, side=entry_side, limit=band_limit)
+                    try:
+                        order = self._create_one_way_order(
+                            symbol=symbol,
+                            order_type="limit",
+                            side=entry_side,
+                            amount=contracts,
+                            price=adjusted_price,
+                            post_only=config.RUNTIME.post_only_enabled,
+                            leverage=order_leverage,
+                        )
+                        price = adjusted_price
+                        order_id = str(order.get("id"))
                         self._log_event(
                             "WARNING",
-                            f"{entry_label} entry order rejected for {symbol}: {exc}",
-                            event="entry_order_canceled",
+                            f"{entry_label} entry order price adjusted for HTX band {symbol}: {price}",
+                            event="entry_ladder_placed",
                             symbol=symbol,
                             side=entry_side,
                             price=price,
                             amount=contracts,
-                            reason=reject_reason,
-                            exception=exc,
+                            reason=f"htx_price_band_adjusted;limit={band_limit:.12f}",
+                        )
+                    except Exception as retry_exc:
+                        self._log_event(
+                            "WARNING",
+                            f"{entry_label} entry order rejected for {symbol} after HTX band adjustment: {retry_exc}",
+                            event="entry_order_canceled",
+                            symbol=symbol,
+                            side=entry_side,
+                            price=adjusted_price,
+                            amount=contracts,
+                            reason="price_band_retry_rejected",
+                            exception=retry_exc,
                         )
                         continue
+                else:
+                    if self._is_high_leverage_risk_error(exc):
+                        reject_reason = "manual_account_leverage_rejected"
+                    elif self._is_hedge_mode_error(exc):
+                        reject_reason = "hedge_mode_error"
+                    else:
+                        reject_reason = "entry_order_rejected"
+                    self._log_event(
+                        "WARNING",
+                        f"{entry_label} entry order rejected for {symbol}: {exc}",
+                        event="entry_order_canceled",
+                        symbol=symbol,
+                        side=entry_side,
+                        price=price,
+                        amount=contracts,
+                        reason=reject_reason,
+                        exception=exc,
+                    )
+                    continue
 
             ref = {
                 "id": order_id,
@@ -876,8 +874,8 @@ class StrategyMixin:
             }
             state.entry_orders.append(ref)
             placed_orders += 1
-            event = "entry_ladder_planned" if config.RUNTIME.dry_run else "entry_ladder_placed"
-            action = "planned" if config.RUNTIME.dry_run else "placed"
+            event = "entry_ladder_placed"
+            action = "placed"
             self._record_signal_analytics(
                 event,
                 symbol=symbol,
@@ -962,12 +960,11 @@ class StrategyMixin:
                 reset_state.last_ema30 = last_ema30
                 reset_state.last_ema60 = last_ema60
             self._save_state()
-            return
+            return placed_orders
 
         self._refresh_active_side(state)
-        if config.RUNTIME.dry_run:
-            self._log_dry_run_sell_preview(symbol, state.entry_orders)
         self._save_state()
+        return placed_orders
 
     def _log_dry_run_sell_preview(self, symbol: str, buy_refs: list):
         total_contracts = sum(self._safe_float(ref.get("amount"), 0.0) for ref in buy_refs)
@@ -1094,6 +1091,26 @@ class StrategyMixin:
                 merged.append(dict(step))
         return merged
 
+    def _controlled_loss_move_fraction(self, state: Optional[TradeState]) -> float:
+        if state is None:
+            return 0.0
+        strategy = config.STRATEGY
+        # Start with a base move fraction of 0.1 (10% towards market) instead of TP markup
+        base_move = 0.1
+        if not self._hard_time_exit_elapsed(state):
+            return base_move
+
+        step_minutes = max(0.0, strategy.hard_time_exit_step_minutes)
+        step_increase = max(0.0, strategy.hard_time_exit_fraction_step)
+        if step_minutes > 0 and step_increase > 0:
+            overdue_minutes = max(
+                0.0,
+                self._position_held_minutes(state) - max(0.0, strategy.hard_time_exit_after_minutes),
+            )
+            base_move += (overdue_minutes // step_minutes) * step_increase
+
+        return self._clamp(base_move, 0.0, 1.0)
+
     def _sell_ladder_plan(
         self,
         symbol: str,
@@ -1126,6 +1143,16 @@ class StrategyMixin:
         if mode == "account_unload":
             context["ladder_name"] = "account_unload"
             return [{"fraction": 1.0, "markup": 0.0, "runner": False}], context
+
+        if mode == "controlled_loss_exit":
+            fractions = tuple(strategy.ema_exit_ladder_fractions)
+            move_fraction = self._controlled_loss_move_fraction(state)
+            steps = [
+                {"fraction": fraction, "markup": move_fraction, "runner": False}
+                for fraction in fractions
+            ]
+            context["ladder_name"] = "controlled_loss"
+            return steps, context
 
         if mode != "normal" or not strategy.ema_adaptive_exit_enabled:
             fractions = tuple(strategy.ema_exit_ladder_fractions)
@@ -1263,8 +1290,8 @@ class StrategyMixin:
     def _is_adverse_profit_floor_funding(self, funding_rate: float) -> bool:
         strategy = config.STRATEGY
         if config.POSITION_SIDE == "short":
-            return funding_rate >= strategy.funding_positive_threshold
-        return funding_rate <= strategy.funding_negative_threshold
+            return funding_rate <= strategy.funding_negative_threshold
+        return funding_rate >= strategy.funding_positive_threshold
 
     def _dynamic_profit_floor(
         self,
@@ -1442,16 +1469,33 @@ class StrategyMixin:
             self._safe_float(getattr(config.RUNTIME, "order_timeout_sec", 0.0), 0.0),
             self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 0.0), 0.0),
         )
-        if now - pending_since < retry_after:
+        # Give it up to 5 minutes to clear naturally, then force a "reset" by canceling all orders
+        force_reset_after = 300.0
+        elapsed = now - pending_since
+        if elapsed < retry_after:
             return True
 
         if state.position_available <= 0 and state.position_frozen > 0:
-            state.pending_exit_ladder_since = now
+            if elapsed > force_reset_after:
+                self._log_event(
+                    "WARNING",
+                    f"Forcing exit ladder rebuild for {symbol}: position is still reserved after {elapsed:.1f}s; canceling all orders to clear state",
+                    event="state_exchange_mismatch",
+                    symbol=symbol,
+                    reason="pending_closeable_force_reset",
+                )
+                self._cancel_all_orders(symbol, reason="pending_closeable_force_reset")
+                state.sell_ladder_signature = ""
+                self._clear_pending_exit_ladder(state)
+                self._save_state()
+                return False
+
+            state.pending_exit_ladder_since = pending_since  # Keep original start time
             self._refresh_active_side(state)
             self._save_state()
             self._log_event(
                 "WARNING",
-                f"Delayed {config.EXIT_SIDE} exit ladder for {symbol} is still waiting: HTX reports the position as fully reserved",
+                f"Delayed {config.EXIT_SIDE} exit ladder for {symbol} is still waiting ({elapsed:.1f}s): HTX reports the position as fully reserved",
                 event="reduce_only_violation_prevented",
                 symbol=symbol,
                 side=config.EXIT_SIDE,
@@ -1780,87 +1824,50 @@ class StrategyMixin:
                 price = self._controlled_loss_exit_price(symbol, avg_entry_price, markup, context=sell_context)
             else:
                 price = self._sell_price_floor(symbol, avg_entry_price, adaptive_markup, context=sell_context)
-            order_id = f"dry_{exit_side}_{symbol}_{int(created_at)}_{index}"
-            if not config.RUNTIME.dry_run:
-                try:
-                    order = self._create_one_way_order(
-                        symbol=symbol,
-                        order_type="limit",
-                        side=exit_side,
-                        amount=contracts,
-                        price=price,
-                        reduce_only=True,
-                    )
-                    order_id = str(order.get("id"))
-                except Exception as exc:
-                    band_limit = self._price_band_limit_from_error(exc, side=exit_side)
-                    if band_limit > 0:
-                        adjusted_price = self._price_inside_htx_band(symbol, price, side=exit_side, limit=band_limit)
-                        try:
-                            order = self._create_one_way_order(
-                                symbol=symbol,
-                                order_type="limit",
-                                side=exit_side,
-                                amount=contracts,
-                                price=adjusted_price,
-                                reduce_only=True,
-                            )
-                            price = adjusted_price
-                            order_id = str(order.get("id"))
-                            self._log_event(
-                                "WARNING",
-                                f"{exit_label} reduce-only price adjusted for HTX band {symbol}: {price}",
-                                event="exit_ladder_rebuilt" if rebuild else "exit_ladder_placed",
-                                symbol=symbol,
-                                side=exit_side,
-                                price=price,
-                                amount=contracts,
-                                reason=f"htx_price_band_adjusted;limit={band_limit:.12f};mode={mode}",
-                            )
-                        except Exception as retry_exc:
-                            if self._is_reduce_only_amount_exceeds_closeable_error(retry_exc):
-                                if allocated <= 0:
-                                    self._mark_exit_ladder_waiting_for_closeable(
-                                        symbol,
-                                        mode,
-                                        "closeable_amount_reserved_by_existing_exit_orders",
-                                        amount=contracts,
-                                        exception=retry_exc,
-                                    )
-                                    return
-                                self._log_event(
-                                    "WARNING",
-                                    f"{exit_label} reduce-only ladder stopped for {symbol}: remaining closeable amount is unavailable",
-                                    event="reduce_only_violation_prevented",
-                                    symbol=symbol,
-                                    side=exit_side,
-                                    price=adjusted_price,
-                                    amount=contracts,
-                                    reason="partial_exit_ladder_closeable_unavailable",
-                                    exception=retry_exc,
-                                )
-                                break
-                            self._log_event(
-                                "ERROR",
-                                f"{exit_label} reduce-only order failed for {symbol} after HTX band adjustment: {retry_exc}",
-                                event="reduce_only_violation_prevented",
-                                symbol=symbol,
-                                side=exit_side,
-                                price=adjusted_price,
-                                amount=contracts,
-                                reason="price_band_retry_rejected",
-                                exception=retry_exc,
-                            )
-                            continue
-                    else:
-                        if self._is_reduce_only_amount_exceeds_closeable_error(exc):
+            try:
+                order = self._create_one_way_order(
+                    symbol=symbol,
+                    order_type="limit",
+                    side=exit_side,
+                    amount=contracts,
+                    price=price,
+                    reduce_only=True,
+                )
+                order_id = str(order.get("id"))
+            except Exception as exc:
+                band_limit = self._price_band_limit_from_error(exc, side=exit_side)
+                if band_limit > 0:
+                    adjusted_price = self._price_inside_htx_band(symbol, price, side=exit_side, limit=band_limit)
+                    try:
+                        order = self._create_one_way_order(
+                            symbol=symbol,
+                            order_type="limit",
+                            side=exit_side,
+                            amount=contracts,
+                            price=adjusted_price,
+                            reduce_only=True,
+                        )
+                        price = adjusted_price
+                        order_id = str(order.get("id"))
+                        self._log_event(
+                            "WARNING",
+                            f"{exit_label} reduce-only price adjusted for HTX band {symbol}: {price}",
+                            event="exit_ladder_rebuilt" if rebuild else "exit_ladder_placed",
+                            symbol=symbol,
+                            side=exit_side,
+                            price=price,
+                            amount=contracts,
+                            reason=f"htx_price_band_adjusted;limit={band_limit:.12f};mode={mode}",
+                        )
+                    except Exception as retry_exc:
+                        if self._is_reduce_only_amount_exceeds_closeable_error(retry_exc):
                             if allocated <= 0:
                                 self._mark_exit_ladder_waiting_for_closeable(
                                     symbol,
                                     mode,
                                     "closeable_amount_reserved_by_existing_exit_orders",
                                     amount=contracts,
-                                    exception=exc,
+                                    exception=retry_exc,
                                 )
                                 return
                             self._log_event(
@@ -1869,24 +1876,59 @@ class StrategyMixin:
                                 event="reduce_only_violation_prevented",
                                 symbol=symbol,
                                 side=exit_side,
-                                price=price,
+                                price=adjusted_price,
                                 amount=contracts,
                                 reason="partial_exit_ladder_closeable_unavailable",
-                                exception=exc,
+                                exception=retry_exc,
                             )
                             break
                         self._log_event(
                             "ERROR",
-                            f"{exit_label} reduce-only order failed for {symbol}: {exc}",
+                            f"{exit_label} reduce-only order failed for {symbol} after HTX band adjustment: {retry_exc}",
+                            event="reduce_only_violation_prevented",
+                            symbol=symbol,
+                            side=exit_side,
+                            price=adjusted_price,
+                            amount=contracts,
+                            reason="price_band_retry_rejected",
+                            exception=retry_exc,
+                        )
+                        continue
+                else:
+                    if self._is_reduce_only_amount_exceeds_closeable_error(exc):
+                        if allocated <= 0:
+                            self._mark_exit_ladder_waiting_for_closeable(
+                                symbol,
+                                mode,
+                                "closeable_amount_reserved_by_existing_exit_orders",
+                                amount=contracts,
+                                exception=exc,
+                            )
+                            return
+                        self._log_event(
+                            "WARNING",
+                            f"{exit_label} reduce-only ladder stopped for {symbol}: remaining closeable amount is unavailable",
                             event="reduce_only_violation_prevented",
                             symbol=symbol,
                             side=exit_side,
                             price=price,
                             amount=contracts,
-                            reason="exit_order_rejected",
+                            reason="partial_exit_ladder_closeable_unavailable",
                             exception=exc,
                         )
-                        continue
+                        break
+                    self._log_event(
+                        "ERROR",
+                        f"{exit_label} reduce-only order failed for {symbol}: {exc}",
+                        event="reduce_only_violation_prevented",
+                        symbol=symbol,
+                        side=exit_side,
+                        price=price,
+                        amount=contracts,
+                        reason="exit_order_rejected",
+                        exception=exc,
+                    )
+                    continue
 
             allocated += contracts
             ref = {
@@ -1909,8 +1951,8 @@ class StrategyMixin:
                 ref["loss_budget_at_placement"] = self._safe_float(sell_context.get("controlled_loss_budget"), 0.0)
                 ref["reference_price_at_placement"] = self._safe_float(sell_context.get("controlled_reference_price"), 0.0)
             state.sell_ladder_orders.append(ref)
-            event = "exit_ladder_planned" if config.RUNTIME.dry_run else ("exit_ladder_rebuilt" if rebuild else "exit_ladder_placed")
-            action = "planned" if config.RUNTIME.dry_run else ("rebuilt" if rebuild else "placed")
+            event = "exit_ladder_rebuilt" if rebuild else "exit_ladder_placed"
+            action = "rebuilt" if rebuild else "placed"
             stage_notional = self._contracts_to_notional(symbol, contracts, price)
             exit_planned_orders += 1
             exit_planned_notional += stage_notional
@@ -1920,7 +1962,7 @@ class StrategyMixin:
                 signal={},
                 planned_orders=exit_planned_orders,
                 planned_notional=exit_planned_notional,
-                placed_orders=0 if config.RUNTIME.dry_run else exit_planned_orders,
+                placed_orders=exit_planned_orders,
                 operation_id=operation_id,
                 order_id=order_id,
                 cycle_id=state.cycle_id,
@@ -3142,8 +3184,6 @@ class StrategyMixin:
         closeable = state.position_available
         if had_sell_ladder and closeable <= 0:
             closeable = state.position_size
-        if config.RUNTIME.dry_run and closeable <= 0:
-            closeable = state.position_size
         if closeable <= 0:
             closeable = state.position_size
             reason = (
@@ -4114,6 +4154,9 @@ class StrategyMixin:
         if free <= config.RISK.min_quote_reserve:
             return 0.0, "free_margin_below_reserve"
 
+        if not config.RUNTIME.dry_run:
+            self._set_leverage_safe(symbol, int(config.RISK.leverage))
+
         available_after_reserve = max(0.0, free - config.RISK.min_quote_reserve)
         leverage = max(float(config.RISK.leverage), 1.0)
         current_position_notional = self._position_notional(symbol, state)
@@ -4356,7 +4399,7 @@ class StrategyMixin:
         interval_sec = max(0.0, strategy.ema_averaging_interval_hours) * 60.0 * 60.0
         if state.last_average_at and interval_sec > 0 and time.time() - state.last_average_at < interval_sec:
             return
-        if state.last_average_signal_timestamp == signal.get("ts"):
+        if state.last_average_signal_timestamp == (signal or {}).get("ts"):
             return
 
         reference_price, last_price = self._fetch_reference_price(symbol)
@@ -4439,7 +4482,7 @@ class StrategyMixin:
             return
 
         previous_average_stage = state.average_stage
-        state.last_average_signal_timestamp = signal.get("ts")
+        state.last_average_signal_timestamp = (signal or {}).get("ts")
         state.last_average_at = time.time()
         self._save_state()
         next_stage = previous_average_stage + 1
@@ -4454,7 +4497,7 @@ class StrategyMixin:
             entry_price=state.entry_price,
             reason=f"ema_averaging_stage_{next_stage};drawdown={drawdown:.5f};threshold={drawdown_threshold:.5f};{budget_reason}",
         )
-        self._place_buy_ladder(
+        orders_placed = self._place_buy_ladder(
             symbol,
             budget,
             reference_price,
@@ -4463,7 +4506,7 @@ class StrategyMixin:
             offset_multiplier=1.0,
         )
         state = self._get_state(symbol)
-        if state.entry_orders:
+        if orders_placed > 0:
             state.average_stage = next_stage
         else:
             state.average_stage = previous_average_stage
@@ -4676,7 +4719,7 @@ class StrategyMixin:
                 block_reason=quality_reason,
             )
             return
-        if state.last_entry_ladder_signal_timestamp == signal.get("ts"):
+        if state.last_entry_ladder_signal_timestamp == (signal or {}).get("ts"):
             return
         macro_context = self._macro_guard_context()
         if macro_context.get("disable_new_entries"):
@@ -4698,7 +4741,7 @@ class StrategyMixin:
                 block_reason=gate_reason,
             )
             logged = getattr(self, "_entry_gate_skip_logged", set())
-            key = (symbol, signal.get("ts"), gate_reason)
+            key = (symbol, (signal or {}).get("ts"), gate_reason)
             if key not in logged:
                 logged.add(key)
                 self._entry_gate_skip_logged = logged

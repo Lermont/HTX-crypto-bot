@@ -81,13 +81,6 @@ class CombinedHtxFuturesBot:
                 bot._save_state()
 
     def _validate_shared_exchange_profiles(self):
-        dry_run_values = {bool(profile.runtime.dry_run) for profile in self.profiles}
-        if len(dry_run_values) > 1:
-            raise RuntimeError("Combined profiles must all use the same DRY_RUN mode")
-
-        if next(iter(dry_run_values), True):
-            return
-
         first = self.profiles[0].api_credentials
         for profile in self.profiles[1:]:
             if profile.api_credentials != first:
@@ -126,9 +119,6 @@ class CombinedHtxFuturesBot:
 
     def _exchange_reserved_symbols(self, bot: HtxFuturesBot) -> set:
         reserved = set()
-        if bool(getattr(bot.profile.runtime, "dry_run", True)):
-            return reserved
-
         symbols = set(getattr(bot, "symbols", []) or [])
         min_contracts = getattr(bot, "_get_min_contracts", None)
 
