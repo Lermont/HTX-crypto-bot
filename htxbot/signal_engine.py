@@ -22,7 +22,7 @@ class SignalMixin:
     def _realized_volatility(self, closes: List[float], window: int) -> float:
         return realized_volatility(closes, window)
 
-    def _signal_score(self, rs30: float, rs60: float, ema30: float, ema60: float, price: float) -> float:
+    def _signal_score(self, rs30: float, rs60: float, ema50: float, ema100: float, price: float) -> float:
         if config.POSITION_SIDE == "short":
             rs_edge = max(0.0, rs30 - rs60)
         else:
@@ -30,9 +30,9 @@ class SignalMixin:
         ema_edge = 0.0
         if price > 0:
             if config.POSITION_SIDE == "short":
-                ema_gap = (ema30 - ema60) / price
+                ema_gap = (ema50 - ema100) / price
             else:
-                ema_gap = (ema60 - ema30) / price
+                ema_gap = (ema100 - ema50) / price
             ema_edge = max(0.0, ema_gap) * config.STRATEGY.signal_ema_gap_weight
         return rs_edge + ema_edge
 
@@ -797,8 +797,9 @@ class SignalMixin:
             "rs30": 0.0,
             "rs60": 0.0,
             "rs_edge": 0.0,
-            "ema30": 0.0,
-            "ema60": 0.0,
+            "macro_gap": 0.0,
+            "trigger_gap": 0.0,
+            "pullback_depth": 0.0,
             "ema_macro_fast": 0.0,
             "ema_macro_slow": 0.0,
             "ema_pullback_fast": 0.0,
@@ -1056,12 +1057,13 @@ class SignalMixin:
             "price": current_close,
             "rs30": rs30,
             "rs60": rs60,
-            "ema30": ema_trigger_fast,
-            "ema60": ema_trigger_slow,
             "rs_edge": rs_edge,
             "rs_abs_valid": rs_confirm_valid,
             "rs_overheated": False,
             "ema_gap": trigger_gap,
+            "macro_gap": macro_gap,
+            "trigger_gap": trigger_gap,
+            "pullback_depth": pullback_depth,
             "ema_valid": trigger_valid,
             "ema_macro_fast": ema_macro_fast,
             "ema_macro_slow": ema_macro_slow,
@@ -1358,8 +1360,8 @@ class SignalMixin:
 
             rs30 = self._safe_float(signal.get("rs30"), 0.0)
             rs60 = self._safe_float(signal.get("rs60"), 0.0)
-            ema30 = self._safe_float(signal.get("ema_trigger_fast"), 0.0)
-            ema60 = self._safe_float(signal.get("ema_trigger_slow"), 0.0)
+            ema50 = self._safe_float(signal.get("ema_trigger_fast"), 0.0)
+            ema100 = self._safe_float(signal.get("ema_trigger_slow"), 0.0)
             entry_valid = bool(signal.get("entry_valid"))
             macro_valid = bool(signal.get("macro_valid"))
             pullback_valid = bool(signal.get("pullback_valid"))
@@ -1371,14 +1373,14 @@ class SignalMixin:
             state.last_ema_strategy_signal_timestamp = latest_ts
             state.last_rs30 = rs30
             state.last_rs60 = rs60
-            state.last_ema30 = ema30
-            state.last_ema60 = ema60
+            state.last_ema30 = ema50
+            state.last_ema60 = ema100
             state.last_ema25d = self._safe_float(signal.get("ema_macro_fast"), 0.0)
             state.last_ema50d = self._safe_float(signal.get("ema_macro_slow"), 0.0)
             state.last_ema1d = self._safe_float(signal.get("ema_pullback_fast"), 0.0)
             state.last_ema2d = self._safe_float(signal.get("ema_pullback_slow"), 0.0)
-            state.last_ema50 = ema30
-            state.last_ema100 = ema60
+            state.last_ema50 = ema50
+            state.last_ema100 = ema100
             state.last_btc_return_30m = self._safe_float(signal.get("btc_return_30m"), 0.0)
 
             self._log_event(
@@ -1388,8 +1390,8 @@ class SignalMixin:
                 symbol=symbol,
                 rs30=rs30,
                 rs60=rs60,
-                ema30=ema30,
-                ema60=ema60,
+                ema50=ema50,
+                ema100=ema100,
                 reason=f"{signal.get('reason', '')};macro={int(macro_valid)};pullback={int(pullback_valid)};trigger={int(trigger_valid)}",
             )
 

@@ -27,7 +27,7 @@ class HtxFuturesBot(
         "ts", "level", "event", "symbol", "side", "order_id",
         "price", "amount", "filled", "remaining", "position_size",
         "entry_price", "notional", "fee_quote", "fee_currency",
-        "fill_source", "rs30", "rs60", "ema30", "ema60", "reason",
+        "fill_source", "rs30", "rs60", "ema50", "ema100", "reason",
         "message", "exception_type", "error_code", "retryable",
     )
     CYCLE_STATS_HEADER = (
@@ -66,8 +66,9 @@ class HtxFuturesBot(
         "ts", "profile", "symbol", "side", "signal_id", "signal_ts",
         "strategy_name", "valid", "entry_valid", "add_valid", "decision",
         "block_reason", "score", "rs30", "rs60", "ema50", "ema100",
-        "ema1d", "ema2d", "ema25d", "ema50d", "btc_return_30m", "volatility",
-        "budget_multiplier", "ladder_multiplier", "macro_regime",
+        "ema1d", "ema2d", "ema25d", "ema50d", "macro_gap", "trigger_gap",
+        "pullback_depth", "btc_return_30m", "volatility", "budget_multiplier",
+        "ladder_multiplier", "macro_regime",
         "external_valid", "external_stale", "external_spread_bps",
         "planned_budget", "planned_orders", "planned_notional",
         "placed_orders", "filled_notional", "realized_pnl_quote",
@@ -107,6 +108,7 @@ class HtxFuturesBot(
             self._ensure_cycle_stats_file()
             self._ensure_macro_csv_file()
             self._ensure_external_price_csv_file()
+            self._ensure_account_pnl_csv_file()
             self._ensure_signal_analytics_files()
             self._ensure_diagnostics_files()
             self.states = self._load_state()
@@ -146,14 +148,6 @@ class HtxFuturesBot(
                 "symbols": {},
             }
             self.entry_symbols = set()
-
-            self._ensure_csv_file()
-            self._ensure_cycle_stats_file()
-            self.macro_csv_path = Path(config.MONITORING.macro_csv_file)
-            self.external_price_csv_path = Path(config.MONITORING.external_price_csv_file)
-            self._ensure_macro_csv_file()
-            self._ensure_external_price_csv_file()
-            self._ensure_account_pnl_csv_file()
             self.account_pnl_runtime = {"history": [], "last_sample_at": 0.0}
             self.account_pnl_bots = [self]
             self._record_config_warnings()

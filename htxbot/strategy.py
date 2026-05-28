@@ -10,19 +10,32 @@ from .models import ExitLadderPreflight, TradeState
 
 
 class StrategyMixin:
-    def _current_total_notional(self) -> float:
+    def _bot_total_notional(self, bot) -> float:
         total = 0.0
-        for symbol, state in self.states.items():
-            if symbol not in self.market_by_symbol:
+        states = getattr(bot, "states", {}) or {}
+        markets = getattr(bot, "market_by_symbol", {}) or {}
+        for symbol, state in states.items():
+            if symbol not in markets:
                 continue
             if state.position_size > 0 and state.entry_price > 0:
-                total += self._contracts_to_notional(symbol, state.position_size, state.entry_price)
+                total += bot._contracts_to_notional(symbol, state.position_size, state.entry_price)
             for ref in state.entry_orders or []:
-                total += self._contracts_to_notional(
+                total += bot._contracts_to_notional(
                     symbol,
-                    self._safe_float(ref.get("amount"), 0.0),
-                    self._safe_float(ref.get("price"), 0.0),
+                    bot._safe_float(ref.get("amount"), 0.0),
+                    bot._safe_float(ref.get("price"), 0.0),
                 )
+        return total
+
+    def _current_total_notional(self) -> float:
+        total = 0.0
+        seen = set()
+        for bot in self._account_pnl_bots():
+            identity = id(bot)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            total += self._bot_total_notional(bot)
         return total
 
     def _symbol_open_notional(self, symbol: str, state: TradeState) -> float:
@@ -693,15 +706,19 @@ class StrategyMixin:
         state.last_signal_timestamp = signal.get("ts")
         state.last_rs30 = signal.get("rs30", state.last_rs30)
         state.last_rs60 = signal.get("rs60", state.last_rs60)
-        state.last_ema30 = signal.get("ema30", state.last_ema30)
-        state.last_ema60 = signal.get("ema60", state.last_ema60)
+        state.last_ema30 = signal.get("ema30", signal.get("ema50", state.last_ema30))
+        state.last_ema60 = signal.get("ema60", signal.get("ema100", state.last_ema60))
         state.strategy_name = "ema_pullback"
         state.last_ema25d = self._safe_float(signal.get("ema_macro_fast"), state.last_ema25d)
         state.last_ema50d = self._safe_float(signal.get("ema_macro_slow"), state.last_ema50d)
         state.last_ema1d = self._safe_float(signal.get("ema_pullback_fast"), state.last_ema1d)
         state.last_ema2d = self._safe_float(signal.get("ema_pullback_slow"), state.last_ema2d)
-        state.last_ema50 = self._safe_float(signal.get("ema_trigger_fast"), state.last_ema50)
-        state.last_ema100 = self._safe_float(signal.get("ema_trigger_slow"), state.last_ema100)
+        state.last_ema50 = self._safe_float(signal.get("ema50", signal.get("ema_trigger_fast")), state.last_ema50)
+        state.last_ema100 = self._safe_float(signal.get("ema100", signal.get("ema_trigger_slow")), state.last_ema100)
+        if not state.last_ema30:
+            state.last_ema30 = state.last_ema50
+        if not state.last_ema60:
+            state.last_ema60 = state.last_ema100
         state.last_btc_return_30m = self._safe_float(signal.get("btc_return_30m"), state.last_btc_return_30m)
         if state.cycle_opened_at is None:
             state.cycle_opened_at = time.time()
@@ -3523,6 +3540,11 @@ class StrategyMixin:
             return max(0.0, (reference_price - state.entry_price) / state.entry_price)
         return max(0.0, (state.entry_price - reference_price) / state.entry_price)
 
+    def _drawdown_reference_price(self, reference_price: float, last_price: float = 0.0) -> float:
+        if config.POSITION_SIDE == "short" and last_price > 0:
+            return last_price
+        return reference_price
+
     def _controlled_loss_contracts(
         self,
         symbol: str,
@@ -3596,11 +3618,12 @@ class StrategyMixin:
 
     def _rebuild_controlled_loss_exit_ladder(self, symbol: str, reason: str) -> bool:
         state = self._get_state(symbol)
-        reference_price, _ = self._fetch_reference_price(symbol)
+        reference_price, last_price = self._fetch_reference_price(symbol)
         if reference_price <= 0:
             return False
 
-        block_reason = self._controlled_loss_block_reason(symbol, state, reference_price)
+        drawdown_reference = self._drawdown_reference_price(reference_price, last_price)
+        block_reason = self._controlled_loss_block_reason(symbol, state, drawdown_reference)
         if block_reason:
             return False
 
@@ -3640,7 +3663,7 @@ class StrategyMixin:
             position_size=state.position_size,
             entry_price=state.entry_price,
             reason=(
-                f"{reason};drawdown={self._position_drawdown(state, reference_price):.5f};"
+                f"{reason};drawdown={self._position_drawdown(state, drawdown_reference):.5f};"
                 f"hard_close_fraction={self._hard_time_exit_close_fraction(state):.3f};"
                 f"loss_budget={self._controlled_loss_available_budget():.8f};"
                 f"max_loss={self._controlled_loss_max_loss_on_notional(state):.5f}"
@@ -3653,8 +3676,9 @@ class StrategyMixin:
         if state.position_size <= 0 or state.entry_price <= 0:
             return False
         if state.sell_ladder_mode == "controlled_loss_exit":
-            reference_price, _ = self._fetch_reference_price(symbol)
-            block_reason = self._controlled_loss_block_reason(symbol, state, reference_price) if reference_price > 0 else "reference_price_unavailable"
+            reference_price, last_price = self._fetch_reference_price(symbol)
+            drawdown_reference = self._drawdown_reference_price(reference_price, last_price)
+            block_reason = self._controlled_loss_block_reason(symbol, state, drawdown_reference) if drawdown_reference > 0 else "reference_price_unavailable"
             if block_reason:
                 if state.sell_ladder_orders:
                     self._cancel_sell_orders(symbol, reason=block_reason)
@@ -4102,10 +4126,10 @@ class StrategyMixin:
         if current_position_notional <= 0 or base_notional <= 0:
             return 0.0, "position_notional_unavailable"
 
-        base_fraction = max(0.0, self._safe_float(config.STRATEGY.ema_averaging_base_fraction, 0.0))
+        position_fraction = max(0.0, self._safe_float(config.STRATEGY.ema_averaging_base_fraction, 0.0))
         power = max(0.0, self._safe_float(config.STRATEGY.ema_averaging_power, 0.0))
         ratio = max(current_position_notional / base_notional, 1.0)
-        desired_notional = base_fraction * base_notional * (ratio ** power) * effective_scale
+        desired_notional = position_fraction * current_position_notional * effective_scale
         desired_margin = desired_notional / leverage
 
         total_cap_notional = equity * leverage * config.RISK.max_total_notional_fraction
@@ -4129,7 +4153,7 @@ class StrategyMixin:
         if contracts <= 0:
             return 0.0, "order_size_below_exchange_minimum"
         return planned_margin, (
-            f"ok:ema_average_base_fraction={base_fraction:.3f};"
+            f"ok:ema_average_position_fraction={position_fraction:.3f};"
             f"ema_average_power={power:.3f};"
             f"account_budget_scale={effective_scale:.3f};"
             f"base_notional={base_notional:.8f};"
@@ -4335,11 +4359,12 @@ class StrategyMixin:
         if state.last_average_signal_timestamp == signal.get("ts"):
             return
 
-        reference_price, _ = self._fetch_reference_price(symbol)
+        reference_price, last_price = self._fetch_reference_price(symbol)
         if reference_price <= 0:
             return
 
-        drawdown = self._position_drawdown(state, reference_price)
+        drawdown_reference = self._drawdown_reference_price(reference_price, last_price)
+        drawdown = self._position_drawdown(state, drawdown_reference)
         drawdown_threshold = self._ema_averaging_drawdown_threshold(state.average_stage)
         if drawdown < drawdown_threshold:
             self._record_signal_analytics(
@@ -4416,6 +4441,7 @@ class StrategyMixin:
         previous_average_stage = state.average_stage
         state.last_average_signal_timestamp = signal.get("ts")
         state.last_average_at = time.time()
+        self._save_state()
         next_stage = previous_average_stage + 1
         self._log_event(
             "INFO",

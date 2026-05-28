@@ -200,10 +200,11 @@ EMA_MAX_AVERAGING_STAGES=2
 ```text
 base_notional = initial_entry_notional
 ratio = max(current_position_notional / base_notional, 1)
-desired_notional = base_notional * EMA_AVERAGING_BASE_FRACTION * ratio ** EMA_AVERAGING_POWER
+desired_notional = current_position_notional * EMA_AVERAGING_BASE_FRACTION
 ```
 
 Если добор разрешен account-PnL context, применяется `ACCOUNT_AVERAGING_BUDGET_SCALE`.
+`EMA_AVERAGING_BASE_FRACTION` также читает legacy alias `EMA_AVERAGING_POSITION_FRACTION`; это доля от текущей позиции, а не от начального входа. `EMA_AVERAGING_POWER` сохраняется как legacy-настройка для совместимости логов, но размер добора не может превышать явно заданную долю текущей позиции.
 
 По умолчанию:
 
@@ -323,7 +324,7 @@ Macro overlay сравнивает XAUT/BTC context через RSI и может
 - `external_price_feed.csv`;
 - `bot_futures_macro.csv`.
 
-`signal_analytics.csv` содержит текущую EMA-схему: `ema50`, `ema100`, `ema1d`, `ema2d`, `ema25d`, `ema50d`.
+`signal_analytics.csv` содержит текущую EMA-схему: `ema50`, `ema100`, `ema1d`, `ema2d`, `ema25d`, `ema50d`, а также компоненты `macro_gap`, `trigger_gap`, `pullback_depth`.
 
 Все diagnostics/signal analytics/runtime CSV/JSONL файлы являются локальными артефактами аудита и не должны попадать в git. Если старые diagnostics со signed HTX URL уже были опубликованы или отправлены третьим лицам, API key нужно ротировать до live-старта.
 

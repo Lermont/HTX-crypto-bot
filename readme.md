@@ -113,6 +113,7 @@ Risk and sizing:
 
 ```dotenv
 LEVERAGE=30
+SET_LEVERAGE_ON_START=false
 ACCOUNT_LEVERAGE=50
 MIN_QUOTE_RESERVE=15
 MAX_ACTIVE_POSITIONS=50
@@ -120,7 +121,7 @@ EMA_MAX_POSITION_MARGIN_FRACTION=0.03
 EMA_MAX_TOTAL_MARGIN_FRACTION=0.50
 ```
 
-`LEVERAGE` is used for internal sizing and notional caps. In live mode the bot does not blindly change exchange leverage at startup; it uses the HTX account leverage it can fetch, or `ACCOUNT_LEVERAGE` when configured.
+`LEVERAGE` is used for internal sizing and notional caps. In live mode the bot reads HTX account leverage before orders; set `SET_LEVERAGE_ON_START=true` only when you want startup to apply `LEVERAGE` to each tracked contract.
 
 Signal periods:
 
@@ -165,6 +166,8 @@ EMA_AVERAGING_POWER=1.0
 EMA_AVERAGING_INTERVAL_HOURS=8
 EMA_MAX_AVERAGING_STAGES=2
 ```
+
+`EMA_AVERAGING_BASE_FRACTION` is the fraction of the current open position used for each averaging stage. `EMA_MAX_AVERAGING_STAGES` is capped at 2.
 
 Breakeven:
 

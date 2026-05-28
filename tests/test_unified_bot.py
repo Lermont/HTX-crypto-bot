@@ -115,6 +115,8 @@ class FakeExchange:
         self.account_position_mode = "single_side"
         self.reject_reduce_only_closeable_amount = False
         self.create_order_calls = 0
+        self.set_leverage_calls = []
+        self.set_leverage_error = None
         self.set_position_mode_calls = []
         self.set_position_mode_error = None
         self.ticker = {"bid": 9.9, "ask": 10.1, "last": 10.0}
@@ -214,6 +216,13 @@ class FakeExchange:
         self.set_position_mode_calls.append((hedged, symbol, params or {}))
         if self.set_position_mode_error is not None:
             raise self.set_position_mode_error
+        return {"status": "ok"}
+
+    def set_leverage(self, leverage, symbol=None, params=None):
+        self.set_leverage_calls.append((leverage, symbol, params or {}))
+        if self.set_leverage_error is not None:
+            raise self.set_leverage_error
+        self.account_leverage = leverage
         return {"status": "ok"}
 
     def contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo(self, request):
@@ -618,6 +627,9 @@ class UnifiedBotTests(unittest.TestCase):
             signal["api_secret"] = "do-not-log"
             signal["ema1d"] = 101.25
             signal["ema2d"] = 100.75
+            signal["macro_gap"] = 0.031
+            signal["trigger_gap"] = 0.012
+            signal["pullback_depth"] = 0.007
 
             bot._record_signal_analytics(
                 "signal_built",
@@ -634,6 +646,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(rows[-1]["valid"], "1")
             self.assertEqual(rows[-1]["ema1d"], "101.250000000000")
             self.assertEqual(rows[-1]["ema2d"], "100.750000000000")
+            self.assertEqual(rows[-1]["macro_gap"], "0.03100000")
+            self.assertEqual(rows[-1]["trigger_gap"], "0.01200000")
+            self.assertEqual(rows[-1]["pullback_depth"], "0.00700000")
 
             payloads = [
                 json.loads(line)
@@ -796,6 +811,29 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertIn(column, header)
                 self.assertEqual(rows[-1][column], "")
             self.assertEqual(rows[-1]["reason"], "legacy")
+
+    def test_trade_csv_header_migration_renames_legacy_ema_columns(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            legacy_header = [
+                "ema30" if name == "ema50" else "ema60" if name == "ema100" else name
+                for name in bot.CSV_HEADER
+            ]
+            row = {name: "" for name in legacy_header}
+            row.update({"ts": "1000", "level": "INFO", "event": "ema_signal_valid", "ema30": "50.1", "ema60": "100.1"})
+            with bot.csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(legacy_header)
+                writer.writerow([row[name] for name in legacy_header])
+
+            bot._ensure_csv_file()
+
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[-1]["ema50"], "50.1")
+            self.assertEqual(rows[-1]["ema100"], "100.1")
+            self.assertNotIn("ema30", rows[-1])
+            self.assertNotIn("ema60", rows[-1])
 
     def test_external_price_csv_records_mexc_quantities_and_notional(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2364,6 +2402,37 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertIn("effective_budget_multiplier=0.500", reduced_reason)
                 self.assertIn("effective_budget_multiplier=1.500", expanded_reason)
 
+    def test_risk_budget_counts_combined_profile_notional(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            risk = replace(
+                config.RISK,
+                leverage=10,
+                max_total_notional_fraction=0.50,
+                max_position_notional_fraction=1.0,
+            )
+            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            buying = replace(config.BUYING, position_budget_fraction=0.02)
+            with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
+                bot = self.make_bot(Path(raw_tmp) / "long")
+                other = self.make_bot(Path(raw_tmp) / "short")
+                bot.account_pnl_bots = [bot, other]
+                other.account_pnl_bots = [bot, other]
+                other_state = other._get_state(SYMBOL)
+                other_state.position_size = 490.0
+                other_state.position_available = 490.0
+                other_state.entry_price = 10.0
+
+                budget, reason = bot._risk_budget(
+                    SYMBOL,
+                    bot._get_state(SYMBOL),
+                    reference_price=10.0,
+                    is_new_position=True,
+                    signal={"budget_multiplier": 1.0, "volatility_budget_multiplier": 1.0},
+                )
+
+                self.assertAlmostEqual(budget * config.RISK.leverage, 100.0)
+                self.assertIn("budget_scale=1.000", reason)
+
     def test_ema_averaging_places_power_sized_entry_after_drawdown(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
@@ -2394,6 +2463,29 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertIsNotNone(state.last_average_at)
                 self.assertAlmostEqual(budget * config.RISK.leverage, 20.0 * 10.2 * 0.45)
                 self.assertIn("ema_average_power=0.800", reason)
+
+    def test_short_averaging_drawdown_uses_last_price_not_ask_spread(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            strategy = replace(
+                config.STRATEGY,
+                ema_averaging_interval_hours=0.0,
+                ema_max_averaging_stages=2,
+                averaging_drawdown_steps=(0.005, 0.01),
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 20.0
+                state.position_available = 20.0
+                state.entry_price = 10.0
+                state.sell_ladder_orders = [{"id": "tp", "side": "buy", "price": 9.9, "amount": 20.0}]
+                bot.exchange.ticker = {"bid": 9.9, "ask": 10.1, "last": 10.0}
+
+                bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
+
+                self.assertEqual(state.entry_orders, [])
+                self.assertEqual(state.average_stage, 0)
 
     def test_ema_averaging_is_blocked_by_adverse_external_directional_1m(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2539,7 +2631,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.average_stage, 2)
                 self.assertEqual(state.entry_orders, [])
 
-    def test_ema_averaging_power_formula_uses_usdt_notional_ratio(self):
+    def test_ema_averaging_position_fraction_uses_current_notional(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=10000.0)
             strategy = replace(
@@ -2557,11 +2649,12 @@ class UnifiedBotTests(unittest.TestCase):
 
                 budget, reason = bot._ema_averaging_budget(SYMBOL, state, reference_price=10.0)
                 planned_notional = budget * config.RISK.leverage
-                expected_notional = 0.45 * 1000.0 * (2.0 ** 0.80)
+                expected_notional = 0.45 * 2000.0
 
                 self.assertAlmostEqual(planned_notional, expected_notional)
-                self.assertLess(planned_notional / 2000.0, 0.45)
+                self.assertAlmostEqual(planned_notional / 2000.0, 0.45)
                 self.assertIn("ratio=2.000000", reason)
+                self.assertIn("ema_average_position_fraction=0.450", reason)
 
     def test_ema_averaging_is_blocked_after_breakeven(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3905,6 +3998,46 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(rows[-1]["level"], "ERROR")
                 self.assertEqual(rows[-1]["event"], "futures_setup")
                 self.assertEqual(rows[-1]["reason"], "position_mode_locked_unverified")
+
+    def test_setup_sets_leverage_when_enabled(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            exchange_config = replace(
+                config.EXCHANGE,
+                set_position_mode_on_start=False,
+                set_leverage_on_start=True,
+            )
+            risk = replace(config.RISK, leverage=7)
+            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False), EXCHANGE=exchange_config, RISK=risk):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL]
+
+                bot._setup_futures_account()
+
+                self.assertEqual(
+                    bot.exchange.set_leverage_calls,
+                    [(7, SYMBOL, {"marginMode": config.RISK.margin_mode})],
+                )
+                self.assertEqual(bot.order_leverage_cache[SYMBOL], 7.0)
+
+    def test_setup_blocks_live_start_when_enabled_leverage_cannot_be_set(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            exchange_config = replace(
+                config.EXCHANGE,
+                set_position_mode_on_start=False,
+                set_leverage_on_start=True,
+            )
+            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False), EXCHANGE=exchange_config):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL]
+                bot.exchange.set_leverage_error = RuntimeError("leverage rejected")
+
+                with self.assertRaisesRegex(RuntimeError, "Could not set configured HTX leverage"):
+                    bot._setup_futures_account()
+
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertEqual(rows[-1]["level"], "ERROR")
+                self.assertEqual(rows[-1]["reason"], "set_leverage_failed")
 
     def test_public_ohlcv_fetch_retries_transient_gateway_failure(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
