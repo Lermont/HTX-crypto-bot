@@ -15,7 +15,7 @@
 - ограничивать скорость набора новых позиций через rate-limit;
 - открывать позицию двумя limit-ордерами;
 - сопровождать позицию adaptive reduce-only exit ladder с отдельным runner-хвостом в normal-режиме;
-- разрешать максимум пять усреднений до breakeven, если старший EMA-сигнал не сломан;
+- разрешать усреднения до breakeven (по умолчанию до 5 стадий), если старший EMA-сигнал не сломан;
 - если позиция не закрылась за 48 часов, отменять дальнейшие доборы и переводить выход в reduce-only breakeven.
 
 Стоп-лосс в активном маршруте не выставляется. Stop-market, stop-limit, entry expansion, frozen recovery averaging, controlled-loss и absolute force exit по умолчанию не участвуют в основном торговом цикле. Исключение: сервисная логика может закрыть пылевую позицию reduce-only market-ордером, если включён `DUST_CLOSE_ENABLED`.
@@ -133,8 +133,10 @@ EMA-периоды задаются в минутах, затем перевод
 | Macro slow | `EMA_MACRO_SLOW_MINUTES` | 72000 | `1d` | EMA50 |
 | Pullback fast | `EMA_PULLBACK_FAST_MINUTES` | 1440 | `4h` | EMA6 |
 | Pullback slow | `EMA_PULLBACK_SLOW_MINUTES` | 2880 | `4h` | EMA12 |
-| Trigger fast | `EMA_TRIGGER_FAST_MINUTES` | 50 | `1m` | EMA50 |
-| Trigger slow | `EMA_TRIGGER_SLOW_MINUTES` | 100 | `1m` | EMA100 |
+| Trigger fast | `EMA_TRIGGER_FAST_MINUTES` | 50 | `1m` | EMA50 (записывается в `ema30`) |
+| Trigger slow | `EMA_TRIGGER_SLOW_MINUTES` | 100 | `1m` | EMA100 (записывается в `ema60`) |
+
+*Примечание: В логах и CSV ключи `ema30` и `ema60` соответствуют Trigger Fast (50) и Trigger Slow (100) при дефолтных настройках.*
 
 Pullback recovery задаётся отдельно:
 
@@ -453,10 +455,12 @@ MAX_UNHEALTHY_POSITIONS_FOR_NEW_ENTRIES=2
 
 Unhealthy позиция: активная позиция без tracked exit ladder или zombie. Если число unhealthy positions в профиле `>= threshold`, новые циклы не открываются.
 
-Reference price:
+Reference price (используется для входа и расчета drawdown):
 
 - long/buy: `bid`, затем `last`, затем `ask`;
 - short/sell: `ask`, затем `last`, затем `bid`.
+
+*Важно: использование `ask` для short-позиций при расчете drawdown приводит к тому, что спред визуально увеличивает просадку, что может вызвать более раннее усреднение.*
 
 После отмены или постановки initial entry ladder бот не пересоздаёт новый ladder на той же самой signal timestamp.
 
@@ -637,8 +641,8 @@ Exit amount ограничивается фактически доступным
 
 ```text
 EMA_AVERAGING_ENABLED=true
-EMA_AVERAGING_DRAWDOWN_STEP=0.01
-EMA_AVERAGING_POSITION_FRACTION=0.50
+EMA_AVERAGING_DRAWDOWN_STEP=0.02
+EMA_AVERAGING_POSITION_FRACTION=0.45
 EMA_AVERAGING_INTERVAL_HOURS=8
 EMA_MAX_AVERAGING_STAGES=5
 ```
@@ -667,11 +671,15 @@ short_drawdown = max(0, (reference_price - entry_price) / entry_price)
 
 Размер усреднения:
 
+Фактический расчет в коде использует формулу на основе плеча и соотношения текущего объема к начальному, фактически игнорируя `EMA_AVERAGING_POSITION_FRACTION` в пользу более сложной зависимости:
+
 ```text
-desired_margin = current_position_margin * EMA_AVERAGING_POSITION_FRACTION
+ratio = max(current_position_notional / base_notional, 1.0)
+desired_notional = EMA_AVERAGING_BASE_FRACTION * base_notional * (ratio ** EMA_AVERAGING_POWER)
+desired_margin = desired_notional / LEVERAGE
 ```
 
-То есть дефолтный добор равен 50% текущей margin позиции до применения caps. Ордер добора ставится той же двухступенчатой entry ladder.
+Где `EMA_AVERAGING_BASE_FRACTION=0.45` и `EMA_AVERAGING_POWER=0.80` по умолчанию. Ордер добора ставится той же двухступенчатой entry ladder.
 
 После успешной постановки averaging entry ladder увеличивается `average_stage`. Если ladder не создан, stage откатывается.
 
@@ -905,8 +913,8 @@ EMA_ENTRY_LADDER_OFFSETS=0.0,0.01
 EMA_TAKE_PROFIT_MARKUP=0.01
 EMA_EXIT_LADDER_FRACTIONS=1.0
 EMA_AVERAGING_ENABLED=true
-EMA_AVERAGING_DRAWDOWN_STEP=0.01
-EMA_AVERAGING_POSITION_FRACTION=0.50
+EMA_AVERAGING_DRAWDOWN_STEP=0.02
+EMA_AVERAGING_POSITION_FRACTION=0.45
 EMA_AVERAGING_INTERVAL_HOURS=8
 EMA_MAX_AVERAGING_STAGES=5
 
