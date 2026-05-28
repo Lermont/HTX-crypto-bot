@@ -28,6 +28,7 @@ class HtxFuturesBot(
         "price", "amount", "filled", "remaining", "position_size",
         "entry_price", "notional", "fee_quote", "fee_currency",
         "fill_source", "rs30", "rs60", "ema30", "ema60", "reason",
+        "message", "exception_type", "error_code", "retryable",
     )
     CYCLE_STATS_HEADER = (
         "symbol", "opened_at", "closed_at", "leverage", "margin_mode",
@@ -65,7 +66,7 @@ class HtxFuturesBot(
         "ts", "profile", "symbol", "side", "signal_id", "signal_ts",
         "strategy_name", "valid", "entry_valid", "add_valid", "decision",
         "block_reason", "score", "rs30", "rs60", "ema50", "ema100",
-        "ema25d", "ema50d", "btc_return_30m", "volatility",
+        "ema1d", "ema2d", "ema25d", "ema50d", "btc_return_30m", "volatility",
         "budget_multiplier", "ladder_multiplier", "macro_regime",
         "external_valid", "external_stale", "external_spread_bps",
         "planned_budget", "planned_orders", "planned_notional",

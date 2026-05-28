@@ -9,6 +9,7 @@ from typing import Dict, Iterator, Optional, Tuple, Union
 
 
 BASE_DIR = Path(__file__).resolve().parent
+CONFIG_WARNINGS = []
 
 
 def _load_dotenv_if_present(path: Path, profile: str = "") -> None:
@@ -128,6 +129,11 @@ def _env_optional_float_tuple(name: str, default: Tuple[Optional[float], ...], p
             return default
     return tuple(parsed) or default
 
+
+def _add_config_warning(message: str) -> None:
+    if message not in CONFIG_WARNINGS:
+        CONFIG_WARNINGS.append(message)
+
 LONG_COINS = (
     "eth", "sol", "bnb", "xrp", "ada", "avax", "link", "dot", "ltc", "bch",
     "etc", "trx", "ton", "sui", "apt", "op", "near", "sei",
@@ -173,11 +179,6 @@ class SignalSettings:
     timeframe: str
     rs_fast_window: int
     rs_slow_window: int
-    ema_fast: int
-    ema_slow: int
-    trend_ema_fast: int
-    trend_ema_slow: int
-    min_signal_candles: int
 
 
 @dataclass(frozen=True)
@@ -192,8 +193,6 @@ class SellSettings:
     buy_fee_rate: float
     sell_fee_rate: float
     min_gross_profit_floor: float
-    ladder_fractions: Tuple[float, ...]
-    ladder_markups: Tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -237,10 +236,6 @@ class StrategySettings:
     ema_use_btc_risk_filter: bool
     ema_btc_long_min_return_30m: float
     ema_btc_short_max_return_30m: float
-    ema_position_budget_fraction: float
-    ema_entry_ladder_fractions: Tuple[float, ...]
-    ema_entry_ladder_offsets_long: Tuple[float, ...]
-    ema_entry_ladder_offsets_short: Tuple[float, ...]
     ema_take_profit_markup: float
     ema_exit_ladder_fractions: Tuple[float, ...]
     ema_adaptive_exit_enabled: bool
@@ -267,7 +262,6 @@ class StrategySettings:
     ema_exit_trailing_take_profit_markup: float
     ema_averaging_enabled: bool
     ema_averaging_drawdown_step: float
-    ema_averaging_position_fraction: float
     ema_averaging_base_fraction: float
     ema_averaging_power: float
     ema_averaging_interval_hours: float
@@ -306,8 +300,6 @@ class StrategySettings:
     signal_score_reference: float
     signal_ema_gap_weight: float
     entry_min_score: float
-    entry_min_rs_edge: float
-    entry_min_ema_gap: float
     entry_min_rs60_abs: float
     entry_min_rs30_abs: float
     entry_max_new_ladders_per_signal: int
@@ -319,54 +311,12 @@ class StrategySettings:
     entry_crowded_min_score: float
     entry_crowded_min_rs60_abs: float
     entry_crowded_min_rs30_abs: float
-    enable_rs_overheat_filter: bool
-    entry_max_rs30_abs: float
-    entry_max_rs60_abs: float
-    enable_entry_expansion: bool
-    entry_expansion_budget_scale: float
-    entry_expansion_max_unhealthy_positions: int
-    entry_expansion_min_tracked_exit_ratio: float
-    entry_expansion_score_multiplier: float
-    entry_expansion_rs_edge_multiplier: float
-    entry_expansion_rs_abs_multiplier: float
-    entry_expansion_ema_gap_multiplier: float
-    entry_expansion_recent_return_multiplier: float
-    entry_expansion_pullback_multiplier: float
-    add_min_score: float
-    add_min_rs_edge: float
-    enable_trend_ema_filter: bool
-    entry_min_trend_ema_gap: float
-    entry_min_price_to_trend_ema: float
-    entry_min_recent_return_5m: float
-    entry_min_recent_return_15m: float
-    entry_pullback_window: int
-    entry_min_pullback: float
-    entry_block_on_btc_drop: bool
-    entry_btc_return_window: int
-    entry_btc_min_return: float
-    enable_averaging: bool
     max_buy_stages: int
     averaging_drawdown_steps: Tuple[float, ...]
     averaging_budget_fractions: Tuple[float, ...]
-    averaging_ladder_offset_multiplier: float
-    enable_frozen_recovery_averaging: bool
-    frozen_recovery_confirmation_candles: int
-    frozen_recovery_require_add_valid: bool
-    frozen_recovery_max_buys: int
-    frozen_recovery_budget_fraction: float
-    frozen_recovery_ladder_offset_multiplier: float
-    frozen_recovery_allow_drawdown_trigger: bool
-    frozen_recovery_min_drawdown: float
     no_more_averaging_after_minutes: float
-    enable_time_based_exit: bool
     time_exit_after_minutes: float
-    time_exit_require_weak_signal: bool
-    time_exit_ladder_markups: Tuple[float, ...]
-    time_exit_reprice_after_minutes: float
     urgent_time_exit_after_minutes: float
-    urgent_time_exit_reprice_after_minutes: float
-    urgent_time_exit_ladder_markups: Tuple[float, ...]
-    zombie_after_time_exit_minutes: float
     hard_time_exit_after_minutes: float
     hard_time_exit_close_fraction: float
     hard_time_exit_step_minutes: float
@@ -377,16 +327,13 @@ class StrategySettings:
     absolute_force_exit_after_minutes: float
     enable_controlled_loss_exit: bool
     controlled_loss_after_zombie_minutes: float
-    controlled_loss_reprice_after_minutes: float
     controlled_loss_min_drawdown: float
     controlled_loss_max_loss_on_notional: float
     controlled_loss_max_position_fraction: float
     controlled_loss_profit_bank_today_fraction: float
     controlled_loss_profit_bank_7d_fraction: float
     controlled_loss_min_bank_usdt: float
-    controlled_loss_ladder_move_fractions: Tuple[float, ...]
     max_unhealthy_positions_for_new_entries: int
-    enable_hidden_close_order_sync: bool
     cancel_unsafe_hidden_close_orders: bool
     enable_volatility_adjusted_ladders: bool
     volatility_window: int
@@ -398,15 +345,9 @@ class StrategySettings:
     max_volatility_budget_multiplier: float
     enable_volatility_recovery_stages: bool
     averaging_drawdown_daily_volatility_fraction: float
-    frozen_recovery_drawdown_daily_volatility_fraction: float
-    enable_dynamic_time_exit_markups: bool
-    time_exit_daily_volatility_markup_fraction: float
-    time_exit_max_markup_multiplier: float
     min_ladder_volatility_multiplier: float
     max_ladder_volatility_multiplier: float
     min_profit_fee_multiplier: float
-    min_profit_spread_multiplier: float
-    min_profit_volatility_fraction: float
     enable_dynamic_profit_floor: bool
     dynamic_profit_floor_volatility_multiplier_threshold: float
     dynamic_profit_floor_high_vol_multiplier: float
@@ -462,11 +403,8 @@ class ExternalPriceFeedSettings:
     enabled: bool
     primary_exchange: str
     reference_exchanges: Tuple[str, ...]
-    use_existing_trading_universe: bool
-    only_usdt_pairs: bool
     rest_poll_interval_sec: float
     rest_timeout_sec: float
-    reconnect_on_stale_ms: int
     max_price_age_ms: int
     min_valid_bid_qty_usdt: float
     min_valid_ask_qty_usdt: float
@@ -486,7 +424,6 @@ class ExternalPriceFeedSettings:
     exit_adjustment_enabled: bool
     long_take_profit_tighten_if_htx_premium_bps: float
     short_take_profit_tighten_if_htx_discount_bps: float
-    tighten_ladder_factor: float
     tightened_ladder_fractions: Tuple[float, ...]
     tightened_ladder_markups: Tuple[Optional[float], ...]
     disable_trading_if_reference_stale: bool
@@ -508,7 +445,6 @@ class MonitoringSettings:
     diagnostics_jsonl_file: str
     csv_archive_dir: str
     csv_rotate_max_bytes: int
-    equity_csv_ttl_sec: float
 
 
 @dataclass(frozen=True)
@@ -649,11 +585,6 @@ def _validate_tuple_lengths(
 
 def _validate_profile(profile: "BotProfile") -> None:
     _validate_fraction_tuple(f"{profile.name}.BUYING.ladder_fractions", profile.buying.ladder_fractions)
-    _validate_fraction_tuple(f"{profile.name}.SELLING.ladder_fractions", profile.selling.ladder_fractions)
-    _validate_fraction_tuple(
-        f"{profile.name}.STRATEGY.ema_entry_ladder_fractions",
-        profile.strategy.ema_entry_ladder_fractions,
-    )
     _validate_fraction_tuple(
         f"{profile.name}.STRATEGY.ema_exit_ladder_fractions",
         profile.strategy.ema_exit_ladder_fractions,
@@ -680,13 +611,6 @@ def _validate_profile(profile: "BotProfile") -> None:
         profile.buying.ladder_fractions,
         "ladder_offsets",
         profile.buying.ladder_offsets,
-    )
-    _validate_tuple_lengths(
-        f"{profile.name}.SELLING",
-        "ladder_fractions",
-        profile.selling.ladder_fractions,
-        "ladder_markups",
-        profile.selling.ladder_markups,
     )
     _validate_tuple_lengths(
         f"{profile.name}.STRATEGY.ema_exit_normal",
@@ -736,6 +660,23 @@ def _validate_profile(profile: "BotProfile") -> None:
         if value < 0.0 or value > 1.0:
             raise ValueError(f"{profile.name}.STRATEGY.{setting_name} must be between 0 and 1")
 
+    if not profile.runtime.dry_run:
+        if profile.risk.max_position_notional_fraction > 0.03 + 1e-12:
+            _add_config_warning(
+                f"{profile.name}: live max_position_notional_fraction="
+                f"{profile.risk.max_position_notional_fraction:.4f} is above the conservative 0.0300 launch cap"
+            )
+        if profile.risk.max_total_notional_fraction > 0.50 + 1e-12:
+            _add_config_warning(
+                f"{profile.name}: live max_total_notional_fraction="
+                f"{profile.risk.max_total_notional_fraction:.4f} is above the conservative 0.5000 launch cap"
+            )
+        if profile.strategy.ema_max_averaging_stages > 2:
+            _add_config_warning(
+                f"{profile.name}: live ema_max_averaging_stages="
+                f"{profile.strategy.ema_max_averaging_stages} is above the conservative launch cap of 2"
+            )
+
 
 def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfile:
     direction = direction.lower()
@@ -770,11 +711,6 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         timeframe=ema_trigger_timeframe,
         rs_fast_window=30,
         rs_slow_window=60,
-        ema_fast=_env_int("EMA_TRIGGER_FAST_MINUTES", 50, profile=name),
-        ema_slow=_env_int("EMA_TRIGGER_SLOW_MINUTES", 100, profile=name),
-        trend_ema_fast=_env_int("EMA_MACRO_FAST_MINUTES", 36000, profile=name),
-        trend_ema_slow=_env_int("EMA_MACRO_SLOW_MINUTES", 72000, profile=name),
-        min_signal_candles=120,
     )
     ema_entry_offsets_default = _env_float_tuple("EMA_ENTRY_LADDER_OFFSETS", (0.0, 0.01), profile=name)
     ema_entry_offsets = _env_float_tuple(
@@ -829,8 +765,6 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         buy_fee_rate=0.0001,
         sell_fee_rate=0.0001,
         min_gross_profit_floor=0.0,
-        ladder_fractions=ema_exit_fractions,
-        ladder_markups=tuple(ema_take_profit_markup for _ in ema_exit_fractions),
     )
     risk = RiskSettings(
         min_quote_reserve=_env_float("MIN_QUOTE_RESERVE", 15.0, profile=name),
@@ -862,6 +796,15 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
             profile=name,
         ),
     )
+    ema_averaging_drawdown_step = _env_float("EMA_AVERAGING_DRAWDOWN_STEP", 0.01, profile=name)
+    ema_averaging_base_fraction = _env_float(
+        "EMA_AVERAGING_BASE_FRACTION",
+        _env_float("EMA_AVERAGING_POSITION_FRACTION", 0.50, profile=name),
+        profile=name,
+    )
+    ema_averaging_power = _env_float("EMA_AVERAGING_POWER", 1.0, profile=name)
+    ema_max_averaging_stages = _env_int("EMA_MAX_AVERAGING_STAGES", 2, profile=name)
+    averaging_stage_count = max(0, ema_max_averaging_stages)
     strategy = StrategySettings(
         ema_strategy_enabled=_env_bool("EMA_STRATEGY_ENABLED", True, profile=name),
         ema_macro_timeframe=ema_macro_timeframe,
@@ -882,10 +825,6 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_use_btc_risk_filter=_env_bool("EMA_USE_BTC_RISK_FILTER", True, profile=name),
         ema_btc_long_min_return_30m=_env_float("EMA_BTC_LONG_MIN_RETURN_30M", -0.0025, profile=name),
         ema_btc_short_max_return_30m=_env_float("EMA_BTC_SHORT_MAX_RETURN_30M", 0.0025, profile=name),
-        ema_position_budget_fraction=buying.position_budget_fraction,
-        ema_entry_ladder_fractions=ema_entry_fractions,
-        ema_entry_ladder_offsets_long=_env_float_tuple("EMA_ENTRY_LADDER_OFFSETS_LONG", ema_entry_offsets_default, profile=name),
-        ema_entry_ladder_offsets_short=_env_float_tuple("EMA_ENTRY_LADDER_OFFSETS_SHORT", ema_entry_offsets_default, profile=name),
         ema_take_profit_markup=ema_take_profit_markup,
         ema_exit_ladder_fractions=ema_exit_fractions,
         ema_adaptive_exit_enabled=_env_bool("EMA_ADAPTIVE_EXIT_ENABLED", True, profile=name),
@@ -901,11 +840,11 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_exit_decay_first_markup_cap=_env_float("EMA_EXIT_DECAY_FIRST_MARKUP_CAP", 0.008, profile=name),
         ema_exit_decay_max_markup_after_hours=_env_float("EMA_EXIT_DECAY_MAX_MARKUP_AFTER_HOURS", 6.0, profile=name),
         ema_exit_decay_max_markup=_env_float("EMA_EXIT_DECAY_MAX_MARKUP", 0.030, profile=name),
-        ema_exit_runner_enabled=_env_bool("EMA_EXIT_RUNNER_ENABLED", True, profile=name),
+        ema_exit_runner_enabled=_env_bool("EMA_EXIT_RUNNER_ENABLED", False, profile=name),
         ema_exit_runner_activation_markup=_env_float("EMA_EXIT_RUNNER_ACTIVATION_MARKUP", 0.020, profile=name),
         ema_exit_runner_trailing_pullback=_env_float("EMA_EXIT_RUNNER_TRAILING_PULLBACK", 0.010, profile=name),
         ema_exit_runner_take_profit_markup=_env_float("EMA_EXIT_RUNNER_TAKE_PROFIT_MARKUP", 0.050, profile=name),
-        ema_exit_trailing_enabled=_env_bool("EMA_EXIT_TRAILING_ENABLED", True, profile=name),
+        ema_exit_trailing_enabled=_env_bool("EMA_EXIT_TRAILING_ENABLED", False, profile=name),
         ema_exit_trailing_fixed_fraction=_env_float("EMA_EXIT_TRAILING_FIXED_FRACTION", 0.35, profile=name),
         ema_exit_trailing_activation_markup=_env_float(
             "EMA_EXIT_TRAILING_ACTIVATION_MARKUP",
@@ -923,24 +862,15 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
             profile=name,
         ),
         ema_averaging_enabled=_env_bool("EMA_AVERAGING_ENABLED", True, profile=name),
-        ema_averaging_drawdown_step=_env_float("EMA_AVERAGING_DRAWDOWN_STEP", 0.02, profile=name),
-        ema_averaging_position_fraction=_env_float(
-            "EMA_AVERAGING_POSITION_FRACTION",
-            _env_float("EMA_AVERAGING_BASE_FRACTION", 0.45, profile=name),
-            profile=name,
-        ),
-        ema_averaging_base_fraction=_env_float(
-            "EMA_AVERAGING_BASE_FRACTION",
-            _env_float("EMA_AVERAGING_POSITION_FRACTION", 0.45, profile=name),
-            profile=name,
-        ),
-        ema_averaging_power=_env_float("EMA_AVERAGING_POWER", 0.80, profile=name),
+        ema_averaging_drawdown_step=ema_averaging_drawdown_step,
+        ema_averaging_base_fraction=ema_averaging_base_fraction,
+        ema_averaging_power=ema_averaging_power,
         ema_averaging_interval_hours=_env_float("EMA_AVERAGING_INTERVAL_HOURS", 8.0, profile=name),
-        ema_max_averaging_stages=_env_int("EMA_MAX_AVERAGING_STAGES", 5, profile=name),
+        ema_max_averaging_stages=ema_max_averaging_stages,
         account_pnl_enabled=_env_bool("ACCOUNT_PNL_ENABLED", True, profile=name),
         account_pnl_window_minutes=_env_float("ACCOUNT_PNL_WINDOW_MINUTES", 360.0, profile=name),
         account_pnl_sample_interval_sec=_env_float("ACCOUNT_PNL_SAMPLE_INTERVAL_SEC", 30.0, profile=name),
-        account_profit_unload_enabled=_env_bool("ACCOUNT_PROFIT_UNLOAD_ENABLED", True, profile=name),
+        account_profit_unload_enabled=_env_bool("ACCOUNT_PROFIT_UNLOAD_ENABLED", False, profile=name),
         account_profit_unload_min_pnl_quote=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_PNL_QUOTE", 5.0, profile=name),
         account_profit_unload_min_pnl_rate=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_PNL_RATE", 0.002, profile=name),
         account_profit_unload_percentile=_env_float("ACCOUNT_PROFIT_UNLOAD_PERCENTILE", 0.75, profile=name),
@@ -951,7 +881,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         account_profit_unload_min_position_pnl_quote=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_POSITION_PNL_QUOTE", 0.50, profile=name),
         account_profit_unload_min_position_pnl_rate=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_POSITION_PNL_RATE", 0.001, profile=name),
         account_profit_unload_cooldown_sec=_env_float("ACCOUNT_PROFIT_UNLOAD_COOLDOWN_SEC", 300.0, profile=name),
-        account_averaging_enabled=_env_bool("ACCOUNT_AVERAGING_ENABLED", True, profile=name),
+        account_averaging_enabled=_env_bool("ACCOUNT_AVERAGING_ENABLED", False, profile=name),
         account_averaging_min_samples=_env_int("ACCOUNT_AVERAGING_MIN_SAMPLES", 6, profile=name),
         account_averaging_percentile=_env_float("ACCOUNT_AVERAGING_PERCENTILE", 0.25, profile=name),
         account_averaging_near_trough_quote=_env_float("ACCOUNT_AVERAGING_NEAR_TROUGH_QUOTE", 3.0, profile=name),
@@ -971,8 +901,6 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         signal_score_reference=1.0,
         signal_ema_gap_weight=1.0,
         entry_min_score=_env_float("ENTRY_MIN_SCORE", 0.03, profile=name),
-        entry_min_rs_edge=0.0,
-        entry_min_ema_gap=0.0,
         entry_min_rs60_abs=_env_float("ENTRY_MIN_RS60_ABS", 0.002, profile=name),
         entry_min_rs30_abs=_env_float("ENTRY_MIN_RS30_ABS", 0.001, profile=name),
         entry_max_new_ladders_per_signal=_env_int("ENTRY_MAX_NEW_LADDERS_PER_SIGNAL", 5, profile=name),
@@ -984,92 +912,47 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         entry_crowded_min_score=_env_float("ENTRY_CROWDED_MIN_SCORE", 0.04, profile=name),
         entry_crowded_min_rs60_abs=_env_float("ENTRY_CROWDED_MIN_RS60_ABS", 0.003, profile=name),
         entry_crowded_min_rs30_abs=_env_float("ENTRY_CROWDED_MIN_RS30_ABS", 0.0015, profile=name),
-        enable_rs_overheat_filter=False,
-        entry_max_rs30_abs=0.0,
-        entry_max_rs60_abs=0.0,
-        enable_entry_expansion=False,
-        entry_expansion_budget_scale=0.0,
-        entry_expansion_max_unhealthy_positions=_env_int("ENTRY_EXPANSION_MAX_UNHEALTHY_POSITIONS", 0, profile=name),
-        entry_expansion_min_tracked_exit_ratio=_env_float("ENTRY_EXPANSION_MIN_TRACKED_EXIT_RATIO", 0.90, profile=name),
-        entry_expansion_score_multiplier=_env_float("ENTRY_EXPANSION_SCORE_MULTIPLIER", 0.75, profile=name),
-        entry_expansion_rs_edge_multiplier=_env_float("ENTRY_EXPANSION_RS_EDGE_MULTIPLIER", 0.75, profile=name),
-        entry_expansion_rs_abs_multiplier=_env_float("ENTRY_EXPANSION_RS_ABS_MULTIPLIER", 0.75, profile=name),
-        entry_expansion_ema_gap_multiplier=_env_float("ENTRY_EXPANSION_EMA_GAP_MULTIPLIER", 0.75, profile=name),
-        entry_expansion_recent_return_multiplier=_env_float("ENTRY_EXPANSION_RECENT_RETURN_MULTIPLIER", 0.75, profile=name),
-        entry_expansion_pullback_multiplier=_env_float("ENTRY_EXPANSION_PULLBACK_MULTIPLIER", 0.75, profile=name),
-        add_min_score=0.0,
-        add_min_rs_edge=0.0,
-        enable_trend_ema_filter=False,
-        entry_min_trend_ema_gap=0.0,
-        entry_min_price_to_trend_ema=0.0,
-        entry_min_recent_return_5m=0.0,
-        entry_min_recent_return_15m=0.0,
-        entry_pullback_window=15,
-        entry_min_pullback=0.0,
-        entry_block_on_btc_drop=False,
-        entry_btc_return_window=30,
-        entry_btc_min_return=0.0,
-        enable_averaging=_env_bool("EMA_AVERAGING_ENABLED", True, profile=name),
-        max_buy_stages=_env_int("MAX_BUY_STAGES", _env_int("EMA_MAX_AVERAGING_STAGES", 2, profile=name) + 1, profile=name),
+        max_buy_stages=_env_int("MAX_BUY_STAGES", ema_max_averaging_stages + 1, profile=name),
         averaging_drawdown_steps=tuple(
             _env_float(
                 f"AVERAGING_DRAWDOWN_STEP_{index}",
-                _env_float("EMA_AVERAGING_DRAWDOWN_STEP", (0.02, 0.04)[index - 1], profile=name),
+                ema_averaging_drawdown_step * index,
                 profile=name,
             )
-            for index in range(1, 3)
+            for index in range(1, averaging_stage_count + 1)
         ),
         averaging_budget_fractions=tuple(
             _env_float(
                 f"AVERAGING_BUDGET_FRACTION_{index}",
-                _env_float(
-                    "EMA_AVERAGING_BASE_FRACTION",
-                    _env_float("EMA_AVERAGING_POSITION_FRACTION", 0.45, profile=name),
-                    profile=name,
-                ),
+                ema_averaging_base_fraction,
                 profile=name,
             )
-            for index in range(1, 3)
+            for index in range(1, averaging_stage_count + 1)
         ),
-        averaging_ladder_offset_multiplier=1.0,
-        enable_frozen_recovery_averaging=False,
-        frozen_recovery_confirmation_candles=_env_int("FROZEN_RECOVERY_CONFIRMATION_CANDLES", 3, profile=name),
-        frozen_recovery_require_add_valid=False,
-        frozen_recovery_max_buys=0,
-        frozen_recovery_budget_fraction=0.0,
-        frozen_recovery_ladder_offset_multiplier=1.0,
-        frozen_recovery_allow_drawdown_trigger=False,
-        frozen_recovery_min_drawdown=0.0,
         no_more_averaging_after_minutes=_env_float("EMA_BREAKEVEN_AFTER_HOURS", 48.0, profile=name) * 60.0,
-        enable_time_based_exit=_env_bool("EMA_BREAKEVEN_ENABLED", True, profile=name),
         time_exit_after_minutes=_env_float("EMA_BREAKEVEN_AFTER_HOURS", 48.0, profile=name) * 60.0,
-        time_exit_require_weak_signal=_env_bool("TIME_EXIT_REQUIRE_WEAK_SIGNAL", False, profile=name),
-        time_exit_ladder_markups=(0.0,),
-        time_exit_reprice_after_minutes=_env_float("EMA_BREAKEVEN_REPRICE_MINUTES", 15.0, profile=name),
-        urgent_time_exit_after_minutes=0.0,
-        urgent_time_exit_reprice_after_minutes=0.0,
-        urgent_time_exit_ladder_markups=(0.0,),
-        zombie_after_time_exit_minutes=0.0,
-        hard_time_exit_after_minutes=0.0,
-        hard_time_exit_close_fraction=0.0,
-        hard_time_exit_step_minutes=0.0,
-        hard_time_exit_fraction_step=0.0,
-        hard_time_exit_max_loss_on_notional=0.0,
-        hard_time_exit_bypass_profit_bank=False,
+        urgent_time_exit_after_minutes=_env_float("URGENT_TIME_EXIT_AFTER_MINUTES", 0.0, profile=name),
+        hard_time_exit_after_minutes=_env_float(
+            "HARD_TIME_EXIT_AFTER_MINUTES",
+            _env_float("HARD_TIME_EXIT_AFTER_HOURS", 96.0, profile=name) * 60.0,
+            profile=name,
+        ),
+        hard_time_exit_close_fraction=_env_float("HARD_TIME_EXIT_CLOSE_FRACTION", 0.25, profile=name),
+        hard_time_exit_step_minutes=_env_float("HARD_TIME_EXIT_STEP_MINUTES", 12.0 * 60.0, profile=name),
+        hard_time_exit_fraction_step=_env_float("HARD_TIME_EXIT_FRACTION_STEP", 0.25, profile=name),
+        hard_time_exit_max_loss_on_notional=_env_float("HARD_TIME_EXIT_MAX_LOSS_ON_NOTIONAL", 0.03, profile=name),
+        hard_time_exit_bypass_profit_bank=_env_bool("HARD_TIME_EXIT_BYPASS_PROFIT_BANK", True, profile=name),
         enable_absolute_force_exit=False,
         absolute_force_exit_after_minutes=0.0,
         enable_controlled_loss_exit=False,
         controlled_loss_after_zombie_minutes=0.0,
-        controlled_loss_reprice_after_minutes=0.0,
         controlled_loss_min_drawdown=0.0,
         controlled_loss_max_loss_on_notional=0.0,
         controlled_loss_max_position_fraction=0.0,
         controlled_loss_profit_bank_today_fraction=0.0,
         controlled_loss_profit_bank_7d_fraction=0.0,
         controlled_loss_min_bank_usdt=0.0,
-        controlled_loss_ladder_move_fractions=(0.0,),
         max_unhealthy_positions_for_new_entries=_env_int("MAX_UNHEALTHY_POSITIONS_FOR_NEW_ENTRIES", 2, profile=name),
-        enable_hidden_close_order_sync=_env_bool("ENABLE_HIDDEN_CLOSE_ORDER_SYNC", True, profile=name),
         cancel_unsafe_hidden_close_orders=_env_bool("CANCEL_UNSAFE_HIDDEN_CLOSE_ORDERS", True, profile=name),
         enable_volatility_adjusted_ladders=False,
         volatility_window=_env_int("VOLATILITY_WINDOW", 60, profile=name),
@@ -1081,15 +964,9 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         max_volatility_budget_multiplier=_env_float("MAX_VOLATILITY_BUDGET_MULTIPLIER", 1.50, profile=name),
         enable_volatility_recovery_stages=False,
         averaging_drawdown_daily_volatility_fraction=_env_float("AVERAGING_DRAWDOWN_DAILY_VOLATILITY_FRACTION", 0.18, profile=name),
-        frozen_recovery_drawdown_daily_volatility_fraction=_env_float("FROZEN_RECOVERY_DRAWDOWN_DAILY_VOLATILITY_FRACTION", 0.22, profile=name),
-        enable_dynamic_time_exit_markups=False,
-        time_exit_daily_volatility_markup_fraction=_env_float("TIME_EXIT_DAILY_VOLATILITY_MARKUP_FRACTION", 0.08, profile=name),
-        time_exit_max_markup_multiplier=_env_float("TIME_EXIT_MAX_MARKUP_MULTIPLIER", 3.0, profile=name),
         min_ladder_volatility_multiplier=_env_float("MIN_LADDER_VOLATILITY_MULTIPLIER", 0.75, profile=name),
         max_ladder_volatility_multiplier=_env_float("MAX_LADDER_VOLATILITY_MULTIPLIER", 2.5, profile=name),
         min_profit_fee_multiplier=1.0,
-        min_profit_spread_multiplier=0.0,
-        min_profit_volatility_fraction=0.0,
         enable_dynamic_profit_floor=False,
         dynamic_profit_floor_volatility_multiplier_threshold=_env_float("DYNAMIC_PROFIT_FLOOR_VOLATILITY_MULTIPLIER_THRESHOLD", 1.5, profile=name),
         dynamic_profit_floor_high_vol_multiplier=_env_float("DYNAMIC_PROFIT_FLOOR_HIGH_VOL_MULTIPLIER", 0.70, profile=name),
@@ -1152,18 +1029,14 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         diagnostics_jsonl_file=_path(name, "diagnostics.jsonl"),
         csv_archive_dir=archive_dir,
         csv_rotate_max_bytes=_env_int("CSV_ROTATE_MAX_BYTES", 1 * 1024 * 1024, profile=name),
-        equity_csv_ttl_sec=_env_float("EQUITY_CSV_TTL_SEC", 30.0, profile=name),
     )
 
     external_price_feed = ExternalPriceFeedSettings(
         enabled=_env_bool("EXTERNAL_PRICE_FEED_ENABLED", True, profile=name),
         primary_exchange=_env("EXTERNAL_PRICE_PRIMARY_EXCHANGE", profile=name) or "htx",
         reference_exchanges=_env_csv("EXTERNAL_PRICE_REFERENCE_EXCHANGES", ("mexc",), profile=name),
-        use_existing_trading_universe=_env_bool("EXTERNAL_PRICE_USE_EXISTING_TRADING_UNIVERSE", True, profile=name),
-        only_usdt_pairs=_env_bool("EXTERNAL_PRICE_ONLY_USDT_PAIRS", True, profile=name),
         rest_poll_interval_sec=_env_float("EXTERNAL_PRICE_REST_POLL_INTERVAL_SEC", 1.0, profile=name),
         rest_timeout_sec=_env_float("EXTERNAL_PRICE_REST_TIMEOUT_SEC", 3.0, profile=name),
-        reconnect_on_stale_ms=_env_int("EXTERNAL_PRICE_RECONNECT_ON_STALE_MS", 5000, profile=name),
         max_price_age_ms=_env_int("EXTERNAL_PRICE_MAX_PRICE_AGE_MS", 3000, profile=name),
         min_valid_bid_qty_usdt=_env_float("EXTERNAL_PRICE_MIN_VALID_BID_QTY_USDT", 50.0, profile=name),
         min_valid_ask_qty_usdt=_env_float("EXTERNAL_PRICE_MIN_VALID_ASK_QTY_USDT", 50.0, profile=name),
@@ -1184,10 +1057,9 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         mexc_lead_threshold_bps_30s=_env_float("EXTERNAL_PRICE_MEXC_LEAD_THRESHOLD_BPS_30S", 5.0, profile=name),
         impulse_score_bonus=_env_float("EXTERNAL_PRICE_IMPULSE_SCORE_BONUS", 0.02, profile=name),
         require_same_direction=_env_bool("EXTERNAL_PRICE_REQUIRE_SAME_DIRECTION", True, profile=name),
-        exit_adjustment_enabled=_env_bool("EXTERNAL_PRICE_EXIT_ADJUSTMENT_ENABLED", True, profile=name),
+        exit_adjustment_enabled=_env_bool("EXTERNAL_PRICE_EXIT_ADJUSTMENT_ENABLED", False, profile=name),
         long_take_profit_tighten_if_htx_premium_bps=_env_float("EXTERNAL_PRICE_LONG_TP_TIGHTEN_PREMIUM_BPS", 20.0, profile=name),
         short_take_profit_tighten_if_htx_discount_bps=_env_float("EXTERNAL_PRICE_SHORT_TP_TIGHTEN_DISCOUNT_BPS", 20.0, profile=name),
-        tighten_ladder_factor=_env_float("EXTERNAL_PRICE_TIGHTEN_LADDER_FACTOR", 0.6, profile=name),
         tightened_ladder_fractions=_env_float_tuple("EXTERNAL_PRICE_TIGHTENED_LADDER_FRACTIONS", (0.40, 0.30, 0.20, 0.10), profile=name),
         tightened_ladder_markups=_env_optional_float_tuple("EXTERNAL_PRICE_TIGHTENED_LADDER_MARKUPS", (0.005, 0.010, 0.020, None), profile=name),
         disable_trading_if_reference_stale=_env_bool("EXTERNAL_PRICE_DISABLE_TRADING_IF_REFERENCE_STALE", False, profile=name),

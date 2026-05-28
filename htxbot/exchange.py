@@ -203,6 +203,10 @@ class ExchangeMixin:
                     event="state_exchange_mismatch",
                     symbol=symbol,
                     reason=f"{reason}_network_retry",
+                    exception=exc,
+                    retryable=True,
+                    attempt=attempt,
+                    hostname=hostname or "default",
                 )
                 time.sleep(min(0.5 * attempt, 2.0))
         raise last_exc
@@ -289,10 +293,17 @@ class ExchangeMixin:
         precision = (market.get("precision") or {}).get("amount")
         candidates = []
         contract_size = self._safe_float(market.get("contractSize"), 1.0) or 1.0
-        min_base_amount = self._safe_float((limits.get("amount") or {}).get("min"), 0.0)
-        if min_base_amount > 0:
-            candidates.append(min_base_amount / contract_size)
         precision_amount = self._safe_float(precision, 0.0)
+        min_amount = self._safe_float((limits.get("amount") or {}).get("min"), 0.0)
+        if min_amount > 0:
+            min_contracts = min_amount
+            if contract_size > 0:
+                eps = max(abs(min_amount), abs(contract_size), 1.0) * 1e-12
+                if abs(min_amount - contract_size) <= eps or (
+                    precision_amount > 0 and min_amount < precision_amount - eps
+                ):
+                    min_contracts = min_amount / contract_size
+            candidates.append(min_contracts)
         if precision_amount > 0 and getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE:
             candidates.append(precision_amount)
         if (
@@ -426,6 +437,7 @@ class ExchangeMixin:
                 f"Could not fetch futures balance: {exc}",
                 event="margin_error",
                 reason="balance_fetch_failed",
+                exception=exc,
             )
             return {"free": 0.0, "total": 0.0}
 
@@ -551,6 +563,7 @@ class ExchangeMixin:
                 f"Bulk positions fetch unavailable; falling back to per-symbol sync: {exc}",
                 event="state_exchange_mismatch",
                 reason="bulk_positions_fetch_failed",
+                exception=exc,
             )
             return None
 
@@ -599,6 +612,7 @@ class ExchangeMixin:
                 f"Bulk open-orders fetch unavailable; falling back to per-symbol sync: {exc}",
                 event="state_exchange_mismatch",
                 reason="bulk_open_orders_fetch_failed",
+                exception=exc,
             )
             return None
 
@@ -715,6 +729,7 @@ class ExchangeMixin:
                 event="entry_order_canceled",
                 symbol=symbol,
                 reason="manual_account_leverage_unavailable",
+                exception=exc,
             )
             return 0.0
 
@@ -969,6 +984,7 @@ class ExchangeMixin:
                 symbol=symbol,
                 side=side,
                 reason="hedge_mode_retry_one_way",
+                exception=exc,
             )
             if not self._ensure_one_way_position_mode(force=True):
                 raise
@@ -1048,6 +1064,7 @@ class ExchangeMixin:
                     event="state_exchange_mismatch",
                     symbol=symbol,
                     reason="position_fetch_failed",
+                    exception=exc,
                 )
                 snapshot["ok"] = False
                 return snapshot
@@ -1161,6 +1178,7 @@ class ExchangeMixin:
                     event="state_exchange_mismatch",
                     symbol=symbol,
                     reason="open_orders_fetch_failed",
+                    exception=exc,
                 )
                 return None
 
@@ -1188,7 +1206,11 @@ class ExchangeMixin:
 
         if not config.RUNTIME.dry_run:
             try:
-                self.exchange.cancel_order(order_id, symbol, params=self._position_params())
+                params = self._position_params()
+                cancel_params = ref.get("cancel_params")
+                if isinstance(cancel_params, dict):
+                    params.update(cancel_params)
+                self.exchange.cancel_order(order_id, symbol, params=params)
             except ccxt.OrderNotFound:
                 pass
             except Exception as exc:
@@ -1250,6 +1272,7 @@ class ExchangeMixin:
                 remaining.append(ref)
         state.sell_ladder_orders = remaining
         state.sell_ladder_signature = ""
+        self._clear_pending_exit_ladder(state)
         self._refresh_active_side(state)
         self._save_state()
 
@@ -1265,6 +1288,9 @@ class ExchangeMixin:
                 "price": self._safe_float(order.get("price"), 0.0),
                 "amount": self._safe_float(order.get("amount"), 0.0),
             }
+            cancel_params = order.get("bot_cancel_params") or order.get("cancel_params")
+            if isinstance(cancel_params, dict):
+                ref["cancel_params"] = dict(cancel_params)
             event = "buy_order_canceled" if order_side == "buy" else "sell_order_canceled"
             if not self._cancel_order_ref(symbol, ref, event=event, reason=reason):
                 all_canceled = False
@@ -1288,6 +1314,7 @@ class ExchangeMixin:
         state.entry_orders = []
         state.sell_ladder_orders = []
         state.sell_ladder_signature = ""
+        self._clear_pending_exit_ladder(state)
         self._refresh_active_side(state)
         self._save_state()
 

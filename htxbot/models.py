@@ -1,9 +1,32 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 import config
+
+
+class PositionLifecycle(str, Enum):
+    FLAT = "flat"
+    ENTERING = "entering"
+    OPEN = "open"
+    EXITING = "exiting"
+    BREAKEVEN = "breakeven"
+    PENDING_CLOSEABLE = "pending_closeable"
+    ZOMBIE = "zombie"
+    FORCE_EXIT = "force_exit"
+
+
+@dataclass
+class ExitLadderPreflight:
+    ok: bool
+    requested_contracts: float
+    position_contracts: float
+    closeable_contracts: float
+    planned_contracts: float
+    existing_tracked_contracts: float = 0.0
+    reason: str = "ok"
 
 
 @dataclass
@@ -11,6 +34,7 @@ class TradeState:
     symbol: str = ""
     market_symbol: str = ""
     active_side: Optional[str] = None
+    lifecycle: str = PositionLifecycle.FLAT.value
     position_side: str = ""
     position_size: float = 0.0
     position_available: float = 0.0
@@ -26,6 +50,8 @@ class TradeState:
     sell_ladder_orders: list = field(default_factory=list)
     sell_ladder_mode: str = "normal"
     sell_ladder_signature: str = ""
+    pending_exit_ladder_since: Optional[float] = None
+    pending_exit_ladder_reason: str = ""
     frozen_no_more_buys: bool = False
     cycle_opened_at: Optional[float] = None
     cooldown_until: Optional[float] = None
@@ -50,8 +76,8 @@ class TradeState:
     averaging_entry_amount: float = 0.0
     averaging_entry_quote: float = 0.0
     averaging_entry_fees_quote: float = 0.0
-    leverage: float = float(config.RISK.leverage)
-    margin_mode: str = config.RISK.margin_mode
+    leverage: float = field(default_factory=lambda: float(config.RISK.leverage))
+    margin_mode: str = field(default_factory=lambda: config.RISK.margin_mode)
     last_signal_timestamp: Optional[float] = None
     last_rs30: float = 0.0
     last_rs60: float = 0.0
@@ -94,4 +120,4 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
-__all__ = ["TradeState"]
+__all__ = ["ExitLadderPreflight", "PositionLifecycle", "TradeState"]

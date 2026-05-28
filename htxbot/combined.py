@@ -98,9 +98,107 @@ class CombinedHtxFuturesBot:
         for bot in self.bots:
             if bot is exclude:
                 continue
-            for symbol, state in bot.states.items():
-                if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders:
+            with config.use_profile(bot.profile):
+                for symbol, state in bot.states.items():
+                    if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders:
+                        reserved.add(symbol)
+                reserved.update(self._exchange_reserved_symbols(bot))
+        return reserved
+
+    @staticmethod
+    def _safe_float(bot: HtxFuturesBot, value, default: float = 0.0) -> float:
+        safe_float = getattr(bot, "_safe_float", None)
+        if safe_float:
+            return safe_float(value, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _order_remaining_amount(bot: HtxFuturesBot, order: dict) -> float:
+        remaining_amount = getattr(bot, "_order_remaining_amount", None)
+        if remaining_amount:
+            return remaining_amount(order)
+        if isinstance(order, dict) and "remaining" in order and order.get("remaining") is not None:
+            return max(0.0, CombinedHtxFuturesBot._safe_float(bot, order.get("remaining"), 0.0))
+        return max(0.0, CombinedHtxFuturesBot._safe_float(bot, order.get("amount"), 0.0))
+
+    def _exchange_reserved_symbols(self, bot: HtxFuturesBot) -> set:
+        reserved = set()
+        if bool(getattr(bot.profile.runtime, "dry_run", True)):
+            return reserved
+
+        symbols = set(getattr(bot, "symbols", []) or [])
+        min_contracts = getattr(bot, "_get_min_contracts", None)
+
+        positions_by_symbol = None
+        bulk_positions = getattr(bot, "_bulk_positions_by_symbol", None)
+        if bulk_positions:
+            try:
+                positions_by_symbol = bulk_positions()
+            except Exception as exc:
+                log_event = getattr(bot, "_log_event", None)
+                if log_event:
+                    log_event(
+                        "WARNING",
+                        f"Combined reservation could not inspect exchange positions: {exc}",
+                        event="state_exchange_mismatch",
+                        reason="combined_reserved_positions_fetch_failed",
+                        exception=exc,
+                    )
+                positions_by_symbol = None
+
+        for symbol, positions in (positions_by_symbol or {}).items():
+            if symbols and symbol not in symbols:
+                continue
+            epsilon = 1e-12
+            if min_contracts:
+                try:
+                    epsilon = max(min_contracts(symbol) * 1e-9, epsilon)
+                except Exception:
+                    pass
+            for position in positions or []:
+                side = str((position or {}).get("side") or "").lower()
+                contracts = self._safe_float(bot, (position or {}).get("contracts"), 0.0)
+                if side == bot.profile.position_side and contracts > epsilon:
                     reserved.add(symbol)
+                    break
+
+        orders_by_symbol = None
+        bulk_orders = getattr(bot, "_bulk_open_orders_by_symbol", None)
+        if bulk_orders:
+            try:
+                orders_by_symbol = bulk_orders()
+            except Exception as exc:
+                log_event = getattr(bot, "_log_event", None)
+                if log_event:
+                    log_event(
+                        "WARNING",
+                        f"Combined reservation could not inspect exchange open orders: {exc}",
+                        event="state_exchange_mismatch",
+                        reason="combined_reserved_orders_fetch_failed",
+                        exception=exc,
+                    )
+                orders_by_symbol = None
+
+        reserved_order_sides = {bot.profile.entry_side, bot.profile.exit_side}
+        for symbol, orders in (orders_by_symbol or {}).items():
+            if symbols and symbol not in symbols:
+                continue
+            epsilon = 1e-12
+            if min_contracts:
+                try:
+                    epsilon = max(min_contracts(symbol) * 1e-9, epsilon)
+                except Exception:
+                    pass
+            for order in orders or []:
+                side = str((order or {}).get("side") or "").lower()
+                if side not in reserved_order_sides:
+                    continue
+                if self._order_remaining_amount(bot, order) > epsilon:
+                    reserved.add(symbol)
+                    break
         return reserved
 
     def poll_interval(self) -> int:

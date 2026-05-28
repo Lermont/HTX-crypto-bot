@@ -37,7 +37,7 @@ class SignalMixin:
         return rs_edge + ema_edge
 
     def _local_reversion_context(self, closes: List[float], current_close: float) -> dict:
-        window = max(2, int(config.STRATEGY.entry_pullback_window))
+        window = 15
         recent = [price for price in closes[-window - 1:] if price > 0]
         if not recent or current_close <= 0:
             return {
@@ -67,9 +67,23 @@ class SignalMixin:
         ) * ratio
 
     def _is_raw_entry_signal_valid(self, signal: Optional[dict]) -> bool:
-        if not signal or not signal.get("valid") or not self.signal_cache.get("benchmark_ok"):
+        if not signal or not self._signal_direction_valid(signal) or not self.signal_cache.get("benchmark_ok"):
             return False
         return bool(signal.get("entry_valid", False))
+
+    def _signal_data_valid(self, signal: Optional[dict]) -> bool:
+        if not signal:
+            return False
+        if "data_valid" in signal:
+            return bool(signal.get("data_valid"))
+        return bool(signal.get("valid"))
+
+    def _signal_direction_valid(self, signal: Optional[dict]) -> bool:
+        if not self._signal_data_valid(signal):
+            return False
+        if "direction_valid" in signal:
+            return bool(signal.get("direction_valid"))
+        return bool(signal.get("valid"))
 
     def _directional_entry_value(self, value: float) -> float:
         return -value if config.POSITION_SIDE == "short" else value
@@ -135,7 +149,7 @@ class SignalMixin:
         return self._signal_add_valid(signal)
 
     def _signal_add_valid(self, signal: Optional[dict]) -> bool:
-        if not signal or not signal.get("valid") or not self.signal_cache.get("benchmark_ok"):
+        if not signal or not self._signal_direction_valid(signal) or not self.signal_cache.get("benchmark_ok"):
             return False
         return bool(signal.get("add_valid", False))
 
@@ -815,6 +829,8 @@ class SignalMixin:
             "btc_entry_return": 0.0,
             "btc_return_30m": 0.0,
             "score": 0.0,
+            "data_valid": False,
+            "direction_valid": False,
             "valid": False,
             "entry_valid": False,
             "add_valid": False,
@@ -987,6 +1003,8 @@ class SignalMixin:
             rs_edge = max(0.0, rs60)
             score = macro_gap + trigger_gap + pullback_depth + rs_edge
 
+        data_valid = True
+        direction_valid = bool(macro_valid)
         entry_valid = bool(
             macro_valid
             and pullback_valid
@@ -1072,6 +1090,8 @@ class SignalMixin:
             "btc_entry_return": btc_return_30m,
             "btc_return_30m": btc_return_30m,
             "score": score,
+            "data_valid": data_valid,
+            "direction_valid": direction_valid,
             "macro_valid": macro_valid,
             "pullback_valid": pullback_valid,
             "pullback_recovered": bool(pullback_context["pullback_recovered"]),
@@ -1103,7 +1123,7 @@ class SignalMixin:
             "budget_multiplier": budget_multiplier,
             "ladder_multiplier": ladder_multiplier,
             "btc_risk_reason": btc_risk.get("reason", "ema_filter"),
-            "valid": macro_valid,
+            "valid": direction_valid,
             "entry_valid": entry_valid,
             "add_valid": add_valid,
             "reason": reason,
