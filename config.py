@@ -457,8 +457,6 @@ class RuntimeSettings:
     fill_detail_lookback_sec: int
     state_file: str
     markets_cache_file: str
-    dry_run: bool
-    dry_run_equity: float
 
 
 @dataclass(frozen=True)
@@ -660,22 +658,21 @@ def _validate_profile(profile: "BotProfile") -> None:
         if value < 0.0 or value > 1.0:
             raise ValueError(f"{profile.name}.STRATEGY.{setting_name} must be between 0 and 1")
 
-    if not profile.runtime.dry_run:
-        if profile.risk.max_position_notional_fraction > 0.03 + 1e-12:
-            _add_config_warning(
-                f"{profile.name}: live max_position_notional_fraction="
-                f"{profile.risk.max_position_notional_fraction:.4f} is above the conservative 0.0300 launch cap"
-            )
-        if profile.risk.max_total_notional_fraction > 0.50 + 1e-12:
-            _add_config_warning(
-                f"{profile.name}: live max_total_notional_fraction="
-                f"{profile.risk.max_total_notional_fraction:.4f} is above the conservative 0.5000 launch cap"
-            )
-        if profile.strategy.ema_max_averaging_stages > 2:
-            _add_config_warning(
-                f"{profile.name}: live ema_max_averaging_stages="
-                f"{profile.strategy.ema_max_averaging_stages} is above the conservative launch cap of 2"
-            )
+    if profile.risk.max_position_notional_fraction > 0.03 + 1e-12:
+        _add_config_warning(
+            f"{profile.name}: live max_position_notional_fraction="
+            f"{profile.risk.max_position_notional_fraction:.4f} is above the conservative 0.0300 launch cap"
+        )
+    if profile.risk.max_total_notional_fraction > 0.50 + 1e-12:
+        _add_config_warning(
+            f"{profile.name}: live max_total_notional_fraction="
+            f"{profile.risk.max_total_notional_fraction:.4f} is above the conservative 0.5000 launch cap"
+        )
+    if profile.strategy.ema_max_averaging_stages > 2:
+        _add_config_warning(
+            f"{profile.name}: live ema_max_averaging_stages="
+            f"{profile.strategy.ema_max_averaging_stages} is above the conservative launch cap of 2"
+        )
 
 
 def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfile:
@@ -1076,8 +1073,6 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         fill_detail_lookback_sec=_env_int("FILL_DETAIL_LOOKBACK_SEC", 6 * 60 * 60, profile=name),
         state_file=_path(name, f"bot_futures{'_short' if name == 'short' else ''}_state.json"),
         markets_cache_file=_path(name, f"bot_futures{'_short_state' if name == 'short' else ''}_markets_cache.json"),
-        dry_run=_env_bool("DRY_RUN", True, profile=name),
-        dry_run_equity=_env_float("DRY_RUN_EQUITY", 1000.0, profile=name),
     )
 
     profile = BotProfile(

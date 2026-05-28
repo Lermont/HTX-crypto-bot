@@ -81,8 +81,6 @@ class StateMixin:
         return result
 
     def _save_state(self):
-        if config.RUNTIME.dry_run:
-            return
         payload = {symbol: asdict(state) for symbol, state in self.states.items()}
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
@@ -517,7 +515,6 @@ class StateMixin:
 
         if (
             not snapshot
-            and not config.RUNTIME.dry_run
             and config.RUNTIME.fetch_fill_details_on_sync
             and order_id
             and self.exchange.has.get("fetchOrder")
@@ -537,7 +534,6 @@ class StateMixin:
 
         if (
             (not snapshot or snapshot.get("fee_quote") is None)
-            and not config.RUNTIME.dry_run
             and config.RUNTIME.fetch_fill_details_on_sync
             and order_id
             and self.exchange.has.get("fetchMyTrades")
@@ -1274,7 +1270,13 @@ class StateMixin:
             state.position_side = position_side
             state.entry_price = new_entry
             if state.initial_entry_notional <= 0:
-                state.initial_entry_notional = self._contracts_to_notional(symbol, new_size, new_entry)
+                # Use current equity and config budget as a better guess for initial notional
+                # if we have no state, as it helps averaging ratio logic stay conservative.
+                leverage = max(self._safe_float(state.leverage, 0.0), self._safe_float(config.RISK.leverage, 1.0), 1.0)
+                account = self._account_snapshot()
+                equity = account.get("total") or account.get("free", 0.0)
+                planned_margin = equity * config.BUYING.position_budget_fraction
+                state.initial_entry_notional = max(planned_margin * leverage, self._contracts_to_notional(symbol, new_size, new_entry))
             state.unrealized_pnl = self._safe_float(snapshot.get("unrealized_pnl"), 0.0)
             self._refresh_net_open_pnl(state)
             self._clear_pending_exit_ladder(state)

@@ -12,9 +12,8 @@ import config
 
 class ExchangeMixin:
     def _create_exchange(self):
-        if not config.RUNTIME.dry_run:
-            if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
-                raise ValueError("HTX API credentials are required when DRY_RUN=false")
+        if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
+            raise ValueError("HTX API credentials are required")
 
         exchange_config = {
             "enableRateLimit": config.EXCHANGE.enable_rate_limit,
@@ -701,9 +700,6 @@ class ExchangeMixin:
             self.order_leverage_cache[symbol] = state_leverage
             return state_leverage
 
-        if config.RUNTIME.dry_run:
-            return max(self._safe_float(config.RISK.leverage, 0.0), 1.0)
-
         method = getattr(self.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo", None)
         if not method:
             self._log_event(
@@ -749,7 +745,7 @@ class ExchangeMixin:
 
     def _order_params(self, reduce_only: bool = False, post_only: bool = False, leverage: Optional[float] = None) -> dict:
         lever_rate = self._safe_float(leverage, 0.0)
-        if lever_rate <= 0 and not config.RUNTIME.dry_run:
+        if lever_rate <= 0:
             raise RuntimeError("manual_account_leverage_unavailable")
 
         params = {
@@ -895,8 +891,6 @@ class ExchangeMixin:
         return None, last_reason
 
     def _ensure_one_way_position_mode(self, force: bool = False) -> bool:
-        if config.RUNTIME.dry_run:
-            return True
         if self.one_way_mode_checked and not force:
             return True
 
@@ -950,6 +944,23 @@ class ExchangeMixin:
         )
         return True
 
+    def _set_leverage_safe(self, symbol: str, leverage: int) -> bool:
+        try:
+            self.exchange.set_leverage(int(leverage), symbol, params=self._position_params())
+            if hasattr(self, "order_leverage_cache"):
+                self.order_leverage_cache.pop(symbol, None)
+            return True
+        except Exception as exc:
+            self._log_event(
+                "WARNING",
+                f"Could not set leverage {leverage} for {symbol}: {exc}",
+                event="futures_setup",
+                symbol=symbol,
+                reason="set_leverage_failed",
+                exception=exc,
+            )
+            return False
+
     def _create_one_way_order(
         self,
         symbol: str,
@@ -999,35 +1010,6 @@ class ExchangeMixin:
             )
 
     def _fetch_position_snapshot(self, symbol: str) -> dict:
-        if config.RUNTIME.dry_run:
-            state = self._get_state(symbol)
-            long_size = state.position_size if config.POSITION_SIDE == "long" else 0.0
-            short_size = state.position_size if config.POSITION_SIDE == "short" else 0.0
-            long_available = state.position_available if config.POSITION_SIDE == "long" else 0.0
-            short_available = state.position_available if config.POSITION_SIDE == "short" else 0.0
-            if state.position_size > 0 and long_available <= 0 and short_available <= 0:
-                if config.POSITION_SIDE == "long":
-                    long_available = state.position_size
-                else:
-                    short_available = state.position_size
-            return {
-                "ok": True,
-                "long_size": long_size,
-                "long_available": long_available,
-                "long_frozen": 0.0,
-                "long_entry_price": state.entry_price if config.POSITION_SIDE == "long" else 0.0,
-                "long_unrealized_pnl": state.unrealized_pnl if config.POSITION_SIDE == "long" else 0.0,
-                "short_size": short_size,
-                "short_available": short_available,
-                "short_frozen": 0.0,
-                "short_entry_price": state.entry_price if config.POSITION_SIDE == "short" else 0.0,
-                "short_unrealized_pnl": state.unrealized_pnl if config.POSITION_SIDE == "short" else 0.0,
-                "entry_price": state.entry_price,
-                "unrealized_pnl": state.unrealized_pnl,
-                "margin_mode": config.RISK.margin_mode,
-                "leverage": config.RISK.leverage,
-            }
-
         snapshot = {
             "ok": True,
             "long_size": 0.0,
@@ -1150,9 +1132,6 @@ class ExchangeMixin:
         return snapshot
 
     def _fetch_open_orders(self, symbol: str) -> Optional[List[dict]]:
-        if config.RUNTIME.dry_run:
-            return []
-
         bulk_orders = self._bulk_open_orders_by_symbol()
         if bulk_orders is not None:
             orders = bulk_orders.get(symbol, [])
@@ -1204,26 +1183,25 @@ class ExchangeMixin:
         if not order_id:
             return False
 
-        if not config.RUNTIME.dry_run:
-            try:
-                params = self._position_params()
-                cancel_params = ref.get("cancel_params")
-                if isinstance(cancel_params, dict):
-                    params.update(cancel_params)
-                self.exchange.cancel_order(order_id, symbol, params=params)
-            except ccxt.OrderNotFound:
-                pass
-            except Exception as exc:
-                self._log_event(
-                    "WARNING",
-                    f"Cancel failed for {symbol} order {order_id}: {exc}",
-                    event="state_exchange_mismatch",
-                    symbol=symbol,
-                    order_id=order_id,
-                    reason="cancel_failed",
-                    exception=exc,
-                )
-                return False
+        try:
+            params = self._position_params()
+            cancel_params = ref.get("cancel_params")
+            if isinstance(cancel_params, dict):
+                params.update(cancel_params)
+            self.exchange.cancel_order(order_id, symbol, params=params)
+        except ccxt.OrderNotFound:
+            pass
+        except Exception as exc:
+            self._log_event(
+                "WARNING",
+                f"Cancel failed for {symbol} order {order_id}: {exc}",
+                event="state_exchange_mismatch",
+                symbol=symbol,
+                order_id=order_id,
+                reason="cancel_failed",
+                exception=exc,
+            )
+            return False
 
         self._record_signal_analytics(
             "order_canceled",
@@ -1504,15 +1482,6 @@ class ExchangeMixin:
                 reason="non_cross_margin_config",
             )
             raise RuntimeError("Only futures cross margin mode is supported")
-
-        if config.RUNTIME.dry_run:
-            self._log_event(
-                "INFO",
-                "Dry-run enabled; private futures account setup skipped",
-                event="futures_setup",
-                reason="dry_run",
-            )
-            return
 
         if config.EXCHANGE.set_position_mode_on_start:
             if not self._ensure_one_way_position_mode(force=True):
