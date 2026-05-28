@@ -767,7 +767,6 @@ class MonitoringMixin:
             "reason": reason,
             "attempt": attempt,
             "hostname": hostname,
-            "dry_run": False,
             "exception": {
                 **exception_info,
                 "message": self._redact_sensitive_text(exception) if exception else "",
