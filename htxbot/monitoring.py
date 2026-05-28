@@ -56,10 +56,6 @@ class MonitoringMixin:
                     writer = csv.DictWriter(dst, fieldnames=header, extrasaction="ignore")
                     writer.writeheader()
                     for row in reader:
-                        if "ema50" in header and not row.get("ema50") and row.get("ema30"):
-                            row["ema50"] = row.get("ema30", "")
-                        if "ema100" in header and not row.get("ema100") and row.get("ema60"):
-                            row["ema100"] = row.get("ema60", "")
                         writer.writerow({name: row.get(name, "") for name in header})
                 os.replace(tmp_path, path)
                 return
@@ -371,9 +367,6 @@ class MonitoringMixin:
             self._fmt_monitoring_float(signal.get("ema2d", signal.get("ema_pullback_slow")), 12),
             self._fmt_monitoring_float(signal.get("ema25d", signal.get("ema_macro_fast")), 12),
             self._fmt_monitoring_float(signal.get("ema50d", signal.get("ema_macro_slow")), 12),
-            self._fmt_monitoring_float(signal.get("macro_gap", signal.get("trend_ema_gap")), 8),
-            self._fmt_monitoring_float(signal.get("trigger_gap", signal.get("ema_gap")), 8),
-            self._fmt_monitoring_float(signal.get("pullback_depth", signal.get("local_reversion")), 8),
             self._fmt_monitoring_float(signal.get("btc_return_30m"), 8),
             self._fmt_monitoring_float(signal.get("volatility"), 8),
             self._fmt_monitoring_float(signal.get("budget_multiplier"), 8),
@@ -445,8 +438,6 @@ class MonitoringMixin:
         rs60: float = 0.0,
         ema30: float = 0.0,
         ema60: float = 0.0,
-        ema50: float = 0.0,
-        ema100: float = 0.0,
         reason: str = "",
         exception_type: str = "",
         error_code: str = "",
@@ -467,15 +458,6 @@ class MonitoringMixin:
                 ema30 = state.last_ema30
             if not ema60:
                 ema60 = state.last_ema60
-            if not ema50:
-                ema50 = state.last_ema50 or ema30
-            if not ema100:
-                ema100 = state.last_ema100 or ema60
-
-        if not ema50:
-            ema50 = ema30
-        if not ema100:
-            ema100 = ema60
 
         self._rotate_csv_if_needed(self.csv_path, self.CSV_HEADER)
         with self.csv_path.open("a", newline="", encoding="utf-8") as f:
@@ -500,8 +482,8 @@ class MonitoringMixin:
                     fill_source,
                     f"{rs30:.8f}" if rs30 else "",
                     f"{rs60:.8f}" if rs60 else "",
-                    f"{ema50:.12f}" if ema50 else "",
-                    f"{ema100:.12f}" if ema100 else "",
+                    f"{ema30:.12f}" if ema30 else "",
+                    f"{ema60:.12f}" if ema60 else "",
                     reason,
                     message,
                     exception_type,
@@ -785,7 +767,6 @@ class MonitoringMixin:
             "reason": reason,
             "attempt": attempt,
             "hostname": hostname,
-            "dry_run": False,
             "exception": {
                 **exception_info,
                 "message": self._redact_sensitive_text(exception) if exception else "",

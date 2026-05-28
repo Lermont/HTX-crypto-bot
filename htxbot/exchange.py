@@ -1464,54 +1464,6 @@ class ExchangeMixin:
                 return spot_symbol
         return None
 
-    def _set_symbol_leverage(self, symbol: str) -> bool:
-        leverage = max(self._safe_float(config.RISK.leverage, 0.0), 1.0)
-        method = getattr(self.exchange, "set_leverage", None)
-        if not method:
-            self._log_event(
-                "ERROR",
-                f"Could not set HTX leverage for {symbol}: exchange.set_leverage is unavailable",
-                event="futures_setup",
-                symbol=symbol,
-                reason="set_leverage_unavailable",
-            )
-            return False
-
-        try:
-            method(
-                int(leverage) if float(leverage).is_integer() else leverage,
-                symbol,
-                params={"marginMode": config.RISK.margin_mode},
-            )
-        except Exception as exc:
-            self._log_event(
-                "ERROR",
-                f"Could not set HTX leverage for {symbol}: {exc}",
-                event="futures_setup",
-                symbol=symbol,
-                reason="set_leverage_failed",
-                exception=exc,
-            )
-            return False
-
-        self.order_leverage_cache[symbol] = leverage
-        self._log_event(
-            "INFO",
-            f"HTX leverage set for {symbol}: {leverage:g}x",
-            event="futures_setup",
-            symbol=symbol,
-            reason=f"set_leverage_on_start;leverage={leverage:g};margin_mode={config.RISK.margin_mode}",
-        )
-        return True
-
-    def _set_configured_leverage_on_start(self):
-        failures = []
-        for symbol in self.symbols:
-            if not self._set_symbol_leverage(symbol):
-                failures.append(symbol)
-        if failures:
-            raise RuntimeError(f"Could not set configured HTX leverage for: {', '.join(failures)}")
-
     def _setup_futures_account(self):
         if config.RISK.position_mode != "one-way":
             self._log_event(
@@ -1536,4 +1488,9 @@ class ExchangeMixin:
                 raise RuntimeError("Could not enforce HTX one-way position mode")
 
         if config.EXCHANGE.set_leverage_on_start:
-            self._set_configured_leverage_on_start()
+            self._log_event(
+                "WARNING",
+                "SET_LEVERAGE_ON_START is ignored: leverage is managed manually in HTX",
+                event="futures_setup",
+                reason="leverage_setup_manual_only",
+            )
