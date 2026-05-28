@@ -111,7 +111,6 @@ class HtxFuturesBot(
             self._ensure_account_pnl_csv_file()
             self._ensure_signal_analytics_files()
             self._ensure_diagnostics_files()
-            self.states = self._load_state()
             self.symbols: List[str] = []
             self.market_by_symbol: Dict[str, dict] = {}
             self.disabled_symbols = set()
@@ -128,6 +127,7 @@ class HtxFuturesBot(
             self.funding_cache: Dict[str, dict] = {}
             self.order_leverage_cache: Dict[str, float] = {}
             self._reset_private_caches()
+            self.states = self._load_state()
             self.signal_cache = {
                 "closed_candle_ts": None,
                 "benchmark_ok": False,
