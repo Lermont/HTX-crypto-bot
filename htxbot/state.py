@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 
-from .models import TradeState
+from .models import PositionLifecycle, TradeState
 
 
 class StateMixin:
@@ -76,6 +76,7 @@ class StateMixin:
                 self._recalculate_proportional_pnl_from_totals(state)
             self._ensure_cost_basis_initialized(state)
             self._ensure_entry_buckets_initialized(symbol, state)
+            self._refresh_active_side(state)
             result[symbol] = state
         return result
 
@@ -188,6 +189,7 @@ class StateMixin:
             state.leverage = config.RISK.leverage
         state.margin_mode = config.RISK.margin_mode
         self._ensure_entry_buckets_initialized(symbol, state)
+        self._refresh_active_side(state)
         return state
 
     def _reset_state(self, symbol: str, preserve_cooldown: Optional[float] = None):
@@ -304,6 +306,34 @@ class StateMixin:
             state.active_side = next(iter(sides))
         else:
             state.active_side = None
+        state.lifecycle = self._derive_lifecycle(state)
+
+    def _derive_lifecycle(self, state: TradeState) -> str:
+        pending_closeable = bool(
+            getattr(state, "pending_exit_ladder_since", None)
+            or str(getattr(state, "sell_ladder_signature", "") or "").startswith("pending_closeable:")
+        )
+        mode = str(getattr(state, "sell_ladder_mode", "") or "normal")
+
+        if pending_closeable:
+            return PositionLifecycle.PENDING_CLOSEABLE.value
+        if mode == "absolute_force_exit":
+            return PositionLifecycle.FORCE_EXIT.value
+        if getattr(state, "zombie_position", False):
+            return PositionLifecycle.ZOMBIE.value
+
+        if self._safe_float(getattr(state, "position_size", 0.0), 0.0) <= 0:
+            if getattr(state, "entry_orders", None):
+                return PositionLifecycle.ENTERING.value
+            if getattr(state, "sell_ladder_orders", None):
+                return PositionLifecycle.EXITING.value
+            return PositionLifecycle.FLAT.value
+
+        if mode == "breakeven" or getattr(state, "breakeven_activated_at", None):
+            return PositionLifecycle.BREAKEVEN.value
+        if mode in {"account_unload", "controlled_loss_exit", "urgent_time_exit"}:
+            return PositionLifecycle.EXITING.value
+        return PositionLifecycle.OPEN.value
 
     def _estimate_sell_quote_from_refs(self, symbol: str, state: TradeState, contracts: float) -> float:
         if contracts <= 0:

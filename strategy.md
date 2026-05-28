@@ -217,7 +217,7 @@ ACCOUNT_AVERAGING_BUDGET_SCALE=0.50
 
 Бот ведет общий account-PnL runtime для combined profiles и пишет `account_pnl.csv`.
 
-Две активные функции:
+Две opt-in функции:
 
 - `account_profit_unload`: частично закрывает прибыльные позиции, когда общий account PnL находится в верхнем диапазоне;
 - `account_averaging`: разрешает/масштабирует доборы только около account-PnL trough и после прекращения падения PnL.
@@ -226,8 +226,8 @@ ACCOUNT_AVERAGING_BUDGET_SCALE=0.50
 
 ```text
 ACCOUNT_PNL_ENABLED=true
-ACCOUNT_PROFIT_UNLOAD_ENABLED=true
-ACCOUNT_AVERAGING_ENABLED=true
+ACCOUNT_PROFIT_UNLOAD_ENABLED=false
+ACCOUNT_AVERAGING_ENABLED=false
 ACCOUNT_PNL_WINDOW_MINUTES=360
 ACCOUNT_PNL_SAMPLE_INTERVAL_SEC=30
 ```
@@ -254,7 +254,7 @@ EMA_EXIT_HEAVY_LADDER_FRACTIONS=0.60,0.25,0.15
 EMA_EXIT_HEAVY_LADDER_MARKUPS=0.003,0.008,0.015
 ```
 
-Normal mode может использовать fixed + trailing split, если `EMA_EXIT_TRAILING_ENABLED=true`. Runner/trailing закрывает остаток при pullback от лучшей цены или при достижении take-profit markup.
+Normal mode по умолчанию использует только fixed reduce-only ladder. Runner/trailing остаётся opt-in через `EMA_EXIT_RUNNER_ENABLED=true` и `EMA_EXIT_TRAILING_ENABLED=true`; тогда остаток может закрываться при pullback от лучшей цены или при достижении take-profit markup.
 
 Profit floor учитывает комиссии:
 
@@ -263,6 +263,8 @@ profit_floor >= (buy_fee_rate + sell_fee_rate) * min_profit_fee_multiplier
 ```
 
 Если HTX отклоняет reduce-only ladder с причиной, что closeable amount уже зарезервирован существующими close orders, бот переводит ladder в pending mode (`pending_closeable:*`) и не повторяет постановку только из-за истечения таймаута, пока snapshot показывает `position_available=0` и `position_frozen>0`. Retry возобновляется, когда появляется closeable amount, меняется размер позиции или видимые close orders можно принять/отменить.
+
+После `HARD_TIME_EXIT_AFTER_HOURS=96` включается bounded-loss маршрут: бот может постепенно перестраивать reduce-only выход с ограничением `HARD_TIME_EXIT_MAX_LOSS_ON_NOTIONAL=0.03`, начиная с `HARD_TIME_EXIT_CLOSE_FRACTION=0.25` и увеличивая долю каждые `HARD_TIME_EXIT_STEP_MINUTES`.
 
 ## 12. Breakeven
 

@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 
-from .models import TradeState
+from .models import ExitLadderPreflight, TradeState
 
 
 class StrategyMixin:
@@ -1578,6 +1578,73 @@ class StrategyMixin:
         raw_price = max(raw_price, max_loss_price)
         return self._price_at_or_above(symbol, raw_price)
 
+    def _exit_ladder_preflight(
+        self,
+        symbol: str,
+        total_contracts: float,
+        closeable_contracts: Optional[float],
+        rebuild: bool,
+        signature_override: str = "",
+    ) -> ExitLadderPreflight:
+        state = self._get_state(symbol)
+        requested = max(0.0, self._safe_float(total_contracts, 0.0))
+        position_contracts = max(0.0, self._safe_float(state.position_size, 0.0))
+        if position_contracts > 0:
+            requested = min(requested, position_contracts)
+
+        existing_tracked = 0.0
+        if state.sell_ladder_orders and not rebuild and not signature_override:
+            existing_tracked = sum(self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders)
+            return ExitLadderPreflight(
+                ok=False,
+                requested_contracts=requested,
+                position_contracts=position_contracts,
+                closeable_contracts=0.0,
+                planned_contracts=0.0,
+                existing_tracked_contracts=existing_tracked,
+                reason="existing_exit_ladder_not_canceled",
+            )
+
+        closeable = requested
+        if closeable_contracts is not None:
+            closeable = min(requested, max(0.0, self._safe_float(closeable_contracts, 0.0)))
+        planned = self._amount_to_precision(symbol, closeable)
+        if planned <= 0:
+            return ExitLadderPreflight(
+                ok=False,
+                requested_contracts=requested,
+                position_contracts=position_contracts,
+                closeable_contracts=max(0.0, closeable),
+                planned_contracts=0.0,
+                existing_tracked_contracts=existing_tracked,
+                reason="no_closeable_position_available",
+            )
+
+        if position_contracts > 0 and planned > position_contracts:
+            planned = self._amount_to_precision(symbol, position_contracts)
+        if planned > requested:
+            planned = self._amount_to_precision(symbol, requested)
+        if planned <= 0:
+            return ExitLadderPreflight(
+                ok=False,
+                requested_contracts=requested,
+                position_contracts=position_contracts,
+                closeable_contracts=max(0.0, closeable),
+                planned_contracts=0.0,
+                existing_tracked_contracts=existing_tracked,
+                reason="planned_exit_amount_below_minimum",
+            )
+
+        return ExitLadderPreflight(
+            ok=True,
+            requested_contracts=requested,
+            position_contracts=position_contracts,
+            closeable_contracts=max(0.0, closeable),
+            planned_contracts=planned,
+            existing_tracked_contracts=existing_tracked,
+            reason="ok",
+        )
+
     def _place_sell_ladder(
         self,
         symbol: str,
@@ -1615,17 +1682,33 @@ class StrategyMixin:
             )
             return
 
-        ladder_contracts = total_contracts
-        if closeable_contracts is not None:
-            ladder_contracts = min(total_contracts, max(0.0, closeable_contracts))
-        ladder_contracts = self._amount_to_precision(symbol, ladder_contracts)
-        if ladder_contracts <= 0:
+        preflight = self._exit_ladder_preflight(
+            symbol,
+            total_contracts,
+            closeable_contracts,
+            rebuild=rebuild,
+            signature_override=signature_override,
+        )
+        if not preflight.ok:
+            if preflight.reason == "existing_exit_ladder_not_canceled":
+                self._log_event(
+                    "WARNING",
+                    f"{exit_label} exit ladder blocked for {symbol}: existing tracked exits must be canceled first",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=exit_side,
+                    amount=preflight.existing_tracked_contracts,
+                    position_size=state.position_size,
+                    reason=preflight.reason,
+                )
+                return
             self._mark_exit_ladder_waiting_for_closeable(
                 symbol,
                 mode,
-                "no_closeable_position_available",
+                preflight.reason,
             )
             return
+        ladder_contracts = preflight.planned_contracts
 
         if ladder_contracts + max(self._get_min_contracts(symbol) * 1e-9, 1e-12) < total_contracts:
             self._log_event(
@@ -1897,6 +1980,9 @@ class StrategyMixin:
         signature: str,
     ) -> bool:
         state = self._get_state(symbol)
+        existing_exit_contracts = sum(self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders)
+        if state.position_size > 0:
+            contracts = min(contracts, max(0.0, state.position_size - existing_exit_contracts))
         contracts = self._amount_to_precision(symbol, contracts)
         if contracts <= 0 or price <= 0:
             return False
@@ -2041,13 +2127,28 @@ class StrategyMixin:
             return
 
         total_contracts = max(0.0, min(total_contracts, state.position_size))
-        closeable_total = total_contracts
-        if closeable_contracts is not None:
-            closeable_total = min(total_contracts, max(0.0, closeable_contracts))
-        closeable_total = self._amount_to_precision(symbol, closeable_total)
-        if closeable_total <= 0:
-            self._mark_exit_ladder_waiting_for_closeable(symbol, mode, "no_closeable_position_available")
+        preflight = self._exit_ladder_preflight(
+            symbol,
+            total_contracts,
+            closeable_contracts,
+            rebuild=rebuild,
+        )
+        if not preflight.ok:
+            if preflight.reason == "existing_exit_ladder_not_canceled":
+                self._log_event(
+                    "WARNING",
+                    f"{config.EXIT_SIDE.title()} split exit ladder blocked for {symbol}: existing tracked exits must be canceled first",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=config.EXIT_SIDE,
+                    amount=preflight.existing_tracked_contracts,
+                    position_size=state.position_size,
+                    reason=preflight.reason,
+                )
+                return
+            self._mark_exit_ladder_waiting_for_closeable(symbol, mode, preflight.reason)
             return
+        closeable_total = preflight.planned_contracts
 
         base_contracts = max(0.0, min(state.base_entry_amount, state.position_size))
         recovery_contracts_raw = max(0.0, min(state.averaging_entry_amount, max(0.0, state.position_size - base_contracts)))
@@ -2468,13 +2569,32 @@ class StrategyMixin:
         self._save_state()
         return True
 
-    def _validate_sell_orders(self, symbol: str, open_orders: List[dict]) -> bool:
+    def _exit_order_exposure(self, symbol: str, open_orders: List[dict]) -> dict:
         state = self._get_state(symbol)
         exit_side = config.EXIT_SIDE
-        open_sell_orders = [order for order in open_orders if (order.get("side") or "").lower() == exit_side]
-        known_sell_ids = self._order_ids(state.sell_ladder_orders)
-        tracked_sell_orders = [order for order in open_sell_orders if str(order.get("id")) in known_sell_ids]
-        unknown_sells = [order for order in open_sell_orders if str(order.get("id")) not in known_sell_ids]
+        open_exit_orders = [order for order in open_orders if (order.get("side") or "").lower() == exit_side]
+        known_exit_ids = self._order_ids(state.sell_ladder_orders)
+        tracked_exit_orders = [order for order in open_exit_orders if str(order.get("id")) in known_exit_ids]
+        unknown_exit_orders = [order for order in open_exit_orders if str(order.get("id")) not in known_exit_ids]
+        tracked_remaining = sum(self._order_remaining_amount(order) for order in tracked_exit_orders)
+        unknown_remaining = sum(self._order_remaining_amount(order) for order in unknown_exit_orders)
+        return {
+            "exit_side": exit_side,
+            "open_exit_orders": open_exit_orders,
+            "known_exit_ids": known_exit_ids,
+            "tracked_exit_orders": tracked_exit_orders,
+            "unknown_exit_orders": unknown_exit_orders,
+            "tracked_remaining": tracked_remaining,
+            "unknown_remaining": unknown_remaining,
+        }
+
+    def _validate_sell_orders(self, symbol: str, open_orders: List[dict]) -> bool:
+        state = self._get_state(symbol)
+        exposure = self._exit_order_exposure(symbol, open_orders)
+        exit_side = exposure["exit_side"]
+        open_sell_orders = exposure["open_exit_orders"]
+        tracked_sell_orders = exposure["tracked_exit_orders"]
+        unknown_sells = exposure["unknown_exit_orders"]
         eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
 
         if state.position_size <= 0:
@@ -4042,7 +4162,7 @@ class StrategyMixin:
             return "signal_missing"
         if not self.signal_cache.get("benchmark_ok"):
             return "benchmark_unavailable"
-        if not signal.get("valid"):
+        if not self._signal_direction_valid(signal):
             return "signal_invalid"
         if not signal.get("macro_valid", False):
             return "ema_macro_broken_no_average"

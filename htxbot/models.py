@@ -1,9 +1,32 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 import config
+
+
+class PositionLifecycle(str, Enum):
+    FLAT = "flat"
+    ENTERING = "entering"
+    OPEN = "open"
+    EXITING = "exiting"
+    BREAKEVEN = "breakeven"
+    PENDING_CLOSEABLE = "pending_closeable"
+    ZOMBIE = "zombie"
+    FORCE_EXIT = "force_exit"
+
+
+@dataclass
+class ExitLadderPreflight:
+    ok: bool
+    requested_contracts: float
+    position_contracts: float
+    closeable_contracts: float
+    planned_contracts: float
+    existing_tracked_contracts: float = 0.0
+    reason: str = "ok"
 
 
 @dataclass
@@ -11,6 +34,7 @@ class TradeState:
     symbol: str = ""
     market_symbol: str = ""
     active_side: Optional[str] = None
+    lifecycle: str = PositionLifecycle.FLAT.value
     position_side: str = ""
     position_size: float = 0.0
     position_available: float = 0.0
@@ -96,4 +120,4 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
-__all__ = ["TradeState"]
+__all__ = ["ExitLadderPreflight", "PositionLifecycle", "TradeState"]

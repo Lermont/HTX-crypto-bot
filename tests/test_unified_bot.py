@@ -20,6 +20,7 @@ from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
 from htxbot.external_price import BookTicker, ExternalPriceFeed
 from htxbot.indicators import calculate_rsi
+from htxbot.models import PositionLifecycle
 
 
 SYMBOL = "TEST/USDT:USDT"
@@ -576,6 +577,39 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertAlmostEqual(reloaded.pending_exit_ladder_since, 1234.5)
                 self.assertEqual(reloaded.pending_exit_ladder_reason, "no_closeable_position_available")
+                self.assertEqual(reloaded.lifecycle, PositionLifecycle.PENDING_CLOSEABLE.value)
+
+    def test_trade_state_lifecycle_is_derived_from_runtime_flags(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            self.assertEqual(state.lifecycle, PositionLifecycle.FLAT.value)
+
+            state.entry_orders = [{"id": "entry", "side": config.ENTRY_SIDE, "amount": 1.0}]
+            bot._refresh_active_side(state)
+            self.assertEqual(state.lifecycle, PositionLifecycle.ENTERING.value)
+
+            state.entry_orders = []
+            state.position_size = 2.0
+            state.entry_price = 10.0
+            bot._refresh_active_side(state)
+            self.assertEqual(state.lifecycle, PositionLifecycle.OPEN.value)
+
+            state.sell_ladder_mode = "breakeven"
+            state.frozen_no_more_buys = True
+            bot._refresh_active_side(state)
+            self.assertEqual(state.lifecycle, PositionLifecycle.BREAKEVEN.value)
+
+            state.sell_ladder_signature = bot._pending_exit_ladder_signature("breakeven", SYMBOL, state)
+            state.pending_exit_ladder_since = time.time()
+            bot._refresh_active_side(state)
+            self.assertEqual(state.lifecycle, PositionLifecycle.PENDING_CLOSEABLE.value)
+
+            state.pending_exit_ladder_since = None
+            state.sell_ladder_signature = ""
+            state.sell_ladder_mode = "absolute_force_exit"
+            bot._refresh_active_side(state)
+            self.assertEqual(state.lifecycle, PositionLifecycle.FORCE_EXIT.value)
 
     def test_structured_signal_analytics_files_and_jsonl_are_written(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -1174,7 +1208,8 @@ class UnifiedBotTests(unittest.TestCase):
     def test_external_price_favorable_premium_tightens_long_exit_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
-            with override_config(RUNTIME=runtime):
+            external = replace(config.EXTERNAL_PRICE_FEED, exit_adjustment_enabled=True)
+            with override_config(RUNTIME=runtime, EXTERNAL_PRICE_FEED=external):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(self.external_context(spread_bps=25.0))
                 state = bot._get_state(SYMBOL)
@@ -1204,9 +1239,9 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._place_sell_ladder(SYMBOL, 100.0, 100.0, rebuild=False, closeable_contracts=100.0, mode="normal")
 
-                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0])
-                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8])
-                self.assertEqual(state.exit_runner_contracts, 65.0)
+                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 25.0, 15.0])
+                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8, 101.6, 103.0, 105.0])
+                self.assertEqual(state.exit_runner_contracts, 0.0)
 
     def test_calculate_rsi_basic_shapes(self):
         rising = [float(index) for index in range(1, 40)]
@@ -1608,7 +1643,8 @@ class UnifiedBotTests(unittest.TestCase):
     def test_normal_exit_ladder_uses_fixed_take_profit_and_trailing_runner(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
-            with override_config(RUNTIME=runtime):
+            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 100.0
@@ -1634,6 +1670,40 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.exit_runner_contracts, 65.0)
                 self.assertFalse(state.exit_runner_active)
 
+    def test_exit_ladder_preflight_caps_to_position_and_blocks_duplicate_tracked_ladder(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+                state.initial_entry_notional = 500.0
+
+                bot._place_sell_ladder(
+                    SYMBOL,
+                    total_contracts=10.0,
+                    avg_entry_price=100.0,
+                    rebuild=False,
+                    closeable_contracts=10.0,
+                    mode="normal",
+                )
+
+                self.assertLessEqual(sum(order["amount"] for order in bot.exchange.created_orders), 5.0)
+                created_before_duplicate = len(bot.exchange.created_orders)
+                bot._place_sell_ladder(
+                    SYMBOL,
+                    total_contracts=5.0,
+                    avg_entry_price=100.0,
+                    rebuild=False,
+                    closeable_contracts=5.0,
+                    mode="normal",
+                )
+
+                self.assertEqual(len(bot.exchange.created_orders), created_before_duplicate)
+                self.assertEqual(len(state.sell_ladder_orders), created_before_duplicate)
+
     def test_split_exit_keeps_base_ladder_on_base_average_and_adds_recovery(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
@@ -1656,10 +1726,10 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._ensure_sell_ladder(SYMBOL)
 
-                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 25.0, 45.0])
-                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8, 101.6, 103.0, 100.04])
-                self.assertEqual([ref["exit_scope"] for ref in state.sell_ladder_orders], ["base", "base", "base", "average_recovery"])
-                self.assertEqual(state.exit_runner_contracts, 15.0)
+                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 25.0, 15.0, 45.0])
+                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8, 101.6, 103.0, 105.0, 100.04])
+                self.assertEqual([ref["exit_scope"] for ref in state.sell_ladder_orders], ["base", "base", "base", "base", "average_recovery"])
+                self.assertEqual(state.exit_runner_contracts, 0.0)
                 self.assertIn("split_exit=1", state.sell_ladder_signature)
 
     def test_average_recovery_fill_reduces_only_average_bucket(self):
@@ -1753,7 +1823,8 @@ class UnifiedBotTests(unittest.TestCase):
     def test_exit_ladder_time_decay_removes_runner_after_six_hours(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
-            with override_config(RUNTIME=runtime):
+            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 100.0
@@ -1778,7 +1849,8 @@ class UnifiedBotTests(unittest.TestCase):
     def test_normal_runner_closes_on_trailing_pullback(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
-            with override_config(RUNTIME=runtime):
+            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 100.0
@@ -2103,6 +2175,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(signal["pullback_had_pullback"])
                 self.assertLessEqual(signal["pullback_cross_age_candles"], 6)
                 self.assertTrue(signal["trigger_valid"])
+                self.assertTrue(signal["data_valid"])
+                self.assertTrue(signal["direction_valid"])
+                self.assertTrue(signal["valid"])
                 self.assertTrue(signal["entry_valid"])
                 self.assertEqual(strategy.ema_pullback_slow_minutes, 8)
 
@@ -2128,6 +2203,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(signal["pullback_recovered"])
                 self.assertTrue(signal["pullback_had_pullback"])
                 self.assertGreater(signal["pullback_cross_age_candles"], 2)
+                self.assertTrue(signal["data_valid"])
+                self.assertTrue(signal["direction_valid"])
+                self.assertTrue(signal["valid"])
                 self.assertFalse(signal["pullback_valid"])
                 self.assertFalse(signal["entry_valid"])
 
@@ -2502,6 +2580,7 @@ class UnifiedBotTests(unittest.TestCase):
             runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
             strategy = replace(
                 config.STRATEGY,
+                account_profit_unload_enabled=True,
                 account_profit_unload_min_pnl_quote=5.0,
                 account_profit_unload_min_pnl_rate=0.0,
                 account_profit_unload_percentile=0.50,
@@ -2543,6 +2622,7 @@ class UnifiedBotTests(unittest.TestCase):
             runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
             strategy = replace(
                 config.STRATEGY,
+                account_averaging_enabled=True,
                 account_averaging_min_samples=3,
                 account_averaging_near_trough_quote=50.0,
                 account_averaging_falling_guard_quote=1.0,
@@ -2577,6 +2657,7 @@ class UnifiedBotTests(unittest.TestCase):
             runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
             strategy = replace(
                 config.STRATEGY,
+                account_averaging_enabled=True,
                 account_averaging_min_samples=3,
                 account_averaging_near_trough_quote=6.0,
                 account_averaging_bounce_quote=1.0,
@@ -2649,6 +2730,16 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.ema_averaging_power, 1.0)
             self.assertEqual(config.STRATEGY.ema_max_averaging_stages, 2)
             self.assertEqual(config.STRATEGY.max_buy_stages, 3)
+            self.assertFalse(config.STRATEGY.ema_exit_runner_enabled)
+            self.assertFalse(config.STRATEGY.ema_exit_trailing_enabled)
+            self.assertFalse(config.STRATEGY.account_profit_unload_enabled)
+            self.assertFalse(config.STRATEGY.account_averaging_enabled)
+            self.assertEqual(config.STRATEGY.hard_time_exit_after_minutes, 96.0 * 60.0)
+            self.assertEqual(config.STRATEGY.hard_time_exit_close_fraction, 0.25)
+            self.assertEqual(config.STRATEGY.hard_time_exit_fraction_step, 0.25)
+            self.assertEqual(config.STRATEGY.hard_time_exit_max_loss_on_notional, 0.03)
+            self.assertTrue(config.STRATEGY.hard_time_exit_bypass_profit_bank)
+            self.assertFalse(config.EXTERNAL_PRICE_FEED.exit_adjustment_enabled)
 
     def test_ema_large_periods_convert_to_configured_timeframes(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3301,12 +3392,12 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._ensure_sell_ladder(SYMBOL)
 
-                self.assertEqual(len(bot.exchange.created_orders), 1)
-                self.assertEqual([order["side"] for order in bot.exchange.created_orders], ["sell"])
-                self.assertEqual(sum(order["amount"] for order in bot.exchange.created_orders), 1.0)
+                self.assertEqual(len(bot.exchange.created_orders), 4)
+                self.assertTrue(all(order["side"] == "sell" for order in bot.exchange.created_orders))
+                self.assertEqual(sum(order["amount"] for order in bot.exchange.created_orders), 5.0)
                 self.assertTrue(all(order["params"].get("reduceOnly") for order in bot.exchange.created_orders))
-                self.assertEqual(len(state.sell_ladder_orders), 1)
-                self.assertEqual(state.exit_runner_contracts, 4.0)
+                self.assertEqual(len(state.sell_ladder_orders), 4)
+                self.assertEqual(state.exit_runner_contracts, 0.0)
 
     def test_exit_ladder_waits_when_exchange_reports_closeable_reserved(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
