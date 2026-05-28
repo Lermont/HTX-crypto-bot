@@ -37,7 +37,7 @@ class SignalMixin:
         return rs_edge + ema_edge
 
     def _local_reversion_context(self, closes: List[float], current_close: float) -> dict:
-        window = max(2, int(config.STRATEGY.entry_pullback_window))
+        window = 15
         recent = [price for price in closes[-window - 1:] if price > 0]
         if not recent or current_close <= 0:
             return {

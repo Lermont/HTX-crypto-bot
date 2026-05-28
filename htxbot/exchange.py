@@ -203,6 +203,10 @@ class ExchangeMixin:
                     event="state_exchange_mismatch",
                     symbol=symbol,
                     reason=f"{reason}_network_retry",
+                    exception=exc,
+                    retryable=True,
+                    attempt=attempt,
+                    hostname=hostname or "default",
                 )
                 time.sleep(min(0.5 * attempt, 2.0))
         raise last_exc
@@ -1188,7 +1192,11 @@ class ExchangeMixin:
 
         if not config.RUNTIME.dry_run:
             try:
-                self.exchange.cancel_order(order_id, symbol, params=self._position_params())
+                params = self._position_params()
+                cancel_params = ref.get("cancel_params")
+                if isinstance(cancel_params, dict):
+                    params.update(cancel_params)
+                self.exchange.cancel_order(order_id, symbol, params=params)
             except ccxt.OrderNotFound:
                 pass
             except Exception as exc:
@@ -1250,6 +1258,7 @@ class ExchangeMixin:
                 remaining.append(ref)
         state.sell_ladder_orders = remaining
         state.sell_ladder_signature = ""
+        self._clear_pending_exit_ladder(state)
         self._refresh_active_side(state)
         self._save_state()
 
@@ -1265,6 +1274,9 @@ class ExchangeMixin:
                 "price": self._safe_float(order.get("price"), 0.0),
                 "amount": self._safe_float(order.get("amount"), 0.0),
             }
+            cancel_params = order.get("bot_cancel_params") or order.get("cancel_params")
+            if isinstance(cancel_params, dict):
+                ref["cancel_params"] = dict(cancel_params)
             event = "buy_order_canceled" if order_side == "buy" else "sell_order_canceled"
             if not self._cancel_order_ref(symbol, ref, event=event, reason=reason):
                 all_canceled = False
@@ -1288,6 +1300,7 @@ class ExchangeMixin:
         state.entry_orders = []
         state.sell_ladder_orders = []
         state.sell_ladder_signature = ""
+        self._clear_pending_exit_ladder(state)
         self._refresh_active_side(state)
         self._save_state()
 

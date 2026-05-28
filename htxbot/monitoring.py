@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
 from typing import Sequence
 from typing import Any, Dict, List, Optional
@@ -180,10 +181,61 @@ class MonitoringMixin:
         if isinstance(value, (list, tuple, set)):
             return [self._sanitize_for_log(item, depth + 1) for item in list(value)[:200]]
         if isinstance(value, (str, int, float, bool)) or value is None:
-            if isinstance(value, str) and len(value) > 4000:
-                return value[:4000] + "...<truncated>"
+            if isinstance(value, str):
+                value = self._redact_sensitive_text(value)
+                if len(value) > 4000:
+                    return value[:4000] + "...<truncated>"
             return value
-        return str(value)
+        return self._redact_sensitive_text(value)
+
+    def _redact_sensitive_text(self, value: Any) -> str:
+        text = str(value)
+        if not text:
+            return text
+
+        def redact_url(match: re.Match) -> str:
+            raw_url = match.group(0)
+            try:
+                parsed = urlsplit(raw_url)
+                if not parsed.query:
+                    return raw_url
+                pairs = []
+                changed = False
+                for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+                    lowered = key.lower()
+                    if any(secret in lowered for secret in ("accesskeyid", "api_key", "apikey", "secret", "password", "token", "signature")):
+                        pairs.append((key, "<redacted>"))
+                        changed = True
+                    else:
+                        pairs.append((key, item))
+                if not changed:
+                    return raw_url
+                return urlunsplit(
+                    (
+                        parsed.scheme,
+                        parsed.netloc,
+                        parsed.path,
+                        urlencode(pairs, doseq=True),
+                        parsed.fragment,
+                    )
+                )
+            except Exception:
+                return raw_url
+
+        text = re.sub(r"https?://[^\s\"'<>]+", redact_url, text)
+        patterns = (
+            r"(?i)(AccessKeyId=)[^&\s\"'<>]+",
+            r"(?i)(Signature=)[^&\s\"'<>]+",
+            r"(?i)(signature[\"'\s:=]+)[^,;&\s\"'<>]+",
+            r"(?i)(api[_-]?key[\"'\s:=]+)[^,;&\s\"'<>]+",
+            r"(?i)(api[_-]?secret[\"'\s:=]+)[^,;&\s\"'<>]+",
+            r"(?i)(secret[\"'\s:=]+)[^,;&\s\"'<>]+",
+            r"(?i)(password[\"'\s:=]+)[^,;&\s\"'<>]+",
+            r"(?i)(token[\"'\s:=]+)[^,;&\s\"'<>]+",
+        )
+        for pattern in patterns:
+            text = re.sub(pattern, lambda match: f"{match.group(1)}<redacted>", text)
+        return text
 
     def _monitoring_float(self, value: Any, default: float = 0.0) -> float:
         safe_float = getattr(self, "_safe_float", None)
@@ -312,6 +364,8 @@ class MonitoringMixin:
             self._fmt_monitoring_float(signal.get("rs60"), 8),
             self._fmt_monitoring_float(signal.get("ema50", signal.get("ema_trigger_fast")), 12),
             self._fmt_monitoring_float(signal.get("ema100", signal.get("ema_trigger_slow")), 12),
+            self._fmt_monitoring_float(signal.get("ema1d", signal.get("ema_pullback_fast")), 12),
+            self._fmt_monitoring_float(signal.get("ema2d", signal.get("ema_pullback_slow")), 12),
             self._fmt_monitoring_float(signal.get("ema25d", signal.get("ema_macro_fast")), 12),
             self._fmt_monitoring_float(signal.get("ema50d", signal.get("ema_macro_slow")), 12),
             self._fmt_monitoring_float(signal.get("btc_return_30m"), 8),
@@ -367,6 +421,7 @@ class MonitoringMixin:
         self,
         level: str,
         event: str,
+        message: str = "",
         symbol: str = "",
         side: str = "",
         order_id: str = "",
@@ -385,6 +440,9 @@ class MonitoringMixin:
         ema30: float = 0.0,
         ema60: float = 0.0,
         reason: str = "",
+        exception_type: str = "",
+        error_code: str = "",
+        retryable: Any = "",
         **_ignored,
     ):
         if symbol and hasattr(self, "states") and symbol in self.states:
@@ -428,6 +486,10 @@ class MonitoringMixin:
                     f"{ema30:.12f}" if ema30 else "",
                     f"{ema60:.12f}" if ema60 else "",
                     reason,
+                    message,
+                    exception_type,
+                    error_code,
+                    retryable,
                 ]
             )
 
@@ -659,6 +721,7 @@ class MonitoringMixin:
         hostname: str = "",
         context: Optional[dict] = None,
     ):
+        message = self._redact_sensitive_text(message)
         severity = str(severity or "").lower()
         if severity == "critical":
             severity = "fault"
@@ -708,7 +771,7 @@ class MonitoringMixin:
             "dry_run": bool(config.RUNTIME.dry_run),
             "exception": {
                 **exception_info,
-                "message": str(exception) if exception else "",
+                "message": self._redact_sensitive_text(exception) if exception else "",
             },
             "context": context or {},
         }
@@ -730,7 +793,7 @@ class MonitoringMixin:
         self._recorded_config_warnings = seen
 
     def _compact_log_message(self, message: str) -> str:
-        text = str(message)
+        text = self._redact_sensitive_text(message)
         html_markers = ("<!DOCTYPE html", "<html", "<head", "<body")
         marker_positions = [text.find(marker) for marker in html_markers if marker in text]
         if marker_positions:
@@ -758,6 +821,11 @@ class MonitoringMixin:
                 kwargs["reason"] = "dry_run"
 
         message = self._compact_log_message(message)
+        exception_info = self._diagnostic_from_exception(
+            diagnostic_exception,
+            message=message,
+            retryable=diagnostic_retryable,
+        )
         level_upper = str(level or "INFO").upper()
         if level_upper in {"FAULT", "CRITICAL"}:
             log_method = self.log.critical
@@ -765,7 +833,15 @@ class MonitoringMixin:
             log_method = getattr(self.log, str(level).lower(), self.log.info)
         log_method(message)
         try:
-            self._append_csv(level=level_upper, event=event, **kwargs)
+            self._append_csv(
+                level=level_upper,
+                event=event,
+                message=message,
+                exception_type=str(exception_info.get("exception_type", "")),
+                error_code=str(exception_info.get("error_code", "")),
+                retryable=int(bool(exception_info.get("retryable", False))) if diagnostic_exception or diagnostic_retryable is not None else "",
+                **kwargs,
+            )
         except Exception as exc:
             if not getattr(self, "_csv_log_failed_once", False):
                 self._csv_log_failed_once = True

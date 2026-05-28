@@ -44,6 +44,18 @@ class StateMixin:
         for symbol, payload in raw.items():
             if not isinstance(payload, dict):
                 continue
+            payload = dict(payload)
+            legacy_aliases = {
+                "total_bought_base": "total_bought_amount",
+                "total_sold_base": "total_sold_amount",
+                "total_buy_fees_quote": "paid_buy_fees_quote",
+                "total_sell_fees_quote": "paid_sell_fees_quote",
+                "buy_fees_quote": "paid_buy_fees_quote",
+                "sell_fees_quote": "paid_sell_fees_quote",
+            }
+            for old_key, new_key in legacy_aliases.items():
+                if new_key not in payload and old_key in payload:
+                    payload[new_key] = payload[old_key]
             has_remaining_cost_basis = (
                 "remaining_entry_quote" in payload
                 and "remaining_buy_fees_quote" in payload
@@ -52,12 +64,17 @@ class StateMixin:
             state = TradeState(**safe_payload)
             state.symbol = state.symbol or symbol
             state.market_symbol = state.market_symbol or state.symbol
+            if self._safe_float(getattr(state, "leverage", 0.0), 0.0) <= 0:
+                state.leverage = config.RISK.leverage
+            if not str(getattr(state, "margin_mode", "") or "").strip():
+                state.margin_mode = config.RISK.margin_mode
             state.entry_orders = self._normalize_order_refs(state.entry_orders)
             state.sell_ladder_orders = self._normalize_order_refs(state.sell_ladder_orders)
             if has_remaining_cost_basis:
                 self._refresh_net_open_pnl(state)
             else:
                 self._recalculate_proportional_pnl_from_totals(state)
+            self._ensure_cost_basis_initialized(state)
             self._ensure_entry_buckets_initialized(symbol, state)
             result[symbol] = state
         return result
@@ -185,6 +202,10 @@ class StateMixin:
         )
         self._save_state()
 
+    def _clear_pending_exit_ladder(self, state: TradeState):
+        state.pending_exit_ladder_since = None
+        state.pending_exit_ladder_reason = ""
+
     def _normalize_order_refs(self, refs: list) -> list:
         normalized = []
         for item in refs or []:
@@ -212,6 +233,17 @@ class StateMixin:
 
         info = order.get("info") if isinstance(order.get("info"), dict) else {}
         for source in (order, info):
+            offset = str(source.get("offset") or "").strip().lower()
+            if offset == "close":
+                return True
+            if offset == "open":
+                return False
+            trade_type = str(source.get("trade_type") or source.get("tradeType") or "").strip()
+            if trade_type == "3" and config.POSITION_SIDE == "short":
+                return True
+            if trade_type == "4" and config.POSITION_SIDE == "long":
+                return True
+        for source in (order, info):
             for key in ("reduceOnly", "reduce_only", "reduce-only"):
                 if key not in source:
                     continue
@@ -234,6 +266,27 @@ class StateMixin:
             return float(value)
         except (TypeError, ValueError):
             return float(default)
+
+    def _log_reserved_by_other_profile(self, symbol: str, side: str = "", amount: float = 0.0):
+        now = time.time()
+        key = (symbol, side)
+        logged = getattr(self, "_reserved_symbol_logged_at", {})
+        last = self._safe_float(logged.get(key), 0.0) if isinstance(logged, dict) else 0.0
+        if now - last < 300.0:
+            return
+        if not isinstance(logged, dict):
+            logged = {}
+        logged[key] = now
+        self._reserved_symbol_logged_at = logged
+        self._log_event(
+            "DEBUG",
+            f"Skipping {symbol}: position or orders are managed by another profile",
+            event="profile_reserved",
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            reason="reserved_by_other_profile",
+        )
 
     def _refresh_active_side(self, state: TradeState):
         sides = {
@@ -642,6 +695,8 @@ class StateMixin:
         if entry_quote <= 0:
             return
 
+        state.remaining_entry_quote = max(self._safe_float(state.remaining_entry_quote, 0.0), entry_quote)
+        state.remaining_buy_fees_quote = max(0.0, self._safe_float(state.remaining_buy_fees_quote, 0.0))
         state.base_entry_amount = max(0.0, self._safe_float(state.position_size, 0.0))
         state.base_entry_quote = entry_quote
         state.base_entry_fees_quote = max(0.0, self._safe_float(state.remaining_buy_fees_quote, 0.0))
@@ -1137,15 +1192,7 @@ class StateMixin:
                     self._cancel_sell_orders(symbol, reason="reserved_by_other_profile")
                 if symbol in self.disabled_symbols:
                     self.disabled_symbols.discard(symbol)
-                self._log_event(
-                    "DEBUG",
-                    f"Skipping {symbol}: {opposite_side} position is managed by another profile",
-                    event="state_exchange_mismatch",
-                    symbol=symbol,
-                    side=opposite_side,
-                    amount=opposite_size,
-                    reason="reserved_by_other_profile",
-                )
+                self._log_reserved_by_other_profile(symbol, side=opposite_side, amount=opposite_size)
                 return "reserved"
 
             if symbol not in self.disabled_symbols:
@@ -1199,6 +1246,7 @@ class StateMixin:
                 state.initial_entry_notional = self._contracts_to_notional(symbol, new_size, new_entry)
             state.unrealized_pnl = self._safe_float(snapshot.get("unrealized_pnl"), 0.0)
             self._refresh_net_open_pnl(state)
+            self._clear_pending_exit_ladder(state)
             self._cancel_sell_orders(symbol, reason="rebuild_after_entry_fill")
             self._save_state()
             return "position_changed"
@@ -1223,6 +1271,7 @@ class StateMixin:
             state.exit_runner_contracts = 0.0
             state.unrealized_pnl = self._safe_float(snapshot.get("unrealized_pnl"), 0.0)
             self._refresh_net_open_pnl(state)
+            self._clear_pending_exit_ladder(state)
             self._cancel_sell_orders(symbol, reason="rebuild_after_add")
             self._save_state()
             return "position_changed"
@@ -1235,6 +1284,7 @@ class StateMixin:
                 state.position_size = 0.0
                 state.position_side = ""
                 state.entry_price = 0.0
+                self._clear_pending_exit_ladder(state)
                 self._close_cycle(symbol, reason="exit_ladder_filled")
                 return "closed"
 
@@ -1245,6 +1295,7 @@ class StateMixin:
                 state.exit_runner_contracts = max(0.0, new_size)
             state.unrealized_pnl = self._safe_float(snapshot.get("unrealized_pnl"), 0.0)
             self._refresh_net_open_pnl(state)
+            self._clear_pending_exit_ladder(state)
             self._cancel_sell_orders(symbol, reason="rebuild_after_partial_exit")
             self._save_state()
             return "position_changed"
@@ -1276,6 +1327,7 @@ class StateMixin:
             state.position_frozen = 0.0
             state.position_side = ""
             state.entry_price = 0.0
+            self._clear_pending_exit_ladder(state)
             self._close_cycle(symbol, reason="position_closed")
             return "closed"
 
@@ -1303,6 +1355,7 @@ class StateMixin:
         state.realized_pnl = realized
         state.remaining_entry_quote = 0.0
         state.remaining_buy_fees_quote = 0.0
+        self._clear_pending_exit_ladder(state)
         self._refresh_net_open_pnl(state)
         avg_entry = self._average_price_from_notional(symbol, entry_amount, entry_notional)
         avg_exit = self._average_price_from_notional(symbol, exit_amount, exit_notional)

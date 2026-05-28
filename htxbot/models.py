@@ -26,6 +26,8 @@ class TradeState:
     sell_ladder_orders: list = field(default_factory=list)
     sell_ladder_mode: str = "normal"
     sell_ladder_signature: str = ""
+    pending_exit_ladder_since: Optional[float] = None
+    pending_exit_ladder_reason: str = ""
     frozen_no_more_buys: bool = False
     cycle_opened_at: Optional[float] = None
     cooldown_until: Optional[float] = None
@@ -50,8 +52,8 @@ class TradeState:
     averaging_entry_amount: float = 0.0
     averaging_entry_quote: float = 0.0
     averaging_entry_fees_quote: float = 0.0
-    leverage: float = float(config.RISK.leverage)
-    margin_mode: str = config.RISK.margin_mode
+    leverage: float = field(default_factory=lambda: float(config.RISK.leverage))
+    margin_mode: str = field(default_factory=lambda: config.RISK.margin_mode)
     last_signal_timestamp: Optional[float] = None
     last_rs30: float = 0.0
     last_rs60: float = 0.0

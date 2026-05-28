@@ -162,13 +162,7 @@ class RunnerMixin:
                 self._cancel_entry_orders(symbol, reason="reserved_by_other_profile")
             if state.sell_ladder_orders:
                 self._cancel_sell_orders(symbol, reason="reserved_by_other_profile")
-            self._log_event(
-                "DEBUG",
-                f"Skipping {symbol}: another profile has active exposure",
-                event="state_exchange_mismatch",
-                symbol=symbol,
-                reason="reserved_by_other_profile",
-            )
+            self._log_reserved_by_other_profile(symbol)
             return
 
         signal = self.signal_cache.get("symbols", {}).get(symbol)
@@ -184,6 +178,12 @@ class RunnerMixin:
         if state.position_size > 0:
             if not signal_valid:
                 self._freeze_no_more_buys(symbol, reason="signal_invalid_or_missing")
+            if self._maybe_apply_absolute_force_exit(symbol, reason="absolute_force_exit_elapsed"):
+                return
+            if self._maybe_apply_controlled_loss_exit(symbol, signal):
+                return
+            if self._maybe_apply_urgent_time_exit(symbol, signal):
+                return
             if self._maybe_apply_account_profit_unload(symbol, signal):
                 return
             time_exit_applied = self._maybe_apply_time_based_exit(symbol, signal)
