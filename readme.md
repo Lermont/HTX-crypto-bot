@@ -41,6 +41,10 @@ Long entry requires the macro and trigger EMAs to point up, the pullback layer t
 
 Short entry mirrors the same logic downward: macro and trigger EMAs point down, pullback layer recovers downward after a recent bounce, optional RS confirmation, and BTC 30m is not too positive.
 
+Signal flags are split by use: `valid` means the symbol has a coherent directional signal, `entry_valid` means a full new-entry gate passed, and `add_valid` is the stricter health gate used for averaging an already open position.
+
+If HTX rejects a reduce-only exit because the whole position is reported as closeable-reserved/frozen, the bot keeps a pending exit-ladder state and waits for available closeable amount, a position-size change, or visible close orders to adopt/cancel. It does not keep duplicating exit ladders on timeout alone.
+
 For implementation-level details, see [strategy.md](strategy.md).
 
 ## Quick Start
@@ -204,7 +208,7 @@ Each profile writes state and logs into its own directory:
 - `external_price_feed.csv`
 - `bot_futures_macro.csv`
 
-Local secrets live in `.env`, `long/.env`, or `short/.env`; these files are ignored by git.
+These runtime CSV/JSONL artifacts are local audit output and are ignored by git. Local secrets live in `.env`, `long/.env`, or `short/.env`; these files are also ignored by git.
 
 ## Live Launch Checklist
 
@@ -214,7 +218,8 @@ Local secrets live in `.env`, `long/.env`, or `short/.env`; these files are igno
 4. Keep conservative caps first: `EMA_POSITION_BUDGET_FRACTION=0.02`, `EMA_MAX_POSITION_MARGIN_FRACTION=0.03`, `EMA_MAX_TOTAL_MARGIN_FRACTION=0.50`.
 5. Check `long/.env` and `short/.env` for profile-specific overrides.
 6. Run `python -m pytest -q`.
-7. Only then switch `DRY_RUN=false`.
+7. Confirm runtime diagnostics/log artifacts are not staged or committed. If old signed HTX diagnostics were ever shared, rotate the affected HTX API key before live start.
+8. Only then switch `DRY_RUN=false`.
 
 ## Project Layout
 

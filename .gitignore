@@ -36,6 +36,10 @@ long/bot_futures_trades.csv
 long/bot_futures_cycle_stats.csv
 long/bot_futures_markets_cache.json
 long/bot_futures_macro.csv
+long/diagnostics.csv
+long/diagnostics.jsonl
+long/signal_analytics.csv
+long/signal_analytics.jsonl
 long/external_price_feed.csv
 long/account_pnl.csv
 long/bot_futures_state.lock
@@ -54,6 +58,10 @@ short/bot_futures_short_cycle_stats.csv
 short/external_price_feed.csv
 short/bot_futures_short_state.lock
 short/bot_futures_macro.csv
+short/diagnostics.csv
+short/diagnostics.jsonl
+short/signal_analytics.csv
+short/signal_analytics.jsonl
 short/external_price_feed.csv
 short/account_pnl.csv
 short/csv_archive/

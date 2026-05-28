@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 
 import csv
+import importlib
 import json
 import logging
 import math
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -248,6 +250,53 @@ def override_config(**values):
 
 
 class UnifiedBotTests(unittest.TestCase):
+    def test_bot_modules_import_without_side_effects(self):
+        modules = (
+            "bot",
+            "config",
+            "htxbot.app",
+            "htxbot.combined",
+            "htxbot.exchange",
+            "htxbot.monitoring",
+            "htxbot.runner",
+            "htxbot.signal_engine",
+            "htxbot.state",
+            "htxbot.strategy",
+            "htxbot.models",
+        )
+
+        for module in modules:
+            with self.subTest(module=module):
+                importlib.import_module(module)
+
+    def test_runtime_diagnostics_artifacts_are_not_git_tracked(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        if not (repo_root / ".git").exists():
+            self.skipTest("git metadata unavailable")
+
+        result = subprocess.run(
+            ["git", "ls-files", "long", "short"],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        tracked_paths = set(result.stdout.splitlines())
+        runtime_artifacts = {
+            "long/bot_futures_macro.csv",
+            "long/diagnostics.csv",
+            "long/diagnostics.jsonl",
+            "long/signal_analytics.csv",
+            "long/signal_analytics.jsonl",
+            "short/bot_futures_macro.csv",
+            "short/diagnostics.csv",
+            "short/diagnostics.jsonl",
+            "short/signal_analytics.csv",
+            "short/signal_analytics.jsonl",
+        }
+
+        self.assertTrue(runtime_artifacts.isdisjoint(tracked_paths))
+
     def make_bot(self, tmp_path: Path) -> HtxFuturesBot:
         instance = object.__new__(HtxFuturesBot)
         logger = logging.getLogger(f"test_unified_bot_{id(instance)}")
@@ -640,6 +689,55 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(payloads[-1]["exception"]["exception_type"], "RuntimeError")
             self.assertEqual(payloads[-1]["exception"]["error_code"], "1492")
             self.assertNotIn("SIG_SECRET", payloads[-1]["exception"]["message"])
+
+    def test_reduce_only_closeable_rejection_logs_redacted_exception_details(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 0.0
+                state.position_frozen = 5.0
+                state.entry_price = 100.0
+                signed_url = (
+                    "https://api.hbdm.com/linear-swap-api/v1/swap_cross_order?"
+                    "AccessKeyId=AKIA_TEST&Signature=SIG_SECRET"
+                )
+
+                def fail_create_order(symbol, type, side, amount, price, params=None):
+                    bot.exchange.create_order_calls += 1
+                    raise RuntimeError(
+                        f'htx {signed_url} {{"status":"error","err_code":1492,'
+                        '"err_msg":"Amount of Reduce Only order exceeds the amount available to close."}'
+                    )
+
+                bot.exchange.create_order = fail_create_order
+
+                bot._place_sell_ladder(
+                    SYMBOL,
+                    total_contracts=5.0,
+                    avg_entry_price=100.0,
+                    rebuild=False,
+                    closeable_contracts=5.0,
+                    mode="normal",
+                )
+
+                combined_text = (
+                    bot.csv_path.read_text(encoding="utf-8")
+                    + bot.diagnostics_jsonl_path.read_text(encoding="utf-8")
+                )
+                self.assertNotIn("AKIA_TEST", combined_text)
+                self.assertNotIn("SIG_SECRET", combined_text)
+                self.assertIn("<redacted>", combined_text)
+
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = [
+                        row for row in csv.DictReader(handle)
+                        if row["event"] == "reduce_only_violation_prevented"
+                    ]
+                self.assertEqual(rows[-1]["reason"], "closeable_amount_reserved_by_existing_exit_orders")
+                self.assertEqual(rows[-1]["exception_type"], "RuntimeError")
+                self.assertEqual(rows[-1]["error_code"], "1492")
 
     def test_trade_csv_header_migration_adds_diagnostic_columns(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -1368,6 +1466,15 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertEqual(bot._price_at_or_above(SYMBOL, 10.2), 11.0)
                 self.assertEqual(bot._price_at_or_below(SYMBOL, 10.8), 10.0)
+
+    def test_mock_exchange_price_and_amount_precision_helpers(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+
+            self.assertEqual(bot._price_at_or_above(SYMBOL, 10.001), 10.01)
+            self.assertEqual(bot._price_at_or_below(SYMBOL, 10.009), 10.0)
+            self.assertEqual(bot._amount_to_precision(SYMBOL, 5.9), 5.0)
+            self.assertEqual(bot._amount_to_precision(SYMBOL, 0.9), 0.0)
 
     def test_profile_validation_rejects_mismatched_ema_ladder_lengths(self):
         profile = config.resolve_profile("long")
@@ -3245,6 +3352,8 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(bot.exchange.create_order_calls, 1)
 
                 bot.exchange.reject_reduce_only_closeable_amount = False
+                state.position_available = 5.0
+                state.position_frozen = 0.0
                 state.pending_exit_ladder_since = time.time() - 5.0
                 bot._ensure_sell_ladder(SYMBOL)
 
@@ -3253,9 +3362,35 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.pending_exit_ladder_since, None)
                 self.assertEqual(state.pending_exit_ladder_reason, "")
 
+    def test_pending_closeable_exit_ladder_does_not_retry_after_timeout_while_frozen(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, dry_run=False, order_timeout_sec=1, poll_interval_sec=1)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.reject_reduce_only_closeable_amount = True
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 0.0
+                state.position_frozen = 5.0
+                state.entry_price = 100.0
+
+                bot._ensure_sell_ladder(SYMBOL)
+                state.pending_exit_ladder_since = time.time() - 5.0
+                bot._ensure_sell_ladder(SYMBOL)
+
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(
+                    state.sell_ladder_signature,
+                    bot._pending_exit_ladder_signature("normal"),
+                )
+                self.assertIn("closeable_amount_reserved", state.pending_exit_ladder_reason)
+
     def test_breakeven_waits_on_pending_closeable_without_retrying_reduce_only(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            runtime = replace(config.RUNTIME, dry_run=False, order_timeout_sec=1, poll_interval_sec=1)
+            with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.reject_reduce_only_closeable_amount = True
                 state = bot._get_state(SYMBOL)
@@ -3267,6 +3402,7 @@ class UnifiedBotTests(unittest.TestCase):
                 state.frozen_no_more_buys = True
 
                 self.assertTrue(bot._maybe_apply_time_based_exit(SYMBOL, None))
+                state.pending_exit_ladder_since = time.time() - 5.0
                 self.assertTrue(bot._maybe_apply_time_based_exit(SYMBOL, None))
 
                 self.assertEqual(bot.exchange.created_orders, [])
@@ -3275,6 +3411,33 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(
                     state.sell_ladder_signature,
                     bot._pending_exit_ladder_signature("breakeven"),
+                )
+
+    def test_urgent_time_exit_preserves_pending_closeable_without_duplicate_ladder(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, dry_run=False, order_timeout_sec=1, poll_interval_sec=1)
+            strategy = replace(config.STRATEGY, urgent_time_exit_after_minutes=1.0)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.reject_reduce_only_closeable_amount = True
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 0.0
+                state.position_frozen = 5.0
+                state.entry_price = 100.0
+                state.cycle_opened_at = time.time() - 16 * 60
+
+                self.assertTrue(bot._maybe_apply_urgent_time_exit(SYMBOL, None))
+                state.pending_exit_ladder_since = time.time() - 5.0
+                self.assertTrue(bot._maybe_apply_urgent_time_exit(SYMBOL, None))
+
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(state.sell_ladder_mode, "urgent_time_exit")
+                self.assertEqual(
+                    state.sell_ladder_signature,
+                    bot._pending_exit_ladder_signature("urgent_time_exit"),
                 )
 
     def test_unknown_non_reduce_only_exit_order_blocks_duplicate_ladder(self):
@@ -3738,6 +3901,62 @@ class UnifiedBotTests(unittest.TestCase):
                         for row in rows
                     )
                 )
+
+    def test_combined_reserved_symbols_include_exchange_side_opposite_profile_activity(self):
+        class ReservationBot:
+            def __init__(self, profile, positions=None, orders=None):
+                self.profile = profile
+                self.states = {}
+                self.symbols = [SYMBOL]
+                self.positions = list(positions or [])
+                self.orders = list(orders or [])
+                self.events = []
+
+            def _bulk_positions_by_symbol(self):
+                return {SYMBOL: list(self.positions)}
+
+            def _bulk_open_orders_by_symbol(self):
+                return {SYMBOL: list(self.orders)}
+
+            def _safe_float(self, value, default=0.0):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return default
+
+            def _order_remaining_amount(self, order):
+                return self._safe_float(order.get("remaining"), self._safe_float(order.get("amount"), 0.0))
+
+            def _get_min_contracts(self, symbol):
+                return 1.0
+
+            def _log_event(self, *args, **kwargs):
+                self.events.append((args, kwargs))
+
+        long_profile = replace(
+            config.resolve_profile("long"),
+            runtime=replace(config.resolve_profile("long").runtime, dry_run=False),
+        )
+        short_profile = replace(
+            config.resolve_profile("short"),
+            runtime=replace(config.resolve_profile("short").runtime, dry_run=False),
+        )
+        long_bot = ReservationBot(long_profile)
+        short_bot = ReservationBot(
+            short_profile,
+            positions=[{"symbol": SYMBOL, "side": "short", "contracts": 3.0}],
+        )
+        combined = object.__new__(CombinedHtxFuturesBot)
+        combined.bots = [long_bot, short_bot]
+
+        reserved = CombinedHtxFuturesBot._reserved_symbols(combined, exclude=long_bot)
+        self.assertIn(SYMBOL, reserved)
+
+        short_bot.positions = []
+        short_bot.orders = [{"symbol": SYMBOL, "side": "sell", "amount": 2.0, "remaining": 2.0}]
+
+        reserved = CombinedHtxFuturesBot._reserved_symbols(combined, exclude=long_bot)
+        self.assertIn(SYMBOL, reserved)
 
     def test_combined_rejects_mixed_dry_run_modes(self):
         long_profile = replace(

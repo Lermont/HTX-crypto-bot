@@ -329,6 +329,7 @@ class StrategyMixin:
                     if closeable_rejected
                     else f"{close_reason}_order_failed;notional={notional:.8f};{reason_detail}"
                 ),
+                exception=exc,
             )
             return True
 
@@ -512,6 +513,7 @@ class StrategyMixin:
                     position_size=state.position_size,
                     entry_price=state.entry_price,
                     reason=f"{reason};account_unload_order_rejected",
+                    exception=exc,
                 )
                 return True
 
@@ -818,6 +820,7 @@ class StrategyMixin:
                                 price=adjusted_price,
                                 amount=contracts,
                                 reason="price_band_retry_rejected",
+                                exception=retry_exc,
                             )
                             continue
                     else:
@@ -836,6 +839,7 @@ class StrategyMixin:
                             price=price,
                             amount=contracts,
                             reason=reject_reason,
+                            exception=exc,
                         )
                         continue
 
@@ -1424,6 +1428,21 @@ class StrategyMixin:
         if now - pending_since < retry_after:
             return True
 
+        if state.position_available <= 0 and state.position_frozen > 0:
+            state.pending_exit_ladder_since = now
+            self._refresh_active_side(state)
+            self._save_state()
+            self._log_event(
+                "WARNING",
+                f"Delayed {config.EXIT_SIDE} exit ladder for {symbol} is still waiting: HTX reports the position as fully reserved",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                position_size=state.position_size,
+                reason=f"{state.pending_exit_ladder_reason or 'closeable_amount_reserved_by_existing_exit_orders'};pending_closeable_still_reserved",
+            )
+            return True
+
         state.sell_ladder_signature = ""
         self._clear_pending_exit_ladder(state)
         self._refresh_active_side(state)
@@ -1439,7 +1458,14 @@ class StrategyMixin:
         )
         return False
 
-    def _mark_exit_ladder_waiting_for_closeable(self, symbol: str, mode: str, reason: str, amount: float = 0.0):
+    def _mark_exit_ladder_waiting_for_closeable(
+        self,
+        symbol: str,
+        mode: str,
+        reason: str,
+        amount: float = 0.0,
+        exception: Optional[Exception] = None,
+    ):
         state = self._get_state(symbol)
         state.sell_ladder_orders = []
         state.sell_ladder_mode = mode
@@ -1458,6 +1484,7 @@ class StrategyMixin:
             amount=amount,
             position_size=state.position_size,
             reason=reason,
+            exception=exception,
         )
 
     def _sell_ladder_context(self, symbol: str, mode: str = "normal") -> dict:
@@ -1698,6 +1725,7 @@ class StrategyMixin:
                                         mode,
                                         "closeable_amount_reserved_by_existing_exit_orders",
                                         amount=contracts,
+                                        exception=retry_exc,
                                     )
                                     return
                                 self._log_event(
@@ -1709,6 +1737,7 @@ class StrategyMixin:
                                     price=adjusted_price,
                                     amount=contracts,
                                     reason="partial_exit_ladder_closeable_unavailable",
+                                    exception=retry_exc,
                                 )
                                 break
                             self._log_event(
@@ -1720,6 +1749,7 @@ class StrategyMixin:
                                 price=adjusted_price,
                                 amount=contracts,
                                 reason="price_band_retry_rejected",
+                                exception=retry_exc,
                             )
                             continue
                     else:
@@ -1730,6 +1760,7 @@ class StrategyMixin:
                                     mode,
                                     "closeable_amount_reserved_by_existing_exit_orders",
                                     amount=contracts,
+                                    exception=exc,
                                 )
                                 return
                             self._log_event(
@@ -1741,6 +1772,7 @@ class StrategyMixin:
                                 price=price,
                                 amount=contracts,
                                 reason="partial_exit_ladder_closeable_unavailable",
+                                exception=exc,
                             )
                             break
                         self._log_event(
@@ -1752,6 +1784,7 @@ class StrategyMixin:
                             price=price,
                             amount=contracts,
                             reason="exit_order_rejected",
+                            exception=exc,
                         )
                         continue
 
@@ -1911,6 +1944,7 @@ class StrategyMixin:
                             price=adjusted_price,
                             amount=contracts,
                             reason=reason,
+                            exception=retry_exc,
                         )
                         return False
                 else:
@@ -1926,6 +1960,7 @@ class StrategyMixin:
                         price=price,
                         amount=contracts,
                         reason=reason,
+                        exception=exc,
                     )
                     return False
 
@@ -3711,6 +3746,7 @@ class StrategyMixin:
                     position_size=state.position_size,
                     entry_price=state.entry_price,
                     reason=f"{reason};runner_order_rejected",
+                    exception=exc,
                 )
                 return True
 
@@ -4347,6 +4383,7 @@ class StrategyMixin:
                     position_size=state.position_size,
                     entry_price=state.entry_price,
                     reason=f"absolute_force_exit_order_failed;held_minutes={held_minutes:.1f}",
+                    exception=exc,
                 )
                 return True
 

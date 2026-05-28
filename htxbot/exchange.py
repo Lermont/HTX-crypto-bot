@@ -430,6 +430,7 @@ class ExchangeMixin:
                 f"Could not fetch futures balance: {exc}",
                 event="margin_error",
                 reason="balance_fetch_failed",
+                exception=exc,
             )
             return {"free": 0.0, "total": 0.0}
 
@@ -555,6 +556,7 @@ class ExchangeMixin:
                 f"Bulk positions fetch unavailable; falling back to per-symbol sync: {exc}",
                 event="state_exchange_mismatch",
                 reason="bulk_positions_fetch_failed",
+                exception=exc,
             )
             return None
 
@@ -603,6 +605,7 @@ class ExchangeMixin:
                 f"Bulk open-orders fetch unavailable; falling back to per-symbol sync: {exc}",
                 event="state_exchange_mismatch",
                 reason="bulk_open_orders_fetch_failed",
+                exception=exc,
             )
             return None
 
@@ -719,6 +722,7 @@ class ExchangeMixin:
                 event="entry_order_canceled",
                 symbol=symbol,
                 reason="manual_account_leverage_unavailable",
+                exception=exc,
             )
             return 0.0
 
@@ -973,6 +977,7 @@ class ExchangeMixin:
                 symbol=symbol,
                 side=side,
                 reason="hedge_mode_retry_one_way",
+                exception=exc,
             )
             if not self._ensure_one_way_position_mode(force=True):
                 raise
@@ -1052,6 +1057,7 @@ class ExchangeMixin:
                     event="state_exchange_mismatch",
                     symbol=symbol,
                     reason="position_fetch_failed",
+                    exception=exc,
                 )
                 snapshot["ok"] = False
                 return snapshot
@@ -1165,6 +1171,7 @@ class ExchangeMixin:
                     event="state_exchange_mismatch",
                     symbol=symbol,
                     reason="open_orders_fetch_failed",
+                    exception=exc,
                 )
                 return None
 

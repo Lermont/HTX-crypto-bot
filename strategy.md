@@ -10,7 +10,8 @@ Combined mode делает три важные вещи:
 
 - использует один общий exchange-wrapper с кэшем market data;
 - разделяет account-PnL runtime между профилями;
-- помечает символ занятым для второго профиля, если у первого уже есть позиция, entry orders или exit orders.
+- помечает символ занятым для второго профиля, если у первого уже есть позиция, entry orders или exit orders;
+- после рестарта учитывает не только локальный state, но и видимые биржевые позиции/ордера другого профиля, чтобы пустой state не создавал ложный `unexpected_*` для противоположной стороны.
 
 Live mode требует одинаковые HTX API credentials для всех включенных профилей и одинаковый `DRY_RUN=false`. Если один профиль live, а другой dry-run, запуск combined-режима блокируется.
 
@@ -78,6 +79,12 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M, если EMA_USE_BTC_RISK_FILTER
 ## 6. Score И Entry Gate
 
 Сигнал содержит `score`, `rs30`, `rs60`, EMA-значения, BTC context, volatility context, macro context и external-price context.
+
+Флаги сигнала разделены по назначению:
+
+- `valid` — направленный сигнал собран и не противоречит базовой структуре стратегии;
+- `entry_valid` — пройдены условия именно для нового входа;
+- `add_valid` — сигнал достаточно здоров для добора уже открытой позиции, даже если полный new-entry gate сейчас не проходит.
 
 Для нового входа дополнительно проверяются:
 
@@ -255,6 +262,8 @@ Profit floor учитывает комиссии:
 profit_floor >= (buy_fee_rate + sell_fee_rate) * min_profit_fee_multiplier
 ```
 
+Если HTX отклоняет reduce-only ladder с причиной, что closeable amount уже зарезервирован существующими close orders, бот переводит ladder в pending mode (`pending_closeable:*`) и не повторяет постановку только из-за истечения таймаута, пока snapshot показывает `position_available=0` и `position_frozen>0`. Retry возобновляется, когда появляется closeable amount, меняется размер позиции или видимые close orders можно принять/отменить.
+
 ## 12. Breakeven
 
 Breakeven заменяет обычный exit ladder после заданного времени удержания:
@@ -314,6 +323,8 @@ Macro overlay сравнивает XAUT/BTC context через RSI и может
 
 `signal_analytics.csv` содержит текущую EMA-схему: `ema50`, `ema100`, `ema1d`, `ema2d`, `ema25d`, `ema50d`.
 
+Все diagnostics/signal analytics/runtime CSV/JSONL файлы являются локальными артефактами аудита и не должны попадать в git. Если старые diagnostics со signed HTX URL уже были опубликованы или отправлены третьим лицам, API key нужно ротировать до live-старта.
+
 ## 16. Что Удалено Из Конфига
 
 После аудита из `config.py` удалены параметры, которые не имели реального runtime-потребителя:
@@ -337,4 +348,5 @@ Macro overlay сравнивает XAUT/BTC context через RSI и может
 3. Проверить `long/.env` и `short/.env`: там не должно быть противоречий с `.env`.
 4. Убедиться, что `EMA_POSITION_BUDGET_FRACTION`, `EMA_MAX_POSITION_MARGIN_FRACTION`, `EMA_MAX_TOTAL_MARGIN_FRACTION` остаются консервативными.
 5. Проверить HTX account leverage или задать `ACCOUNT_LEVERAGE`.
-6. Только после этого включать `DRY_RUN=false`.
+6. Проверить, что runtime diagnostics/signal analytics файлы не staged и не tracked git.
+7. Только после этого включать `DRY_RUN=false`.
