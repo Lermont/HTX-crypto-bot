@@ -15,6 +15,7 @@ class CombinedHtxFuturesBot:
         self.profiles = [config.resolve_profile(name) for name in profile_names]
         if not self.profiles:
             raise RuntimeError("No bot profiles are enabled")
+        self._validate_profile_invariants()
         self._validate_shared_exchange_profiles()
 
         self.bots: List[HtxFuturesBot] = []
@@ -80,11 +81,82 @@ class CombinedHtxFuturesBot:
                             )
                 bot._save_state()
 
+    def _validate_profile_invariants(self):
+        seen_names = set()
+        for profile in self.profiles:
+            name = str(profile.name or "").strip()
+            if not name:
+                raise RuntimeError("Combined profile name must not be empty")
+            if name in seen_names:
+                raise RuntimeError(f"Duplicate combined profile name: {name}")
+            seen_names.add(name)
+
+            position_side = str(profile.position_side or "").lower()
+            entry_side = str(profile.entry_side or "").lower()
+            exit_side = str(profile.exit_side or "").lower()
+            opposite_position_side = str(profile.opposite_position_side or "").lower()
+            if position_side == "long":
+                expected = ("buy", "sell", "short")
+            elif position_side == "short":
+                expected = ("sell", "buy", "long")
+            else:
+                raise RuntimeError(f"Unsupported position side for profile {name}: {profile.position_side}")
+
+            if (entry_side, exit_side, opposite_position_side) != expected:
+                raise RuntimeError(
+                    f"Invalid direction mapping for profile {name}: "
+                    f"position_side={position_side}, entry_side={entry_side}, "
+                    f"exit_side={exit_side}, opposite_position_side={opposite_position_side}"
+                )
+
+    def _shared_runtime_fingerprint(self, profile) -> tuple:
+        runtime = profile.runtime
+        return (
+            bool(runtime.post_only_enabled),
+            bool(runtime.reduce_only_enabled),
+            int(runtime.order_timeout_sec),
+            bool(runtime.fetch_fill_details_on_sync),
+            int(runtime.fill_detail_lookback_sec),
+        )
+
+    def _shared_risk_fingerprint(self, profile) -> tuple:
+        risk = profile.risk
+        return (
+            str(risk.margin_mode or "").lower(),
+            str(risk.position_mode or "").lower(),
+            int(risk.leverage),
+            int(risk.account_leverage),
+        )
+
     def _validate_shared_exchange_profiles(self):
-        first = self.profiles[0].api_credentials
+        first = self.profiles[0]
+        first_name = first.name
+        first_credentials = first.api_credentials
+        first_exchange = first.exchange
+        first_runtime = self._shared_runtime_fingerprint(first)
+        first_risk = self._shared_risk_fingerprint(first)
+
         for profile in self.profiles[1:]:
-            if profile.api_credentials != first:
-                raise RuntimeError("Combined live profiles must use the same HTX API credentials")
+            if profile.api_credentials != first_credentials:
+                raise RuntimeError(
+                    "Combined live profiles must use the same HTX API credentials: "
+                    f"{first_name} != {profile.name}"
+                )
+            if profile.exchange != first_exchange:
+                raise RuntimeError(
+                    "Combined profiles share one exchange instance, so EXCHANGE settings must match: "
+                    f"{first_name} != {profile.name}"
+                )
+            if self._shared_risk_fingerprint(profile) != first_risk:
+                raise RuntimeError(
+                    "Combined profiles share one futures account, so margin mode, position mode and leverage settings must match: "
+                    f"{first_name} != {profile.name}"
+                )
+            if self._shared_runtime_fingerprint(profile) != first_runtime:
+                raise RuntimeError(
+                    "Combined profiles share order execution, so critical runtime order settings must match: "
+                    f"{first_name} != {profile.name}"
+                )
 
     def _reserved_symbols(self, exclude: HtxFuturesBot) -> set:
         reserved = set()

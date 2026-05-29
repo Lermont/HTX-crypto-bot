@@ -2033,7 +2033,7 @@ class StrategyMixin:
         exit_label = "Buy" if exit_side == "buy" else "Sell"
         created_at = time.time()
         order_id = f"dry_{exit_side}_{symbol}_{int(created_at)}_average_recovery"
-        if not config.RUNTIME.dry_run:
+        if not self._runtime_dry_run():
             try:
                 order = self._create_one_way_order(
                     symbol=symbol,
@@ -2111,7 +2111,7 @@ class StrategyMixin:
         self._refresh_active_side(state)
         self._save_state()
 
-        event = "exit_ladder_planned" if config.RUNTIME.dry_run else ("exit_ladder_rebuilt" if rebuild else "exit_ladder_placed")
+        event = "exit_ladder_planned" if self._runtime_dry_run() else ("exit_ladder_rebuilt" if rebuild else "exit_ladder_placed")
         stage_notional = self._contracts_to_notional(symbol, contracts, price)
         self._record_signal_analytics(
             event,
@@ -2119,7 +2119,7 @@ class StrategyMixin:
             signal={},
             planned_orders=len(state.sell_ladder_orders),
             planned_notional=stage_notional,
-            placed_orders=0 if config.RUNTIME.dry_run else len(state.sell_ladder_orders),
+            placed_orders=0 if self._runtime_dry_run() else len(state.sell_ladder_orders),
             operation_id=operation_id,
             order_id=order_id,
             cycle_id=state.cycle_id,
@@ -2133,7 +2133,7 @@ class StrategyMixin:
                 "exit_scope": "average_recovery",
             },
         )
-        action = "planned" if config.RUNTIME.dry_run else ("rebuilt" if rebuild else "placed")
+        action = "planned" if self._runtime_dry_run() else ("rebuilt" if rebuild else "placed")
         self._log_event(
             "INFO",
             f"{exit_label} average recovery exit {action} for {symbol}: contracts={contracts} price={price}",
@@ -2360,7 +2360,7 @@ class StrategyMixin:
             self._maybe_close_tiny_partial_entry_after_timeout(symbol, open_orders=open_orders)
             return
 
-        if config.RUNTIME.dry_run:
+        if self._runtime_dry_run():
             return
 
         open_ids = {str(order.get("id")) for order in open_orders}
@@ -2379,7 +2379,7 @@ class StrategyMixin:
             self._save_state()
 
     def _validate_entry_orders(self, symbol: str, open_orders: List[dict]) -> bool:
-        if config.RUNTIME.dry_run:
+        if self._runtime_dry_run():
             return True
 
         state = self._get_state(symbol)
@@ -2696,7 +2696,7 @@ class StrategyMixin:
                 )
             return True
 
-        if config.RUNTIME.dry_run:
+        if self._runtime_dry_run():
             return True
 
         non_reduce_tracked = [
@@ -3923,7 +3923,7 @@ class StrategyMixin:
 
         created_at = time.time()
         order_id = f"dry_{config.EXIT_SIDE}_{symbol}_{int(created_at)}_runner"
-        if not config.RUNTIME.dry_run:
+        if not self._runtime_dry_run():
             try:
                 order = self._create_one_way_order(
                     symbol=symbol,
@@ -3970,7 +3970,7 @@ class StrategyMixin:
         self._log_event(
             "INFO",
             f"Runner close order placed for {symbol}: contracts={contracts} price={price}",
-            event="exit_ladder_planned" if config.RUNTIME.dry_run else "exit_ladder_placed",
+            event="exit_ladder_planned" if self._runtime_dry_run() else "exit_ladder_placed",
             symbol=symbol,
             side=config.EXIT_SIDE,
             order_id=order_id,
@@ -4130,7 +4130,7 @@ class StrategyMixin:
         if free <= config.RISK.min_quote_reserve:
             return 0.0, "free_margin_below_reserve"
 
-        if not config.RUNTIME.dry_run:
+        if not self._runtime_dry_run():
             self._set_leverage_safe(symbol, int(config.RISK.leverage))
 
         available_after_reserve = max(0.0, free - config.RISK.min_quote_reserve)
@@ -4564,7 +4564,7 @@ class StrategyMixin:
             return True
 
         order_id = ""
-        if not config.RUNTIME.dry_run:
+        if not self._runtime_dry_run():
             try:
                 order = self._create_one_way_order(
                     symbol=symbol,
@@ -4593,7 +4593,7 @@ class StrategyMixin:
         self._log_event(
             "WARNING",
             f"Absolute force exit market order placed for {symbol}: contracts={close_amount}",
-            event="exit_ladder_rebuilt" if config.RUNTIME.dry_run else "absolute_force_exit_order_placed",
+            event="exit_ladder_rebuilt" if self._runtime_dry_run() else "absolute_force_exit_order_placed",
             symbol=symbol,
             side=config.EXIT_SIDE,
             order_id=order_id,
