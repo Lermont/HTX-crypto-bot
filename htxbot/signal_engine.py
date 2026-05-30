@@ -8,6 +8,7 @@ from typing import List, Optional
 import config
 
 from .indicators import calculate_ema, calculate_rsi, clamp, compute_log_return, realized_volatility
+from .models import SignalContext
 
 
 class SignalMixin:
@@ -859,17 +860,19 @@ class SignalMixin:
 
     def _build_signal_from_closes(
         self,
-        closes: List[float],
-        benchmark_closes: List[float],
-        btc_risk: dict,
-        latest_ts: int,
-        cache_key: str = "",
-        macro_context: Optional[dict] = None,
-        macro_closes: Optional[List[float]] = None,
-        macro_latest_ts: Optional[int] = None,
-        pullback_closes: Optional[List[float]] = None,
-        pullback_latest_ts: Optional[int] = None,
+        ctx: SignalContext,
     ) -> Optional[dict]:
+        closes = ctx.closes
+        benchmark_closes = ctx.benchmark_closes
+        btc_risk = ctx.btc_risk
+        latest_ts = ctx.latest_ts
+        cache_key = ctx.cache_key
+        macro_context = ctx.macro_context
+        macro_closes = ctx.macro_closes
+        macro_latest_ts = ctx.macro_latest_ts
+        pullback_closes = ctx.pullback_closes
+        pullback_latest_ts = ctx.pullback_latest_ts
+
         if not closes or not benchmark_closes:
             return None
 
@@ -1334,11 +1337,12 @@ class SignalMixin:
             closes = [self._safe_float(row[4]) for row in candles]
             macro_closes = [self._safe_float(row[4]) for row in macro_candles]
             pullback_closes = [self._safe_float(row[4]) for row in pullback_candles]
-            signal = self._build_signal_from_closes(
-                closes,
-                benchmark_closes,
-                btc_risk,
-                latest_ts,
+
+            ctx = SignalContext(
+                closes=closes,
+                benchmark_closes=benchmark_closes,
+                btc_risk=btc_risk,
+                latest_ts=latest_ts,
                 cache_key=symbol,
                 macro_context=macro_context,
                 macro_closes=macro_closes,
@@ -1346,6 +1350,7 @@ class SignalMixin:
                 pullback_closes=pullback_closes,
                 pullback_latest_ts=int(pullback_candles[-1][0]),
             )
+            signal = self._build_signal_from_closes(ctx)
             if not signal:
                 self._log_event(
                     "DEBUG",
