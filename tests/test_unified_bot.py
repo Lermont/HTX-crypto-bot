@@ -3892,6 +3892,42 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(bot.exchange.fetch_positions_calls, 4)
                 self.assertEqual(bot.exchange.urls["hostnames"]["contract"], "api.two.test")
 
+    def test_private_position_fetch_returns_not_ok_on_error(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            # Set up failures for mock exchange
+            bot.exchange.fetch_positions_failures = [
+                RuntimeError("bulk fail"),
+                RuntimeError("symbol fail")
+            ]
+
+            bot._reset_private_caches()
+
+            # Use override config to set dry_run to False so fetch positions happens
+            # The replace issue was because config.RUNTIME is a RuntimeSettings instance which
+            # originally didn't have dry_run, but the project has it now so replace might fail
+            # depending on when it was added. Instead we manually monkey patch.
+            original_dry_run = getattr(config.RUNTIME, 'dry_run', None)
+            try:
+                # Bypass frozen properties of dataclass
+                object.__setattr__(config.RUNTIME, 'dry_run', False)
+                snapshot = bot._fetch_position_snapshot(SYMBOL)
+            finally:
+                if original_dry_run is not None:
+                    object.__setattr__(config.RUNTIME, 'dry_run', original_dry_run)
+                else:
+                    try:
+                        delattr(config.RUNTIME, 'dry_run')
+                    except Exception:
+                        pass
+
+            self.assertFalse(snapshot["ok"])
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[-1]["level"], "ERROR")
+            self.assertEqual(rows[-1]["event"], "state_exchange_mismatch")
+            self.assertEqual(rows[-1]["reason"], "position_fetch_failed")
+
     def test_exhausted_private_network_fetch_logs_warning_not_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             exchange_config = replace(
