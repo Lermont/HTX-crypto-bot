@@ -18,8 +18,9 @@ import config
 import ccxt
 from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
+from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
-from htxbot.indicators import calculate_rsi, compute_log_return
+from htxbot.indicators import calculate_rsi, realized_volatility
 from htxbot.models import PositionLifecycle
 
 
@@ -851,6 +852,24 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertNotIn("ema30", rows[-1])
             self.assertNotIn("ema60", rows[-1])
 
+    def test_external_price_htx_symbol_to_mexc_returns_empty_on_invalid_inputs(self):
+        settings = replace(config.EXTERNAL_PRICE_FEED)
+        feed = ExternalPriceFeed(settings, clock=lambda: 1000.0)
+
+        # Test missing or empty inputs
+        self.assertEqual(feed.htx_symbol_to_mexc(""), "")
+        self.assertEqual(feed.htx_symbol_to_mexc(None), "")
+
+        # Test base derived from market empty cases
+        self.assertEqual(feed.htx_symbol_to_mexc("BTC/USDT", market={}), "BTCUSDT")
+        self.assertEqual(feed.htx_symbol_to_mexc("BTC/USDT", market={"base": ""}), "BTCUSDT")
+        self.assertEqual(feed.htx_symbol_to_mexc("BTC/USDT", market={"base": None}), "BTCUSDT")
+
+        # Test non-alphanumeric inputs
+        self.assertEqual(feed.htx_symbol_to_mexc("!@#$"), "")
+        self.assertEqual(feed.htx_symbol_to_mexc("!@#$/USDT"), "")
+        self.assertEqual(feed.htx_symbol_to_mexc("!@#$/USDT", market={"base": "!@#$"}), "")
+
     def test_external_price_csv_records_mexc_quantities_and_notional(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -1307,6 +1326,35 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(calculate_rsi(flat, 14), 50.0)
         self.assertEqual(calculate_rsi([1.0, 2.0], 14), 0.0)
 
+    def test_realized_volatility(self):
+        # Edge cases: window <= 1 or not enough data
+        self.assertEqual(realized_volatility([100.0, 101.0, 102.0], 1), 0.0)
+        self.assertEqual(realized_volatility([100.0, 101.0], 2), 0.0)
+
+        # Invalid elements: not enough valid returns (<= 0)
+        self.assertEqual(realized_volatility([100.0, 0.0, -1.0, 102.0], 3), 0.0)
+
+        # Happy path testing both numpy and fallback
+        closes = [100.0, 101.0, 100.5, 99.0, 102.0, 101.5]
+
+        # We need a stable output, so we calculate what it should be manually or roughly check bounds
+        # Returns: ln(101/100) = 0.00995, ln(100.5/101) = -0.00496, ln(99/100.5) = -0.01504,
+        #          ln(102/99) = 0.02985, ln(101.5/102) = -0.00491
+        # It should just be a positive float.
+
+        with patch('htxbot.indicators.HAS_NUMPY', True):
+            vol_np = realized_volatility(closes, 4)
+            self.assertGreater(vol_np, 0.0)
+            self.assertLess(vol_np, 0.1) # shouldn't be massive
+
+        with patch('htxbot.indicators.HAS_NUMPY', False):
+            vol_fallback = realized_volatility(closes, 4)
+            self.assertGreater(vol_fallback, 0.0)
+            self.assertLess(vol_fallback, 0.1)
+
+        # They should be essentially equal
+        self.assertAlmostEqual(vol_np, vol_fallback, places=6)
+
     def macro_regime_bot(self, tmp_path: Path, gold_rsi: float, btc_rsi: float) -> HtxFuturesBot:
         bot = self.make_bot(tmp_path)
         bot.benchmark_symbol = BTC_SYMBOL
@@ -1555,6 +1603,26 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertEqual(bot._price_at_or_above(SYMBOL, 10.2), 11.0)
                 self.assertEqual(bot._price_at_or_below(SYMBOL, 10.8), 10.0)
+
+    def test_price_to_precision(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+
+            # normal conversions
+            def mock_precision_normal(symbol, price):
+                return str(round(price, 2))
+
+            bot.exchange.price_to_precision = mock_precision_normal
+            self.assertEqual(bot._price_to_precision(SYMBOL, 10.123), 10.12)
+            self.assertEqual(bot._price_to_precision(SYMBOL, 10.128), 10.13)
+
+            # test edge case where string conversion fails
+            def mock_precision_error(symbol, price):
+                return "invalid_float"
+
+            bot.exchange.price_to_precision = mock_precision_error
+            with self.assertRaises(ValueError):
+                bot._price_to_precision(SYMBOL, 10.0)
 
     def test_mock_exchange_price_and_amount_precision_helpers(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
