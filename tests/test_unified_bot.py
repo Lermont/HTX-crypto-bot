@@ -836,6 +836,24 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertNotIn("ema30", rows[-1])
             self.assertNotIn("ema60", rows[-1])
 
+    def test_external_price_htx_symbol_to_mexc_returns_empty_on_invalid_inputs(self):
+        settings = replace(config.EXTERNAL_PRICE_FEED)
+        feed = ExternalPriceFeed(settings, clock=lambda: 1000.0)
+
+        # Test missing or empty inputs
+        self.assertEqual(feed.htx_symbol_to_mexc(""), "")
+        self.assertEqual(feed.htx_symbol_to_mexc(None), "")
+
+        # Test base derived from market empty cases
+        self.assertEqual(feed.htx_symbol_to_mexc("BTC/USDT", market={}), "BTCUSDT")
+        self.assertEqual(feed.htx_symbol_to_mexc("BTC/USDT", market={"base": ""}), "BTCUSDT")
+        self.assertEqual(feed.htx_symbol_to_mexc("BTC/USDT", market={"base": None}), "BTCUSDT")
+
+        # Test non-alphanumeric inputs
+        self.assertEqual(feed.htx_symbol_to_mexc("!@#$"), "")
+        self.assertEqual(feed.htx_symbol_to_mexc("!@#$/USDT"), "")
+        self.assertEqual(feed.htx_symbol_to_mexc("!@#$/USDT", market={"base": "!@#$"}), "")
+
     def test_external_price_csv_records_mexc_quantities_and_notional(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
