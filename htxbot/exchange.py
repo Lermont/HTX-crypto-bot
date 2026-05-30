@@ -461,8 +461,8 @@ class ExchangeMixin:
         return payload
 
     def _account_snapshot(self) -> dict:
-        if self._runtime_dry_run():
-            equity = max(getattr(config.RUNTIME, "dry_run_equity", 0.0), 0.0)
+        if config.RUNTIME.dry_run:
+            equity = max(config.RUNTIME.dry_run_equity, 0.0)
             return {"free": equity, "total": equity}
 
         try:
@@ -579,7 +579,7 @@ class ExchangeMixin:
         return grouped, missing_symbol
 
     def _bulk_positions_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        if self._runtime_dry_run():
+        if config.RUNTIME.dry_run:
             return {}
         cached = getattr(self, "_private_positions_by_symbol", None)
         if cached is not None:
@@ -622,7 +622,7 @@ class ExchangeMixin:
         return grouped
 
     def _bulk_open_orders_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        if self._runtime_dry_run():
+        if config.RUNTIME.dry_run:
             return {}
         cached = getattr(self, "_private_open_orders_by_symbol", None)
         if cached is not None:
@@ -989,12 +989,13 @@ class ExchangeMixin:
     def _set_leverage_safe(self, symbol: str, leverage: int) -> bool:
         try:
             self.exchange.set_leverage(int(leverage), symbol, params=self._position_params())
-            if hasattr(self, "order_leverage_cache"):
-                self.order_leverage_cache.pop(symbol, None)
+            if not hasattr(self, "order_leverage_cache"):
+                self.order_leverage_cache = {}
+            self.order_leverage_cache[symbol] = float(leverage)
             return True
         except Exception as exc:
             self._log_event(
-                "WARNING",
+                "ERROR",
                 f"Could not set leverage {leverage} for {symbol}: {exc}",
                 event="futures_setup",
                 symbol=symbol,
@@ -1530,9 +1531,7 @@ class ExchangeMixin:
                 raise RuntimeError("Could not enforce HTX one-way position mode")
 
         if config.EXCHANGE.set_leverage_on_start:
-            self._log_event(
-                "WARNING",
-                "SET_LEVERAGE_ON_START is ignored: leverage is managed manually in HTX",
-                event="futures_setup",
-                reason="leverage_setup_manual_only",
-            )
+            leverage = int(config.RISK.leverage)
+            for symbol in self.symbols:
+                if not self._set_leverage_safe(symbol, leverage):
+                    raise RuntimeError(f"Could not set configured HTX leverage {leverage} for {symbol}")

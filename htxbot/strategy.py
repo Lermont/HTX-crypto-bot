@@ -12,17 +12,19 @@ from .models import ExitLadderPreflight, TradeState
 class StrategyMixin:
     def _current_total_notional(self) -> float:
         total = 0.0
-        for symbol, state in self.states.items():
-            if symbol not in self.market_by_symbol:
-                continue
-            if state.position_size > 0 and state.entry_price > 0:
-                total += self._contracts_to_notional(symbol, state.position_size, state.entry_price)
-            for ref in state.entry_orders or []:
-                total += self._contracts_to_notional(
-                    symbol,
-                    self._safe_float(ref.get("amount"), 0.0),
-                    self._safe_float(ref.get("price"), 0.0),
-                )
+        for bot in self._account_pnl_bots():
+            states = getattr(bot, "states", {}) or {}
+            for symbol, state in states.items():
+                if symbol not in getattr(bot, "market_by_symbol", {}):
+                    continue
+                if state.position_size > 0 and state.entry_price > 0:
+                    total += bot._contracts_to_notional(symbol, state.position_size, state.entry_price)
+                for ref in state.entry_orders or []:
+                    total += bot._contracts_to_notional(
+                        symbol,
+                        bot._safe_float(ref.get("amount"), 0.0),
+                        bot._safe_float(ref.get("price"), 0.0),
+                    )
         return total
 
     def _symbol_open_notional(self, symbol: str, state: TradeState) -> float:
@@ -1077,20 +1079,30 @@ class StrategyMixin:
     def _controlled_loss_move_fraction(self, state: Optional[TradeState]) -> float:
         if state is None:
             return 0.0
-        strategy = config.STRATEGY
-        # Start with a base move fraction of 0.1 (10% towards market) instead of TP markup
-        base_move = 0.1
-        if not self._hard_time_exit_elapsed(state):
-            return base_move
 
-        step_minutes = max(0.0, strategy.hard_time_exit_step_minutes)
-        step_increase = max(0.0, strategy.hard_time_exit_fraction_step)
-        if step_minutes > 0 and step_increase > 0:
-            overdue_minutes = max(
-                0.0,
-                self._position_held_minutes(state) - max(0.0, strategy.hard_time_exit_after_minutes),
-            )
-            base_move += (overdue_minutes // step_minutes) * step_increase
+        # Base move for controlled loss exit
+        base_move = 0.1
+
+        # If in controlled loss mode, we want to reach 1.0 (market price) within 24 hours
+        # from the moment it was activated.
+        if state.sell_ladder_mode == "controlled_loss_exit" and state.time_exit_activated_at:
+            elapsed_minutes = (time.time() - state.time_exit_activated_at) / 60.0
+            # Linear ramp from 0.1 to 1.0 over 1440 minutes (24 hours)
+            time_move = base_move + (1.0 - base_move) * (elapsed_minutes / 1440.0)
+            base_move = max(base_move, time_move)
+
+        # Existing hard time exit logic as a secondary ramp
+        if self._hard_time_exit_elapsed(state):
+            strategy = config.STRATEGY
+            step_minutes = max(0.0, strategy.hard_time_exit_step_minutes)
+            step_increase = max(0.0, strategy.hard_time_exit_fraction_step)
+            if step_minutes > 0 and step_increase > 0:
+                overdue_minutes = max(
+                    0.0,
+                    self._position_held_minutes(state) - max(0.0, strategy.hard_time_exit_after_minutes),
+                )
+                hard_move = 0.1 + (overdue_minutes // step_minutes) * step_increase
+                base_move = max(base_move, hard_move)
 
         return self._clamp(base_move, 0.0, 1.0)
 
@@ -2033,7 +2045,7 @@ class StrategyMixin:
         exit_label = "Buy" if exit_side == "buy" else "Sell"
         created_at = time.time()
         order_id = f"dry_{exit_side}_{symbol}_{int(created_at)}_average_recovery"
-        if not self._runtime_dry_run():
+        if not config.RUNTIME.dry_run:
             try:
                 order = self._create_one_way_order(
                     symbol=symbol,
@@ -2111,7 +2123,7 @@ class StrategyMixin:
         self._refresh_active_side(state)
         self._save_state()
 
-        event = "exit_ladder_planned" if self._runtime_dry_run() else ("exit_ladder_rebuilt" if rebuild else "exit_ladder_placed")
+        event = "exit_ladder_planned" if config.RUNTIME.dry_run else ("exit_ladder_rebuilt" if rebuild else "exit_ladder_placed")
         stage_notional = self._contracts_to_notional(symbol, contracts, price)
         self._record_signal_analytics(
             event,
@@ -2119,7 +2131,7 @@ class StrategyMixin:
             signal={},
             planned_orders=len(state.sell_ladder_orders),
             planned_notional=stage_notional,
-            placed_orders=0 if self._runtime_dry_run() else len(state.sell_ladder_orders),
+            placed_orders=0 if config.RUNTIME.dry_run else len(state.sell_ladder_orders),
             operation_id=operation_id,
             order_id=order_id,
             cycle_id=state.cycle_id,
@@ -2133,7 +2145,7 @@ class StrategyMixin:
                 "exit_scope": "average_recovery",
             },
         )
-        action = "planned" if self._runtime_dry_run() else ("rebuilt" if rebuild else "placed")
+        action = "planned" if config.RUNTIME.dry_run else ("rebuilt" if rebuild else "placed")
         self._log_event(
             "INFO",
             f"{exit_label} average recovery exit {action} for {symbol}: contracts={contracts} price={price}",
@@ -2360,7 +2372,7 @@ class StrategyMixin:
             self._maybe_close_tiny_partial_entry_after_timeout(symbol, open_orders=open_orders)
             return
 
-        if self._runtime_dry_run():
+        if config.RUNTIME.dry_run:
             return
 
         open_ids = {str(order.get("id")) for order in open_orders}
@@ -2379,7 +2391,7 @@ class StrategyMixin:
             self._save_state()
 
     def _validate_entry_orders(self, symbol: str, open_orders: List[dict]) -> bool:
-        if self._runtime_dry_run():
+        if config.RUNTIME.dry_run:
             return True
 
         state = self._get_state(symbol)
@@ -2696,7 +2708,7 @@ class StrategyMixin:
                 )
             return True
 
-        if self._runtime_dry_run():
+        if config.RUNTIME.dry_run:
             return True
 
         non_reduce_tracked = [
@@ -3923,7 +3935,7 @@ class StrategyMixin:
 
         created_at = time.time()
         order_id = f"dry_{config.EXIT_SIDE}_{symbol}_{int(created_at)}_runner"
-        if not self._runtime_dry_run():
+        if not config.RUNTIME.dry_run:
             try:
                 order = self._create_one_way_order(
                     symbol=symbol,
@@ -3970,7 +3982,7 @@ class StrategyMixin:
         self._log_event(
             "INFO",
             f"Runner close order placed for {symbol}: contracts={contracts} price={price}",
-            event="exit_ladder_planned" if self._runtime_dry_run() else "exit_ladder_placed",
+            event="exit_ladder_planned" if config.RUNTIME.dry_run else "exit_ladder_placed",
             symbol=symbol,
             side=config.EXIT_SIDE,
             order_id=order_id,
@@ -4130,7 +4142,7 @@ class StrategyMixin:
         if free <= config.RISK.min_quote_reserve:
             return 0.0, "free_margin_below_reserve"
 
-        if not self._runtime_dry_run():
+        if not config.RUNTIME.dry_run:
             self._set_leverage_safe(symbol, int(config.RISK.leverage))
 
         available_after_reserve = max(0.0, free - config.RISK.min_quote_reserve)
@@ -4384,15 +4396,6 @@ class StrategyMixin:
 
         drawdown = self._position_drawdown(state, reference_price)
         drawdown_threshold = self._ema_averaging_drawdown_threshold(state.average_stage)
-        if drawdown < drawdown_threshold:
-            self._record_signal_analytics(
-                "averaging_checked",
-                symbol=symbol,
-                signal=signal,
-                block_reason="drawdown_below_threshold",
-                context={"drawdown": drawdown, "threshold": drawdown_threshold, "stage": state.average_stage + 1},
-            )
-            return
 
         external_directional_reason = self._external_directional_1m_block_reason(symbol, scope="averaging")
         if external_directional_reason:
@@ -4564,7 +4567,7 @@ class StrategyMixin:
             return True
 
         order_id = ""
-        if not self._runtime_dry_run():
+        if not config.RUNTIME.dry_run:
             try:
                 order = self._create_one_way_order(
                     symbol=symbol,
@@ -4593,7 +4596,7 @@ class StrategyMixin:
         self._log_event(
             "WARNING",
             f"Absolute force exit market order placed for {symbol}: contracts={close_amount}",
-            event="exit_ladder_rebuilt" if self._runtime_dry_run() else "absolute_force_exit_order_placed",
+            event="exit_ladder_rebuilt" if config.RUNTIME.dry_run else "absolute_force_exit_order_placed",
             symbol=symbol,
             side=config.EXIT_SIDE,
             order_id=order_id,
