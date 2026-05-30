@@ -802,17 +802,19 @@ class ExchangeMixin:
             params["reduceOnly"] = True
         return params
 
-    def _extract_margin_mode(self, payload: dict) -> str:
-        if not isinstance(payload, dict):
+    def _extract_margin_mode(self, item: dict) -> str:
+        if not isinstance(item, dict):
             return ""
-        direct = payload.get("marginMode") or payload.get("margin_mode")
-        if direct:
-            return str(direct).lower()
-        info = payload.get("info")
+        for key in ("marginMode", "margin_mode", "margin"):
+            val = item.get(key)
+            if val is not None:
+                return str(val).lower()
+        info = item.get("info")
         if isinstance(info, dict):
-            nested = info.get("margin_mode") or info.get("marginMode")
-            if nested:
-                return str(nested).lower()
+            for key in ("margin_mode", "marginMode", "margin"):
+                val = info.get(key)
+                if val is not None:
+                    return str(val).lower()
         return ""
 
     def _ensure_cross_margin_response(self, payload: dict, context: str, symbol: str = "") -> bool:

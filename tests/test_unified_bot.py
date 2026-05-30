@@ -279,6 +279,34 @@ class UnifiedBotTests(unittest.TestCase):
             with self.subTest(module=module):
                 importlib.import_module(module)
 
+
+    def test_extract_margin_mode(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bot = self.make_bot(Path(raw_tmp))
+
+            # Edge cases
+            self.assertEqual(bot._extract_margin_mode(None), "")
+            self.assertEqual(bot._extract_margin_mode([]), "")
+            self.assertEqual(bot._extract_margin_mode("string"), "")
+            self.assertEqual(bot._extract_margin_mode({}), "")
+
+            # Top-level checks
+            self.assertEqual(bot._extract_margin_mode({"marginMode": "CROSS"}), "cross")
+            self.assertEqual(bot._extract_margin_mode({"margin_mode": "ISOLATED"}), "isolated")
+            self.assertEqual(bot._extract_margin_mode({"marginMode": "CrosS", "margin_mode": "isolated"}), "cross")
+
+            # Info dict checks
+            self.assertEqual(bot._extract_margin_mode({"info": {"marginMode": "CROSS"}}), "cross")
+            self.assertEqual(bot._extract_margin_mode({"info": {"margin_mode": "ISOLATED"}}), "isolated")
+            self.assertEqual(bot._extract_margin_mode({"info": {"margin_mode": "ISOLATED", "marginMode": "CROSS"}}), "isolated")
+
+            # Direct None values fall through, empty string is treated as valid value
+            self.assertEqual(bot._extract_margin_mode({"marginMode": "", "info": {"marginMode": "cross"}}), "")
+            self.assertEqual(bot._extract_margin_mode({"margin_mode": None, "info": {"marginMode": "isolated"}}), "isolated")
+
+            # Non-string values
+            self.assertEqual(bot._extract_margin_mode({"marginMode": 123}), "123")
+
     def test_runtime_diagnostics_artifacts_are_not_git_tracked(self):
         repo_root = Path(__file__).resolve().parents[1]
         if not (repo_root / ".git").exists():
