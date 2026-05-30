@@ -18,8 +18,9 @@ import config
 import ccxt
 from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
+from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
-from htxbot.indicators import calculate_rsi
+from htxbot.indicators import calculate_rsi, realized_volatility
 from htxbot.models import PositionLifecycle
 
 
@@ -1290,6 +1291,35 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertLess(calculate_rsi(falling, 14), 50.0)
         self.assertEqual(calculate_rsi(flat, 14), 50.0)
         self.assertEqual(calculate_rsi([1.0, 2.0], 14), 0.0)
+
+    def test_realized_volatility(self):
+        # Edge cases: window <= 1 or not enough data
+        self.assertEqual(realized_volatility([100.0, 101.0, 102.0], 1), 0.0)
+        self.assertEqual(realized_volatility([100.0, 101.0], 2), 0.0)
+
+        # Invalid elements: not enough valid returns (<= 0)
+        self.assertEqual(realized_volatility([100.0, 0.0, -1.0, 102.0], 3), 0.0)
+
+        # Happy path testing both numpy and fallback
+        closes = [100.0, 101.0, 100.5, 99.0, 102.0, 101.5]
+
+        # We need a stable output, so we calculate what it should be manually or roughly check bounds
+        # Returns: ln(101/100) = 0.00995, ln(100.5/101) = -0.00496, ln(99/100.5) = -0.01504,
+        #          ln(102/99) = 0.02985, ln(101.5/102) = -0.00491
+        # It should just be a positive float.
+
+        with patch('htxbot.indicators.HAS_NUMPY', True):
+            vol_np = realized_volatility(closes, 4)
+            self.assertGreater(vol_np, 0.0)
+            self.assertLess(vol_np, 0.1) # shouldn't be massive
+
+        with patch('htxbot.indicators.HAS_NUMPY', False):
+            vol_fallback = realized_volatility(closes, 4)
+            self.assertGreater(vol_fallback, 0.0)
+            self.assertLess(vol_fallback, 0.1)
+
+        # They should be essentially equal
+        self.assertAlmostEqual(vol_np, vol_fallback, places=6)
 
     def macro_regime_bot(self, tmp_path: Path, gold_rsi: float, btc_rsi: float) -> HtxFuturesBot:
         bot = self.make_bot(tmp_path)
