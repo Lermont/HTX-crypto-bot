@@ -19,7 +19,7 @@ import ccxt
 from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
 from htxbot.external_price import BookTicker, ExternalPriceFeed
-from htxbot.indicators import calculate_rsi
+from htxbot.indicators import calculate_rsi, compute_log_return
 from htxbot.models import PositionLifecycle
 
 
@@ -278,6 +278,22 @@ class UnifiedBotTests(unittest.TestCase):
         for module in modules:
             with self.subTest(module=module):
                 importlib.import_module(module)
+
+    def test_compute_log_return_cases(self):
+        # price_now <= 0
+        self.assertEqual(compute_log_return(0.0, 100.0), 0.0)
+        self.assertEqual(compute_log_return(-5.0, 100.0), 0.0)
+
+        # price_then <= 0
+        self.assertEqual(compute_log_return(100.0, 0.0), 0.0)
+        self.assertEqual(compute_log_return(100.0, -5.0), 0.0)
+
+        # Equal positive prices
+        self.assertEqual(compute_log_return(100.0, 100.0), 0.0)
+
+        # Normal positive prices
+        self.assertAlmostEqual(compute_log_return(110.5, 100.0), math.log(110.5 / 100.0))
+        self.assertAlmostEqual(compute_log_return(90.5, 100.0), math.log(90.5 / 100.0))
 
     def test_runtime_diagnostics_artifacts_are_not_git_tracked(self):
         repo_root = Path(__file__).resolve().parents[1]
