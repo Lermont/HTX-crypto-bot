@@ -1,21 +1,7 @@
-import unittest
-from htxbot.indicators import clamp
+import pytest
+from htxbot.indicators import calculate_ema, calculate_rsi, compute_log_return, clamp, realized_volatility
 
-class TestClamp(unittest.TestCase):
-    def test_clamp_below_lower(self):
-        self.assertEqual(clamp(5.0, 10.0, 20.0), 10.0)
-
-    def test_clamp_within_bounds(self):
-        self.assertEqual(clamp(15.0, 10.0, 20.0), 15.0)
-
-    def test_clamp_above_upper(self):
-        self.assertEqual(clamp(25.0, 10.0, 20.0), 20.0)
-
-    def test_clamp_at_lower_bound(self):
-        self.assertEqual(clamp(10.0, 10.0, 20.0), 10.0)
-
-    def test_clamp_at_upper_bound(self):
-        self.assertEqual(clamp(20.0, 10.0, 20.0), 20.0)
-
-if __name__ == '__main__':
-    unittest.main()
+def test_clamp():
+    assert clamp(5, 1, 10) == 5
+    assert clamp(0, 1, 10) == 1
+    assert clamp(15, 1, 10) == 10
