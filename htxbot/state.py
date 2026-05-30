@@ -86,7 +86,15 @@ class StateMixin:
         tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
         try:
             tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            os.replace(tmp_path, self.state_path)
+            for attempt in range(10):
+                try:
+                    os.replace(tmp_path, self.state_path)
+                    break
+                except PermissionError:
+                    if attempt < 9:
+                        time.sleep(0.1)
+                    else:
+                        raise
         except Exception:
             try:
                 tmp_path.unlink(missing_ok=True)
