@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import concurrent.futures
 import json
 import re
 import time
@@ -802,17 +803,19 @@ class ExchangeMixin:
             params["reduceOnly"] = True
         return params
 
-    def _extract_margin_mode(self, payload: dict) -> str:
-        if not isinstance(payload, dict):
+    def _extract_margin_mode(self, item: dict) -> str:
+        if not isinstance(item, dict):
             return ""
-        direct = payload.get("marginMode") or payload.get("margin_mode")
-        if direct:
-            return str(direct).lower()
-        info = payload.get("info")
+        for key in ("marginMode", "margin_mode", "margin"):
+            val = item.get(key)
+            if val is not None:
+                return str(val).lower()
+        info = item.get("info")
         if isinstance(info, dict):
-            nested = info.get("margin_mode") or info.get("marginMode")
-            if nested:
-                return str(nested).lower()
+            for key in ("margin_mode", "marginMode", "margin"):
+                val = info.get(key)
+                if val is not None:
+                    return str(val).lower()
         return ""
 
     def _ensure_cross_margin_response(self, payload: dict, context: str, symbol: str = "") -> bool:
@@ -940,8 +943,14 @@ class ExchangeMixin:
             if config.RISK.margin_mode == "cross":
                 self.exchange.set_position_mode(False, None, params=self._position_params())
             else:
-                for symbol in self.symbols:
+                def update_mode(symbol):
                     self.exchange.set_position_mode(False, symbol, params=self._position_params())
+
+                max_workers = min(10, max(1, len(self.symbols)))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(update_mode, symbol) for symbol in self.symbols]
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()
         except Exception as exc:
             if self._is_position_mode_locked_error(exc):
                 mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()

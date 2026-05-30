@@ -9,7 +9,7 @@ import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
 from typing import Sequence
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import config
 
