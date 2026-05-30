@@ -2,9 +2,23 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 import config
+
+
+@dataclass
+class SignalContext:
+    closes: List[float]
+    benchmark_closes: List[float]
+    btc_risk: dict
+    latest_ts: int
+    cache_key: str = ""
+    macro_context: Optional[dict] = None
+    macro_closes: Optional[List[float]] = None
+    macro_latest_ts: Optional[int] = None
+    pullback_closes: Optional[List[float]] = None
+    pullback_latest_ts: Optional[int] = None
 
 
 class PositionLifecycle(str, Enum):
@@ -133,4 +147,4 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
-__all__ = ["ExitLadderConfig", "ExitLadderPreflight", "PositionLifecycle", "TradeState"]
+__all__ = ["ExitLadderPreflight", "PositionLifecycle", "SignalContext", "TradeState"]
