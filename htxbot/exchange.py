@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import concurrent.futures
 import json
 import re
 import time
@@ -940,8 +941,14 @@ class ExchangeMixin:
             if config.RISK.margin_mode == "cross":
                 self.exchange.set_position_mode(False, None, params=self._position_params())
             else:
-                for symbol in self.symbols:
+                def update_mode(symbol):
                     self.exchange.set_position_mode(False, symbol, params=self._position_params())
+
+                max_workers = min(10, max(1, len(self.symbols)))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(update_mode, symbol) for symbol in self.symbols]
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()
         except Exception as exc:
             if self._is_position_mode_locked_error(exc):
                 mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()
