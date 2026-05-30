@@ -1540,6 +1540,26 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(bot._price_at_or_above(SYMBOL, 10.2), 11.0)
                 self.assertEqual(bot._price_at_or_below(SYMBOL, 10.8), 10.0)
 
+    def test_price_to_precision(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+
+            # normal conversions
+            def mock_precision_normal(symbol, price):
+                return str(round(price, 2))
+
+            bot.exchange.price_to_precision = mock_precision_normal
+            self.assertEqual(bot._price_to_precision(SYMBOL, 10.123), 10.12)
+            self.assertEqual(bot._price_to_precision(SYMBOL, 10.128), 10.13)
+
+            # test edge case where string conversion fails
+            def mock_precision_error(symbol, price):
+                return "invalid_float"
+
+            bot.exchange.price_to_precision = mock_precision_error
+            with self.assertRaises(ValueError):
+                bot._price_to_precision(SYMBOL, 10.0)
+
     def test_mock_exchange_price_and_amount_precision_helpers(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
