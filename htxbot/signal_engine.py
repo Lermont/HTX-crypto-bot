@@ -2,6 +2,7 @@
 
 import math
 import time
+import concurrent.futures
 from typing import List, Optional
 
 import config
@@ -1247,7 +1248,8 @@ class SignalMixin:
         self.signal_cache.setdefault("macro", {})["gold_btc_rsi"] = macro_context
 
         rows = {}
-        for symbol in self.symbols:
+
+        def fetch_symbol_candles(symbol):
             try:
                 candles = self._closed_candles(
                     symbol,
@@ -1256,34 +1258,13 @@ class SignalMixin:
                     timeframe=trigger_timeframe,
                 )
             except Exception as exc:
-                self._log_event(
-                    "WARNING",
-                    f"Signal candles unavailable for {symbol}: {exc}",
-                    event="signal_invalid",
-                    symbol=symbol,
-                    reason="symbol_candles_unavailable",
-                )
-                continue
+                return symbol, None, ("WARNING", f"Signal candles unavailable for {symbol}: {exc}", "signal_invalid", "symbol_candles_unavailable")
 
             if len(candles) < 2:
-                self._log_event(
-                    "DEBUG",
-                    f"Signal skipped for {symbol}: not enough closed candles",
-                    event="signal_invalid",
-                    symbol=symbol,
-                    reason="symbol_history_short",
-                )
-                continue
+                return symbol, None, ("DEBUG", f"Signal skipped for {symbol}: not enough closed candles", "signal_invalid", "symbol_history_short")
 
             if int(candles[-1][0]) != latest_ts:
-                self._log_event(
-                    "DEBUG",
-                    f"Signal skipped for {symbol}: candle is not aligned with BTC",
-                    event="signal_invalid",
-                    symbol=symbol,
-                    reason="symbol_not_aligned_with_btc",
-                )
-                continue
+                return symbol, None, ("DEBUG", f"Signal skipped for {symbol}: candle is not aligned with BTC", "signal_invalid", "symbol_not_aligned_with_btc")
 
             try:
                 if macro_timeframe == trigger_timeframe:
@@ -1307,17 +1288,35 @@ class SignalMixin:
                         timeframe=pullback_timeframe,
                     )
             except Exception as exc:
-                self._log_event(
+                return symbol, None, (
                     "WARNING",
                     f"EMA timeframe candles unavailable for {symbol}: {exc}",
-                    event="ema_signal_invalid",
-                    symbol=symbol,
-                    reason=(
-                        f"ema_timeframe_candles_unavailable;macro_tf={macro_timeframe};"
-                        f"pullback_tf={pullback_timeframe};trigger_tf={trigger_timeframe}"
-                    ),
+                    "ema_signal_invalid",
+                    f"ema_timeframe_candles_unavailable;macro_tf={macro_timeframe};pullback_tf={pullback_timeframe};trigger_tf={trigger_timeframe}"
                 )
+
+            return symbol, (candles, macro_candles, pullback_candles), None
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(self.symbols) or 1)) as executor:
+            futures = {executor.submit(fetch_symbol_candles, symbol): symbol for symbol in self.symbols}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    symbol = futures[future]
+                    self._log_event("WARNING", f"Unhandled exception fetching candles for {symbol}: {exc}", event="signal_invalid", symbol=symbol, reason="unhandled_fetch_exception")
+
+        for symbol, data, log_info in results:
+            if log_info:
+                level, msg, event, reason = log_info
+                self._log_event(level, msg, event=event, symbol=symbol, reason=reason)
                 continue
+
+            if not data:
+                continue
+
+            candles, macro_candles, pullback_candles = data
 
             if not macro_candles or not pullback_candles:
                 self._log_event(
