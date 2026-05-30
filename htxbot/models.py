@@ -30,6 +30,18 @@ class ExitLadderPreflight:
 
 
 @dataclass
+class OrderRequest:
+    symbol: str
+    order_type: str
+    side: str
+    amount: float
+    price: Optional[float] = None
+    reduce_only: bool = False
+    post_only: bool = False
+    leverage: Optional[float] = None
+
+
+@dataclass
 class TradeState:
     symbol: str = ""
     market_symbol: str = ""
@@ -120,4 +132,4 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
-__all__ = ["ExitLadderPreflight", "PositionLifecycle", "TradeState"]
+__all__ = ["ExitLadderPreflight", "OrderRequest", "PositionLifecycle", "TradeState"]
