@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 
-from .models import ExitLadderPreflight, TradeState
+from .models import ExitLadderPreflight, SellLadderParams, TradeState
 
 
 class StrategyMixin:
@@ -1691,16 +1691,18 @@ class StrategyMixin:
 
     def _place_sell_ladder(
         self,
-        symbol: str,
-        total_contracts: float,
-        avg_entry_price: float,
-        rebuild: bool,
-        closeable_contracts: Optional[float] = None,
-        mode: str = "normal",
-        exit_scope: Optional[str] = None,
-        signature_override: str = "",
-        use_trailing_exit: bool = True,
+        params: SellLadderParams
     ):
+        symbol = params.symbol
+        total_contracts = params.total_contracts
+        avg_entry_price = params.avg_entry_price
+        rebuild = params.rebuild
+        closeable_contracts = params.closeable_contracts
+        mode = params.mode
+        exit_scope = params.exit_scope
+        signature_override = params.signature_override
+        use_trailing_exit = params.use_trailing_exit
+
         state = self._get_state(symbol)
         exit_side = config.EXIT_SIDE
         exit_label = "Buy" if exit_side == "buy" else "Sell"
@@ -2159,12 +2161,14 @@ class StrategyMixin:
         state = self._get_state(symbol)
         if not self._should_use_split_exit_ladder(symbol, state, mode):
             self._place_sell_ladder(
-                symbol,
-                total_contracts,
-                avg_entry_price,
-                rebuild,
-                closeable_contracts=closeable_contracts,
-                mode=mode,
+                SellLadderParams(
+                    symbol=symbol,
+                    total_contracts=total_contracts,
+                    avg_entry_price=avg_entry_price,
+                    rebuild=rebuild,
+                    closeable_contracts=closeable_contracts,
+                    mode=mode,
+                )
             )
             return
 
@@ -2226,15 +2230,17 @@ class StrategyMixin:
 
         if base_closeable > 0:
             self._place_sell_ladder(
-                symbol,
-                base_contracts,
-                base_price,
-                rebuild,
-                closeable_contracts=base_closeable,
-                mode=mode,
-                exit_scope="base",
-                signature_override=signature,
-                use_trailing_exit=False,
+                SellLadderParams(
+                    symbol=symbol,
+                    total_contracts=base_contracts,
+                    avg_entry_price=base_price,
+                    rebuild=rebuild,
+                    closeable_contracts=base_closeable,
+                    mode=mode,
+                    exit_scope="base",
+                    signature_override=signature,
+                    use_trailing_exit=False,
+                )
             )
 
         state = self._get_state(symbol)
@@ -2294,12 +2300,14 @@ class StrategyMixin:
             )
             return
         self._place_sell_ladder(
-            symbol,
-            total_contracts,
-            avg_entry_price,
-            rebuild,
-            closeable_contracts=closeable_contracts,
-            mode=mode,
+            SellLadderParams(
+                symbol=symbol,
+                total_contracts=total_contracts,
+                avg_entry_price=avg_entry_price,
+                rebuild=rebuild,
+                closeable_contracts=closeable_contracts,
+                mode=mode,
+            )
         )
 
     def _manage_entry_orders(self, symbol: str, signal: Optional[dict], open_orders: List[dict]):
@@ -3663,12 +3671,14 @@ class StrategyMixin:
         self._save_state()
 
         self._place_sell_ladder(
-            symbol,
-            state.position_size,
-            state.entry_price,
-            rebuild=True,
-            closeable_contracts=close_contracts,
-            mode="controlled_loss_exit",
+            SellLadderParams(
+                symbol=symbol,
+                total_contracts=state.position_size,
+                avg_entry_price=state.entry_price,
+                rebuild=True,
+                closeable_contracts=close_contracts,
+                mode="controlled_loss_exit",
+            )
         )
         self._log_event(
             "WARNING",
@@ -3705,12 +3715,14 @@ class StrategyMixin:
                 self._save_state()
                 if not state.sell_ladder_orders:
                     self._place_sell_ladder(
-                        symbol,
-                        state.position_size,
-                        state.entry_price,
-                        rebuild=True,
-                        closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False),
-                        mode="urgent_time_exit",
+                        SellLadderParams(
+                            symbol=symbol,
+                            total_contracts=state.position_size,
+                            avg_entry_price=state.entry_price,
+                            rebuild=True,
+                            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False),
+                            mode="urgent_time_exit",
+                        )
                     )
                 return True
             if not state.sell_ladder_orders:
@@ -3741,12 +3753,14 @@ class StrategyMixin:
             if self._is_exit_ladder_waiting_for_closeable(symbol, "urgent_time_exit", state):
                 return True
             self._place_sell_ladder(
-                symbol,
-                state.position_size,
-                state.entry_price,
-                rebuild=True,
-                closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False),
-                mode="urgent_time_exit",
+                SellLadderParams(
+                    symbol=symbol,
+                    total_contracts=state.position_size,
+                    avg_entry_price=state.entry_price,
+                    rebuild=True,
+                    closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False),
+                    mode="urgent_time_exit",
+                )
             )
             return True
 
@@ -3767,12 +3781,14 @@ class StrategyMixin:
         if state.sell_ladder_orders:
             return True
         self._place_sell_ladder(
-            symbol,
-            state.position_size,
-            state.entry_price,
-            rebuild=True,
-            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder),
-            mode="urgent_time_exit",
+            SellLadderParams(
+                symbol=symbol,
+                total_contracts=state.position_size,
+                avg_entry_price=state.entry_price,
+                rebuild=True,
+                closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder),
+                mode="urgent_time_exit",
+            )
         )
         self._log_event(
             "WARNING",
@@ -3826,12 +3842,14 @@ class StrategyMixin:
             return True
 
         self._place_sell_ladder(
-            symbol,
-            state.position_size,
-            state.entry_price,
-            rebuild=True,
-            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=True),
-            mode=mode,
+            SellLadderParams(
+                symbol=symbol,
+                total_contracts=state.position_size,
+                avg_entry_price=state.entry_price,
+                rebuild=True,
+                closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=True),
+                mode=mode,
+            )
         )
         return True
 
@@ -4624,12 +4642,14 @@ class StrategyMixin:
             if self._is_exit_ladder_waiting_for_closeable(symbol, "breakeven", state):
                 return True
             self._place_sell_ladder(
-                symbol,
-                state.position_size,
-                state.entry_price,
-                rebuild=True,
-                closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False),
-                mode="breakeven",
+                SellLadderParams(
+                    symbol=symbol,
+                    total_contracts=state.position_size,
+                    avg_entry_price=state.entry_price,
+                    rebuild=True,
+                    closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False),
+                    mode="breakeven",
+                )
             )
             return True
 
@@ -4655,12 +4675,14 @@ class StrategyMixin:
         if state.sell_ladder_orders:
             return True
         self._place_sell_ladder(
-            symbol,
-            state.position_size,
-            state.entry_price,
-            rebuild=True,
-            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder),
-            mode="breakeven",
+            SellLadderParams(
+                symbol=symbol,
+                total_contracts=state.position_size,
+                avg_entry_price=state.entry_price,
+                rebuild=True,
+                closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder),
+                mode="breakeven",
+            )
         )
         self._log_event(
             "INFO",

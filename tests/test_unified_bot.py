@@ -20,7 +20,7 @@ from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
 from htxbot.external_price import BookTicker, ExternalPriceFeed
 from htxbot.indicators import calculate_rsi
-from htxbot.models import PositionLifecycle
+from htxbot.models import PositionLifecycle, SellLadderParams
 
 
 SYMBOL = "TEST/USDT:USDT"
@@ -763,12 +763,14 @@ class UnifiedBotTests(unittest.TestCase):
                 bot.exchange.create_order = fail_create_order
 
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=5.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=5.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=5.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=5.0,
+                        mode="normal",
+                    )
                 )
 
                 combined_text = (
@@ -1256,7 +1258,7 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.initial_entry_notional = 10000.0
 
-                bot._place_sell_ladder(SYMBOL, 100.0, 100.0, rebuild=False, closeable_contracts=100.0, mode="normal")
+                bot._place_sell_ladder(SellLadderParams(symbol=SYMBOL, total_contracts=100.0, avg_entry_price=100.0, rebuild=False, closeable_contracts=100.0, mode="normal"))
 
                 self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [40.0, 30.0, 20.0])
                 self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.5, 101.0, 102.0])
@@ -1275,7 +1277,7 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.initial_entry_notional = 10000.0
 
-                bot._place_sell_ladder(SYMBOL, 100.0, 100.0, rebuild=False, closeable_contracts=100.0, mode="normal")
+                bot._place_sell_ladder(SellLadderParams(symbol=SYMBOL, total_contracts=100.0, avg_entry_price=100.0, rebuild=False, closeable_contracts=100.0, mode="normal"))
 
                 self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 25.0, 15.0])
                 self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8, 101.6, 103.0, 105.0])
@@ -1722,12 +1724,14 @@ class UnifiedBotTests(unittest.TestCase):
                 state.initial_entry_notional = 10000.0
 
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=100.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=100.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
                 )
 
                 self.assertEqual(len(bot.exchange.created_orders), 1)
@@ -1751,23 +1755,27 @@ class UnifiedBotTests(unittest.TestCase):
                 state.initial_entry_notional = 500.0
 
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=10.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=10.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=10.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=10.0,
+                        mode="normal",
+                    )
                 )
 
                 self.assertLessEqual(sum(order["amount"] for order in bot.exchange.created_orders), 5.0)
                 created_before_duplicate = len(bot.exchange.created_orders)
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=5.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=5.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=5.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=5.0,
+                        mode="normal",
+                    )
                 )
 
                 self.assertEqual(len(bot.exchange.created_orders), created_before_duplicate)
@@ -1864,12 +1872,14 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 150.0
                 state.position_available = 150.0
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=150.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=150.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=150.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=150.0,
+                        mode="normal",
+                    )
                 )
                 self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.4, 101.0, 102.0, 103.5])
                 self.assertEqual(state.exit_runner_contracts, 0.0)
@@ -1880,12 +1890,14 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 200.0
                 state.position_available = 200.0
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=200.0,
-                    avg_entry_price=100.0,
-                    rebuild=True,
-                    closeable_contracts=200.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=200.0,
+                        avg_entry_price=100.0,
+                        rebuild=True,
+                        closeable_contracts=200.0,
+                        mode="normal",
+                    )
                 )
                 self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.3, 100.8, 101.5])
 
@@ -1903,12 +1915,14 @@ class UnifiedBotTests(unittest.TestCase):
                 state.cycle_opened_at = time.time() - 6.1 * 60.0 * 60.0
 
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=100.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=100.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
                 )
 
                 self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 40.0])
@@ -1927,12 +1941,14 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.initial_entry_notional = 10000.0
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=100.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=100.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
                 )
                 self.assertEqual(state.exit_runner_contracts, 65.0)
 
