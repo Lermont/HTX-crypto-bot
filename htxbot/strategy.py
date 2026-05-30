@@ -3237,14 +3237,15 @@ class StrategyMixin:
         if not self._external_price_settings_enabled():
             return remember({"valid": False, "stale": True, "reason": "disabled", "symbol": symbol})
         try:
-            ticker = self.exchange.fetch_ticker(symbol)
+            tickers = self._bulk_tickers_by_symbol()
+            ticker = tickers.get(symbol) if tickers else None
+            if not ticker:
+                ticker = self.exchange.fetch_ticker(symbol)
             market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
             context = self.external_price_feed.get_context(symbol, ticker, market=market)
         except Exception as exc:
             context = {"valid": False, "stale": True, "reason": f"external_price_error:{exc}", "symbol": symbol}
-            cache[symbol] = dict(context)
-            return context
-            return remember({"valid": False, "stale": True, "reason": f"external_price_error:{exc}", "symbol": symbol})
+            return remember(context)
         if not isinstance(context, dict):
             return remember({"valid": False, "stale": True, "reason": "external_price_context_invalid", "symbol": symbol})
         try:
