@@ -4435,6 +4435,7 @@ class UnifiedBotTests(unittest.TestCase):
                 profile = config.resolve_profile(name)
                 return replace(
                     profile,
+                    api_credentials=replace(profile.api_credentials, api_key="test_key", api_secret="test_secret"),
                     runtime=replace(
                         profile.runtime,
                         state_file=str(tmp_path / f"{name}_state.json"),
