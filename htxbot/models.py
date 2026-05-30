@@ -19,6 +19,19 @@ class PositionLifecycle(str, Enum):
 
 
 @dataclass
+class ExitLadderConfig:
+    symbol: str
+    total_contracts: float
+    avg_entry_price: float
+    rebuild: bool
+    closeable_contracts: Optional[float] = None
+    mode: str = "normal"
+    exit_scope: Optional[str] = None
+    signature_override: str = ""
+    use_trailing_exit: bool = True
+
+
+@dataclass
 class ExitLadderPreflight:
     ok: bool
     requested_contracts: float
@@ -120,4 +133,4 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
-__all__ = ["ExitLadderPreflight", "PositionLifecycle", "TradeState"]
+__all__ = ["ExitLadderConfig", "ExitLadderPreflight", "PositionLifecycle", "TradeState"]
