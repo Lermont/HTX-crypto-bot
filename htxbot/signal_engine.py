@@ -2,11 +2,13 @@
 
 import math
 import time
+import concurrent.futures
 from typing import List, Optional
 
 import config
 
 from .indicators import calculate_ema, calculate_rsi, clamp, compute_log_return, realized_volatility
+from .models import SignalContext
 
 
 class SignalMixin:
@@ -858,17 +860,19 @@ class SignalMixin:
 
     def _build_signal_from_closes(
         self,
-        closes: List[float],
-        benchmark_closes: List[float],
-        btc_risk: dict,
-        latest_ts: int,
-        cache_key: str = "",
-        macro_context: Optional[dict] = None,
-        macro_closes: Optional[List[float]] = None,
-        macro_latest_ts: Optional[int] = None,
-        pullback_closes: Optional[List[float]] = None,
-        pullback_latest_ts: Optional[int] = None,
+        ctx: SignalContext,
     ) -> Optional[dict]:
+        closes = ctx.closes
+        benchmark_closes = ctx.benchmark_closes
+        btc_risk = ctx.btc_risk
+        latest_ts = ctx.latest_ts
+        cache_key = ctx.cache_key
+        macro_context = ctx.macro_context
+        macro_closes = ctx.macro_closes
+        macro_latest_ts = ctx.macro_latest_ts
+        pullback_closes = ctx.pullback_closes
+        pullback_latest_ts = ctx.pullback_latest_ts
+
         if not closes or not benchmark_closes:
             return None
 
@@ -1247,7 +1251,8 @@ class SignalMixin:
         self.signal_cache.setdefault("macro", {})["gold_btc_rsi"] = macro_context
 
         rows = {}
-        for symbol in self.symbols:
+
+        def fetch_symbol_candles(symbol):
             try:
                 candles = self._closed_candles(
                     symbol,
@@ -1256,34 +1261,13 @@ class SignalMixin:
                     timeframe=trigger_timeframe,
                 )
             except Exception as exc:
-                self._log_event(
-                    "WARNING",
-                    f"Signal candles unavailable for {symbol}: {exc}",
-                    event="signal_invalid",
-                    symbol=symbol,
-                    reason="symbol_candles_unavailable",
-                )
-                continue
+                return symbol, None, ("WARNING", f"Signal candles unavailable for {symbol}: {exc}", "signal_invalid", "symbol_candles_unavailable")
 
             if len(candles) < 2:
-                self._log_event(
-                    "DEBUG",
-                    f"Signal skipped for {symbol}: not enough closed candles",
-                    event="signal_invalid",
-                    symbol=symbol,
-                    reason="symbol_history_short",
-                )
-                continue
+                return symbol, None, ("DEBUG", f"Signal skipped for {symbol}: not enough closed candles", "signal_invalid", "symbol_history_short")
 
             if int(candles[-1][0]) != latest_ts:
-                self._log_event(
-                    "DEBUG",
-                    f"Signal skipped for {symbol}: candle is not aligned with BTC",
-                    event="signal_invalid",
-                    symbol=symbol,
-                    reason="symbol_not_aligned_with_btc",
-                )
-                continue
+                return symbol, None, ("DEBUG", f"Signal skipped for {symbol}: candle is not aligned with BTC", "signal_invalid", "symbol_not_aligned_with_btc")
 
             try:
                 if macro_timeframe == trigger_timeframe:
@@ -1307,17 +1291,35 @@ class SignalMixin:
                         timeframe=pullback_timeframe,
                     )
             except Exception as exc:
-                self._log_event(
+                return symbol, None, (
                     "WARNING",
                     f"EMA timeframe candles unavailable for {symbol}: {exc}",
-                    event="ema_signal_invalid",
-                    symbol=symbol,
-                    reason=(
-                        f"ema_timeframe_candles_unavailable;macro_tf={macro_timeframe};"
-                        f"pullback_tf={pullback_timeframe};trigger_tf={trigger_timeframe}"
-                    ),
+                    "ema_signal_invalid",
+                    f"ema_timeframe_candles_unavailable;macro_tf={macro_timeframe};pullback_tf={pullback_timeframe};trigger_tf={trigger_timeframe}"
                 )
+
+            return symbol, (candles, macro_candles, pullback_candles), None
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(self.symbols) or 1)) as executor:
+            futures = {executor.submit(fetch_symbol_candles, symbol): symbol for symbol in self.symbols}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    symbol = futures[future]
+                    self._log_event("WARNING", f"Unhandled exception fetching candles for {symbol}: {exc}", event="signal_invalid", symbol=symbol, reason="unhandled_fetch_exception")
+
+        for symbol, data, log_info in results:
+            if log_info:
+                level, msg, event, reason = log_info
+                self._log_event(level, msg, event=event, symbol=symbol, reason=reason)
                 continue
+
+            if not data:
+                continue
+
+            candles, macro_candles, pullback_candles = data
 
             if not macro_candles or not pullback_candles:
                 self._log_event(
@@ -1335,11 +1337,12 @@ class SignalMixin:
             closes = [self._safe_float(row[4]) for row in candles]
             macro_closes = [self._safe_float(row[4]) for row in macro_candles]
             pullback_closes = [self._safe_float(row[4]) for row in pullback_candles]
-            signal = self._build_signal_from_closes(
-                closes,
-                benchmark_closes,
-                btc_risk,
-                latest_ts,
+
+            ctx = SignalContext(
+                closes=closes,
+                benchmark_closes=benchmark_closes,
+                btc_risk=btc_risk,
+                latest_ts=latest_ts,
                 cache_key=symbol,
                 macro_context=macro_context,
                 macro_closes=macro_closes,
@@ -1347,6 +1350,7 @@ class SignalMixin:
                 pullback_closes=pullback_closes,
                 pullback_latest_ts=int(pullback_candles[-1][0]),
             )
+            signal = self._build_signal_from_closes(ctx)
             if not signal:
                 self._log_event(
                     "DEBUG",

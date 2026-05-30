@@ -268,6 +268,9 @@ class StateMixin:
         except (TypeError, ValueError):
             return float(default)
 
+    def _runtime_dry_run(self) -> bool:
+        return bool(getattr(config.RUNTIME, "dry_run", False))
+
     def _log_reserved_by_other_profile(self, symbol: str, side: str = "", amount: float = 0.0):
         now = time.time()
         key = (symbol, side)

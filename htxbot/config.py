@@ -670,10 +670,10 @@ def _validate_profile(profile: "BotProfile") -> None:
             f"{profile.name}: live max_total_notional_fraction="
             f"{profile.risk.max_total_notional_fraction:.4f} is above the conservative 0.5000 launch cap"
         )
-    if profile.strategy.ema_max_averaging_stages > 2:
+    if profile.strategy.ema_max_averaging_stages > 4:
         _add_config_warning(
             f"{profile.name}: live ema_max_averaging_stages="
-            f"{profile.strategy.ema_max_averaging_stages} is above the conservative launch cap of 2"
+            f"{profile.strategy.ema_max_averaging_stages} is above the conservative launch cap of 4"
         )
 
 
@@ -802,7 +802,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         profile=name,
     )
     ema_averaging_power = _env_float("EMA_AVERAGING_POWER", 1.0, profile=name)
-    ema_max_averaging_stages = _env_int("EMA_MAX_AVERAGING_STAGES", 2, profile=name)
+    ema_max_averaging_stages = _env_int("EMA_MAX_AVERAGING_STAGES", 4, profile=name)
     averaging_stage_count = max(0, ema_max_averaging_stages)
     strategy = StrategySettings(
         ema_strategy_enabled=_env_bool("EMA_STRATEGY_ENABLED", True, profile=name),
