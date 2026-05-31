@@ -57,15 +57,16 @@ class ExitLadderPreflight:
 
 
 @dataclass
-class OrderRequest:
+class SellLadderParams:
     symbol: str
-    order_type: str
-    side: str
-    amount: float
-    price: Optional[float] = None
-    reduce_only: bool = False
-    post_only: bool = False
-    leverage: Optional[float] = None
+    total_contracts: float
+    avg_entry_price: float
+    rebuild: bool
+    closeable_contracts: Optional[float] = None
+    mode: str = "normal"
+    exit_scope: Optional[str] = None
+    signature_override: str = ""
+    use_trailing_exit: bool = True
 
 
 @dataclass
@@ -159,4 +160,11 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
-__all__ = ["ExitLadderPreflight", "PositionLifecycle", "SignalContext", "TradeState"]
+__all__ = [
+    "ExitLadderConfig",
+    "ExitLadderPreflight",
+    "PositionLifecycle",
+    "SellLadderParams",
+    "SignalContext",
+    "TradeState",
+]

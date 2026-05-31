@@ -20,8 +20,8 @@ from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
 from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
-from htxbot.indicators import calculate_rsi, realized_volatility
-from htxbot.models import PositionLifecycle
+from htxbot.indicators import calculate_rsi, compute_log_return, realized_volatility
+from htxbot.models import PositionLifecycle, SellLadderParams
 
 
 SYMBOL = "TEST/USDT:USDT"
@@ -121,6 +121,8 @@ class FakeExchange:
         self.set_position_mode_calls = []
         self.set_position_mode_error = None
         self.ticker = {"bid": 9.9, "ask": 10.1, "last": 10.0}
+        self.balance_free = 1000.0
+        self.balance_total = 1000.0
 
     def market(self, symbol):
         return self.markets[symbol]
@@ -139,6 +141,23 @@ class FakeExchange:
 
     def fetch_ticker(self, symbol):
         return dict(self.ticker)
+
+    def fetch_balance(self, params=None):
+        quote = config.EXCHANGE.quote_currency
+        return {
+            "free": {quote: self.balance_free},
+            "total": {quote: self.balance_total},
+            "info": {
+                "data": [
+                    {
+                        "margin_asset": quote,
+                        "margin_mode": config.RISK.margin_mode,
+                        "margin_available": self.balance_free,
+                        "margin_balance": self.balance_total,
+                    }
+                ]
+            },
+        }
 
     def cancel_order(self, order_id, symbol, params=None):
         if str(order_id) in self.cancel_fail_ids:
@@ -499,7 +518,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_live_state_save_is_atomic_and_loadable(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -511,6 +530,52 @@ class UnifiedBotTests(unittest.TestCase):
                 payload = json.loads(bot.state_path.read_text(encoding="utf-8"))
                 self.assertEqual(payload[SYMBOL]["position_size"], 2.0)
                 self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
+
+    def test_state_save_retries_transient_permission_error(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            state.position_size = 2.0
+            state.entry_price = 10.0
+            real_replace = os.replace
+            calls = {"count": 0}
+
+            def flaky_replace(src, dst):
+                calls["count"] += 1
+                if calls["count"] < 3:
+                    raise PermissionError("temporary lock")
+                return real_replace(src, dst)
+
+            with patch("htxbot.state.os.replace", side_effect=flaky_replace):
+                bot._save_state()
+
+            payload = json.loads(bot.state_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload[SYMBOL]["position_size"], 2.0)
+            self.assertEqual(calls["count"], 3)
+            self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
+
+    def test_one_way_order_and_cancel_use_exchange_order_endpoints(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+
+            order = bot._create_one_way_order(
+                symbol=SYMBOL,
+                order_type="limit",
+                side=config.ENTRY_SIDE,
+                amount=1.0,
+                price=10.0,
+                post_only=True,
+            )
+            canceled = bot._cancel_order_ref(
+                SYMBOL,
+                {"id": order["id"], "side": config.ENTRY_SIDE, "price": 10.0, "amount": 1.0},
+                event="entry_order_canceled",
+                reason="test_cancel",
+            )
+
+            self.assertEqual(bot.exchange.create_order_calls, 1)
+            self.assertTrue(canceled)
+            self.assertEqual(bot.exchange.canceled_orders, [(order["id"], SYMBOL, {"marginMode": config.RISK.margin_mode})])
 
     def test_runtime_lock_replaces_stale_lock_and_releases(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -526,7 +591,7 @@ class UnifiedBotTests(unittest.TestCase):
     def test_legacy_state_load_repairs_long_profile_defaults_and_cost_basis(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             risk = replace(config.RISK, leverage=7, margin_mode="cross")
-            with override_config(RISK=risk, RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RISK=risk, RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.state_path.write_text(
                     json.dumps(
@@ -558,7 +623,7 @@ class UnifiedBotTests(unittest.TestCase):
     def test_legacy_state_load_repairs_short_profile_defaults_and_cost_basis(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             risk = replace(config.RISK, leverage=5, margin_mode="cross")
-            with override_config(RISK=risk, RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RISK=risk, RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.state_path.write_text(
                     json.dumps(
@@ -590,7 +655,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_trade_state_serialization_keeps_pending_exit_ladder_metadata(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 2.0
@@ -758,7 +823,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_reduce_only_closeable_rejection_logs_redacted_exception_details(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -780,12 +845,14 @@ class UnifiedBotTests(unittest.TestCase):
                 bot.exchange.create_order = fail_create_order
 
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=5.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=5.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=5.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=5.0,
+                        mode="normal",
+                    )
                 )
 
                 combined_text = (
@@ -1009,7 +1076,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_external_price_long_premium_blocks_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(self.external_context(spread_bps=25.0))
@@ -1024,7 +1091,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_external_price_short_discount_blocks_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(self.external_context(spread_bps=-25.0))
@@ -1067,9 +1134,11 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(rows[-1]["external_valid"], "1")
 
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run_equity=0.0)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.balance_free = 0.0
+                bot.exchange.balance_total = 0.0
 
                 bot._maybe_place_initial_buy(SYMBOL, self.entry_signal(ts=1002))
 
@@ -1080,7 +1149,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_external_price_stale_is_ignored_by_default_for_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(self.external_context(valid=False, stale=True, reason="stale"))
@@ -1092,7 +1161,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_external_price_invalid_fresh_context_blocks_entry_by_default(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
@@ -1109,7 +1178,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_external_price_disable_stale_reference_blocks_entry_even_when_ignore_is_true(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             settings = replace(
                 config.EXTERNAL_PRICE_FEED,
                 disable_trading_if_reference_stale=True,
@@ -1134,7 +1203,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_pending_entry_keeps_external_impulse_bonus_during_signal_revalidation(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             strategy = replace(config.STRATEGY, entry_min_score=0.03)
             settings = replace(
                 config.EXTERNAL_PRICE_FEED,
@@ -1163,13 +1232,17 @@ class UnifiedBotTests(unittest.TestCase):
                 ]
                 signal = self.entry_signal(score=0.015)
 
-                bot._manage_entry_orders(SYMBOL, signal, open_orders=[])
+                bot._manage_entry_orders(
+                    SYMBOL,
+                    signal,
+                    open_orders=[{"id": "pending_entry", "symbol": SYMBOL, "side": config.ENTRY_SIDE, "amount": 1.0, "remaining": 1.0}],
+                )
 
                 self.assertEqual([order["id"] for order in state.entry_orders], ["pending_entry"])
 
     def test_external_price_divergence_sets_entry_cooldown(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
@@ -1180,7 +1253,7 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._maybe_place_initial_buy(SYMBOL, signal)
 
                 state = bot._get_state(SYMBOL)
-                self.assertTrue(state.entry_orders)
+                self.assertFalse(state.entry_orders)
                 self.assertGreater(state.cooldown_until, time.time())
 
     def test_external_price_context_is_cached_within_cycle(self):
@@ -1201,7 +1274,7 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(len(feed.calls), 2)
     def test_external_price_directional_1m_blocks_adverse_long_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
@@ -1241,7 +1314,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_external_price_directional_1m_blocks_adverse_short_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
@@ -1257,7 +1330,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_pending_entry_is_canceled_when_directional_1m_turns_adverse(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
@@ -1280,7 +1353,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_external_price_favorable_premium_tightens_long_exit_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             external = replace(config.EXTERNAL_PRICE_FEED, exit_adjustment_enabled=True)
             with override_config(RUNTIME=runtime, EXTERNAL_PRICE_FEED=external):
                 bot = self.make_bot(Path(raw_tmp))
@@ -1291,7 +1364,7 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.initial_entry_notional = 10000.0
 
-                bot._place_sell_ladder(SYMBOL, 100.0, 100.0, rebuild=False, closeable_contracts=100.0, mode="normal")
+                bot._place_sell_ladder(SellLadderParams(symbol=SYMBOL, total_contracts=100.0, avg_entry_price=100.0, rebuild=False, closeable_contracts=100.0, mode="normal"))
 
                 self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [40.0, 30.0, 20.0])
                 self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.5, 101.0, 102.0])
@@ -1300,7 +1373,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_external_price_stale_keeps_normal_exit_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(self.external_context(valid=False, stale=True, spread_bps=25.0))
@@ -1310,7 +1383,7 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.initial_entry_notional = 10000.0
 
-                bot._place_sell_ladder(SYMBOL, 100.0, 100.0, rebuild=False, closeable_contracts=100.0, mode="normal")
+                bot._place_sell_ladder(SellLadderParams(symbol=SYMBOL, total_contracts=100.0, avg_entry_price=100.0, rebuild=False, closeable_contracts=100.0, mode="normal"))
 
                 self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 25.0, 15.0])
                 self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8, 101.6, 103.0, 105.0])
@@ -1414,7 +1487,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_macro_disable_averaging_blocks_average_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -1438,7 +1511,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_macro_gold_symbol_is_not_added_to_entry_universe(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             macro = replace(config.MACRO, gold_cache_ttl_sec=0, gold_min_candles=20)
             with override_config(RUNTIME=runtime, MACRO=macro, COINS=("test",)):
                 bot = self.make_bot(Path(raw_tmp))
@@ -1475,7 +1548,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_cancel_all_orders_keeps_state_when_one_cancel_fails(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 buy_ref = {"id": "buy_1", "side": "buy", "price": 99.0, "amount": 2.0}
@@ -1491,7 +1564,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_frozen_recovery_is_disabled_for_ema_strategy(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -1517,13 +1590,13 @@ class UnifiedBotTests(unittest.TestCase):
                     },
                 )
 
-                self.assertTrue(state.entry_orders)
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.frozen_recovery_buys, 0)
                 self.assertTrue(state.frozen_no_more_buys)
 
     def test_entry_ladder_prices_round_away_from_crossing_book(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=True)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot._place_buy_ladder(
                     SYMBOL,
@@ -1537,7 +1610,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertLessEqual(bot._get_state(SYMBOL).entry_orders[0]["price"], raw_long_price)
 
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=True)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot._place_buy_ladder(
                     SYMBOL,
@@ -1554,7 +1627,7 @@ class UnifiedBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             with override_config(
                 BUYING=replace(config.BUYING, ladder_offsets=(0.0, 0.01)),
-                RUNTIME=replace(config.RUNTIME, dry_run=True),
+                RUNTIME=config.RUNTIME,
             ):
                 bot = self.make_bot(Path(raw_tmp))
                 bot._place_buy_ladder(
@@ -1572,7 +1645,7 @@ class UnifiedBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             with override_config(
                 BUYING=replace(config.BUYING, ladder_offsets=(0.0, 0.01)),
-                RUNTIME=replace(config.RUNTIME, dry_run=True),
+                RUNTIME=config.RUNTIME,
             ):
                 bot = self.make_bot(Path(raw_tmp))
                 bot._place_buy_ladder(
@@ -1589,7 +1662,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_decimal_places_zero_price_precision_rounds_away_from_crossing_book(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=True)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 market = {**MARKET, "precision": {"price": 0}}
                 bot.exchange.markets[SYMBOL] = market
@@ -1676,7 +1749,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_entry_ladder_uses_manual_account_leverage_not_sizing_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, post_only_enabled=False)
+            runtime = replace(config.RUNTIME, post_only_enabled=False)
             risk = replace(config.RISK, leverage=30, account_leverage=0)
             buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
@@ -1695,15 +1768,15 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 order = bot.exchange.created_orders[0]
                 self.assertEqual(order["params"]["leverRate"], 50)
-                self.assertEqual(order["amount"], 30.0)
+                self.assertEqual(order["amount"], 50.0)
                 state_order = bot._get_state(SYMBOL).entry_orders[0]
                 self.assertEqual(state_order["leverage"], 50.0)
-                self.assertEqual(state_order["sizing_leverage"], 30.0)
-                self.assertEqual(state_order["amount"], 30.0)
+                self.assertEqual(state_order["sizing_leverage"], 50.0)
+                self.assertEqual(state_order["amount"], 50.0)
 
     def test_entry_ladder_caps_sizing_to_lower_manual_account_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
-            runtime = replace(config.RUNTIME, dry_run=False, post_only_enabled=False)
+            runtime = replace(config.RUNTIME, post_only_enabled=False)
             risk = replace(config.RISK, leverage=30, account_leverage=0)
             buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
@@ -1756,12 +1829,12 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(profile.risk.tiny_entry_max_notional, 12.0)
 
     def test_profile_reads_global_htxbot_env_prefix(self):
-        env_keys = ("DRY_RUN", "HTXBOT_DRY_RUN", "ALIAS_DRY_RUN", "HTXBOT_ALIAS_DRY_RUN")
+        env_keys = ("POLL_INTERVAL_SEC", "HTXBOT_POLL_INTERVAL_SEC", "ALIAS_POLL_INTERVAL_SEC", "HTXBOT_ALIAS_POLL_INTERVAL_SEC")
         previous = {key: os.environ.get(key) for key in env_keys}
         try:
             for key in env_keys:
                 os.environ.pop(key, None)
-            os.environ["HTXBOT_DRY_RUN"] = "false"
+            os.environ["HTXBOT_POLL_INTERVAL_SEC"] = "17"
             profile = config._make_profile("alias", "long", ("test",))
         finally:
             for key, value in previous.items():
@@ -1770,11 +1843,11 @@ class UnifiedBotTests(unittest.TestCase):
                 else:
                     os.environ[key] = value
 
-        self.assertFalse(profile.runtime.dry_run)
+        self.assertEqual(profile.runtime.poll_interval_sec, 17)
 
     def test_entry_ladder_does_not_retry_with_lower_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, post_only_enabled=False)
+            runtime = replace(config.RUNTIME, post_only_enabled=False)
             risk = replace(config.RISK, leverage=30, account_leverage=50)
             buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
@@ -1795,10 +1868,12 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_normal_exit_ladder_uses_fixed_take_profit_and_trailing_runner(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.balance_free = 10000.0
+                bot.exchange.balance_total = 10000.0
                 state = bot._get_state(SYMBOL)
                 state.position_size = 100.0
                 state.position_available = 100.0
@@ -1806,12 +1881,14 @@ class UnifiedBotTests(unittest.TestCase):
                 state.initial_entry_notional = 10000.0
 
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=100.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=100.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
                 )
 
                 self.assertEqual(len(bot.exchange.created_orders), 1)
@@ -1825,7 +1902,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_exit_ladder_preflight_caps_to_position_and_blocks_duplicate_tracked_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -1835,23 +1912,27 @@ class UnifiedBotTests(unittest.TestCase):
                 state.initial_entry_notional = 500.0
 
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=10.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=10.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=10.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=10.0,
+                        mode="normal",
+                    )
                 )
 
                 self.assertLessEqual(sum(order["amount"] for order in bot.exchange.created_orders), 5.0)
                 created_before_duplicate = len(bot.exchange.created_orders)
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=5.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=5.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=5.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=5.0,
+                        mode="normal",
+                    )
                 )
 
                 self.assertEqual(len(bot.exchange.created_orders), created_before_duplicate)
@@ -1859,7 +1940,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_split_exit_keeps_base_ladder_on_base_average_and_adds_recovery(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -1887,7 +1968,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_average_recovery_fill_reduces_only_average_bucket(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -1938,7 +2019,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_exit_ladder_switches_to_medium_and_heavy_by_position_ratio(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -1948,12 +2029,14 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 150.0
                 state.position_available = 150.0
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=150.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=150.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=150.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=150.0,
+                        mode="normal",
+                    )
                 )
                 self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.4, 101.0, 102.0, 103.5])
                 self.assertEqual(state.exit_runner_contracts, 0.0)
@@ -1964,18 +2047,20 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 200.0
                 state.position_available = 200.0
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=200.0,
-                    avg_entry_price=100.0,
-                    rebuild=True,
-                    closeable_contracts=200.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=200.0,
+                        avg_entry_price=100.0,
+                        rebuild=True,
+                        closeable_contracts=200.0,
+                        mode="normal",
+                    )
                 )
                 self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.3, 100.8, 101.5])
 
     def test_exit_ladder_time_decay_removes_runner_after_six_hours(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -1987,12 +2072,14 @@ class UnifiedBotTests(unittest.TestCase):
                 state.cycle_opened_at = time.time() - 6.1 * 60.0 * 60.0
 
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=100.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=100.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
                 )
 
                 self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 40.0])
@@ -2001,7 +2088,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_normal_runner_closes_on_trailing_pullback(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -2011,12 +2098,14 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.initial_entry_notional = 10000.0
                 bot._place_sell_ladder(
-                    SYMBOL,
-                    total_contracts=100.0,
-                    avg_entry_price=100.0,
-                    rebuild=False,
-                    closeable_contracts=100.0,
-                    mode="normal",
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
                 )
                 self.assertEqual(state.exit_runner_contracts, 65.0)
 
@@ -2040,7 +2129,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_entry_expansion_orders_are_canceled_by_ema_entry_check(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=True)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.entry_orders = [
@@ -2070,13 +2159,13 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._manage_entry_orders(SYMBOL, signal, [])
 
-                self.assertTrue(state.entry_orders)
+                self.assertFalse(state.entry_orders)
                 bot.signal_cache["benchmark_ok"] = False
                 self.assertFalse(bot._is_entry_expansion_signal_valid(signal))
 
     def test_tiny_partial_entry_timeout_closes_market_reduce_only(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True, order_timeout_sec=1)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True, order_timeout_sec=1)
             risk = replace(
                 config.RISK,
                 dust_position_notional=1.0,
@@ -2112,7 +2201,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._manage_entry_orders(SYMBOL, self.entry_signal(ts=2000), [])
 
-                self.assertTrue(state.entry_orders)
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 order = bot.exchange.created_orders[0]
@@ -2125,7 +2214,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_dust_close_waits_when_closeable_amount_is_frozen(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             risk = replace(config.RISK, dust_position_notional=100.0, dust_close_enabled=True)
             with override_config(RUNTIME=runtime, RISK=risk):
                 bot = self.make_bot(Path(raw_tmp))
@@ -2144,7 +2233,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_dust_close_caps_market_order_to_visible_closeable_amount(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             risk = replace(config.RISK, dust_position_notional=100.0, dust_close_enabled=True)
             with override_config(RUNTIME=runtime, RISK=risk):
                 bot = self.make_bot(Path(raw_tmp))
@@ -2462,7 +2551,7 @@ class UnifiedBotTests(unittest.TestCase):
     def test_risk_budget_applies_volatility_budget_multiplier(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             buying = replace(config.BUYING, position_budget_fraction=0.02)
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0), BUYING=buying):
+            with override_config(RUNTIME=config.RUNTIME, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
 
@@ -2494,7 +2583,7 @@ class UnifiedBotTests(unittest.TestCase):
                 max_total_notional_fraction=0.50,
                 max_position_notional_fraction=1.0,
             )
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             buying = replace(config.BUYING, position_budget_fraction=0.02)
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp) / "long")
@@ -2522,7 +2611,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ema_averaging_places_power_sized_entry_after_drawdown(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             strategy = replace(
                 config.STRATEGY,
                 ema_averaging_interval_hours=8.0,
@@ -2533,6 +2622,8 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.balance_free = 10000.0
+                bot.exchange.balance_total = 10000.0
                 state = bot._get_state(SYMBOL)
                 state.position_size = 20.0
                 state.position_available = 20.0
@@ -2553,7 +2644,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_short_averaging_triggers_immediately_on_signal(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             strategy = replace(
                 config.STRATEGY,
                 ema_averaging_interval_hours=0.0,
@@ -2576,7 +2667,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ema_averaging_is_blocked_by_adverse_external_directional_1m(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             strategy = replace(config.STRATEGY, ema_averaging_interval_hours=0.0)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -2600,7 +2691,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ema_averaging_uses_add_signal_even_if_full_entry_invalid(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             strategy = replace(config.STRATEGY, ema_averaging_interval_hours=0.0)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -2620,7 +2711,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_active_averaging_order_survives_when_add_signal_remains_valid(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -2641,14 +2732,18 @@ class UnifiedBotTests(unittest.TestCase):
                 signal["entry_valid"] = False
                 signal["add_valid"] = True
 
-                bot._manage_entry_orders(SYMBOL, signal, open_orders=[])
+                bot._manage_entry_orders(
+                    SYMBOL,
+                    signal,
+                    open_orders=[{"id": "avg_1", "symbol": SYMBOL, "side": config.ENTRY_SIDE, "amount": 5.0, "remaining": 5.0}],
+                )
 
                 self.assertEqual(len(state.entry_orders), 1)
                 self.assertEqual(state.entry_orders[0]["id"], "avg_1")
 
     def test_active_averaging_order_is_canceled_when_add_signal_breaks(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True)
+            runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -2675,7 +2770,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ema_averaging_stage_thresholds_and_max_stage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             strategy = replace(
                 config.STRATEGY,
                 ema_averaging_interval_hours=0.0,
@@ -2713,7 +2808,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ema_averaging_position_fraction_uses_current_notional(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=10000.0)
+            runtime = config.RUNTIME
             strategy = replace(
                 config.STRATEGY,
                 ema_averaging_base_fraction=0.45,
@@ -2721,6 +2816,8 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.balance_free = 10000.0
+                bot.exchange.balance_total = 10000.0
                 state = bot._get_state(SYMBOL)
                 state.position_size = 200.0
                 state.position_available = 200.0
@@ -2738,7 +2835,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ema_averaging_is_blocked_after_breakeven(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 20.0
@@ -2753,12 +2850,12 @@ class UnifiedBotTests(unittest.TestCase):
                     {"valid": True, "add_valid": True, "macro_valid": True, "ts": 1000},
                 )
 
-                self.assertTrue(state.entry_orders)
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 0)
 
     def test_ema_averaging_is_blocked_after_no_more_averaging_age(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             strategy = replace(
                 config.STRATEGY,
                 ema_breakeven_enabled=False,
@@ -2781,7 +2878,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_account_profit_unload_places_reduce_only_partial_close(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             strategy = replace(
                 config.STRATEGY,
                 account_profit_unload_enabled=True,
@@ -2823,7 +2920,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_account_averaging_blocks_while_account_pnl_is_falling(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             strategy = replace(
                 config.STRATEGY,
                 account_averaging_enabled=True,
@@ -2853,12 +2950,12 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
 
-                self.assertTrue(state.entry_orders)
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 0)
 
     def test_account_averaging_allows_bounce_near_trough_and_scales_budget(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
+            runtime = config.RUNTIME
             strategy = replace(
                 config.STRATEGY,
                 account_averaging_enabled=True,
@@ -2897,7 +2994,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ema_breakeven_activates_without_market_or_stop_order(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             strategy = replace(config.STRATEGY, ema_breakeven_after_hours=48.0, ema_breakeven_fee_buffer=0.0002)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -3095,7 +3192,7 @@ class UnifiedBotTests(unittest.TestCase):
                 enable_absolute_force_exit=True,
                 absolute_force_exit_after_minutes=10.0,
             )
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3123,7 +3220,7 @@ class UnifiedBotTests(unittest.TestCase):
                 enable_absolute_force_exit=True,
                 absolute_force_exit_after_minutes=10.0,
             )
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3148,7 +3245,7 @@ class UnifiedBotTests(unittest.TestCase):
                 enable_absolute_force_exit=True,
                 absolute_force_exit_after_minutes=10.0,
             )
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3186,7 +3283,7 @@ class UnifiedBotTests(unittest.TestCase):
                 hard_time_exit_after_minutes=0.0,
                 enable_controlled_loss_exit=False,
             )
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3228,7 +3325,7 @@ class UnifiedBotTests(unittest.TestCase):
                 hard_time_exit_max_loss_on_notional=0.05,
                 hard_time_exit_bypass_profit_bank=True,
             )
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3267,7 +3364,7 @@ class UnifiedBotTests(unittest.TestCase):
                 urgent_time_exit_after_minutes=10.0,
                 hard_time_exit_after_minutes=0.0,
             )
-            runtime = replace(config.RUNTIME, dry_run=False, reduce_only_enabled=True)
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3296,7 +3393,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_unknown_short_exit_orders_over_position_are_canceled(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3320,7 +3417,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_tracked_exit_order_without_reduce_only_is_canceled(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3349,7 +3446,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_unknown_reduce_only_exit_orders_are_adopted(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3379,7 +3476,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_offset_close_exit_orders_are_adopted_as_reduce_only(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3407,7 +3504,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_adopted_hidden_close_order_cancel_uses_cancel_params(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3442,7 +3539,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_flat_unknown_reduce_only_exit_orders_are_canceled_and_block_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
 
                 valid = bot._validate_sell_orders(
@@ -3465,7 +3562,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_flat_unknown_unsafe_exit_orders_block_entry_without_cancel(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
 
                 valid = bot._validate_sell_orders(
@@ -3488,7 +3585,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_tracked_exit_orders_are_preserved_when_temporarily_invisible(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3510,7 +3607,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_tracked_exit_order_id_rotation_adopts_visible_reduce_only_exit(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3544,7 +3641,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_tracked_and_unknown_safe_close_orders_are_merged_without_exceeding_position(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3586,7 +3683,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_tracked_ladder_with_unadoptable_unknown_exit_waits(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3638,7 +3735,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_zero_remaining_exit_order_is_not_counted_as_open_exposure(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3665,7 +3762,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_exit_ladder_rebuild_ignores_stale_frozen_state_without_tracked_orders(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3684,7 +3781,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_exit_ladder_waits_when_exchange_reports_closeable_reserved(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.reject_reduce_only_closeable_amount = True
                 state = bot._get_state(SYMBOL)
@@ -3711,7 +3808,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_pending_closeable_exit_ladder_retries_after_timeout(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, order_timeout_sec=1, poll_interval_sec=1)
+            runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.reject_reduce_only_closeable_amount = True
@@ -3738,7 +3835,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_pending_closeable_exit_ladder_does_not_retry_after_timeout_while_frozen(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, order_timeout_sec=1, poll_interval_sec=1)
+            runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.reject_reduce_only_closeable_amount = True
@@ -3763,7 +3860,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_breakeven_waits_on_pending_closeable_without_retrying_reduce_only(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, order_timeout_sec=1, poll_interval_sec=1)
+            runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.reject_reduce_only_closeable_amount = True
@@ -3789,7 +3886,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_urgent_time_exit_preserves_pending_closeable_without_duplicate_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, dry_run=False, order_timeout_sec=1, poll_interval_sec=1)
+            runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
             strategy = replace(config.STRATEGY, urgent_time_exit_after_minutes=1.0)
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -3816,7 +3913,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_unknown_non_reduce_only_exit_order_blocks_duplicate_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3844,7 +3941,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_unknown_exit_orders_cancel_tracked_ladder_when_combined_amount_exceeds_position(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 5.0
@@ -3882,7 +3979,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_private_snapshots_are_bulk_cached_per_cycle(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.positions = [
                     {
@@ -3917,7 +4014,7 @@ class UnifiedBotTests(unittest.TestCase):
                 market_load_retries=2,
                 contract_hostnames=("api.one.test", "api.two.test"),
             )
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False), EXCHANGE=exchange_config):
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.fetch_positions_failures = [ccxt.RequestTimeout("timeout")]
                 bot.exchange.positions = [
@@ -3946,7 +4043,7 @@ class UnifiedBotTests(unittest.TestCase):
                 market_load_retries=4,
                 contract_hostnames=("api.one.test", "api.two.test"),
             )
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False), EXCHANGE=exchange_config):
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.fetch_positions_failures = [
                     ccxt.RequestTimeout("timeout-1"),
@@ -3983,23 +4080,7 @@ class UnifiedBotTests(unittest.TestCase):
 
             bot._reset_private_caches()
 
-            # Use override config to set dry_run to False so fetch positions happens
-            # The replace issue was because config.RUNTIME is a RuntimeSettings instance which
-            # originally didn't have dry_run, but the project has it now so replace might fail
-            # depending on when it was added. Instead we manually monkey patch.
-            original_dry_run = getattr(config.RUNTIME, 'dry_run', None)
-            try:
-                # Bypass frozen properties of dataclass
-                object.__setattr__(config.RUNTIME, 'dry_run', False)
-                snapshot = bot._fetch_position_snapshot(SYMBOL)
-            finally:
-                if original_dry_run is not None:
-                    object.__setattr__(config.RUNTIME, 'dry_run', original_dry_run)
-                else:
-                    try:
-                        delattr(config.RUNTIME, 'dry_run')
-                    except Exception:
-                        pass
+            snapshot = bot._fetch_position_snapshot(SYMBOL)
 
             self.assertFalse(snapshot["ok"])
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
@@ -4015,7 +4096,7 @@ class UnifiedBotTests(unittest.TestCase):
                 market_load_retries=2,
                 contract_hostnames=("api.one.test", "api.two.test"),
             )
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False), EXCHANGE=exchange_config):
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.has["fetchPositions"] = False
                 bot.exchange.fetch_positions_failures = [
@@ -4041,7 +4122,7 @@ class UnifiedBotTests(unittest.TestCase):
                 market_load_retries=2,
                 contract_hostnames=("api.one.test", "api.two.test"),
             )
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False), EXCHANGE=exchange_config):
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.has["fetchOpenOrders"] = False
                 bot.exchange.fetch_open_orders_failures = [
@@ -4062,7 +4143,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_position_mode_locked_by_existing_positions_logs_info(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.set_position_mode_error = RuntimeError(
                     'htx {"status":"error","err_code":1494,'
@@ -4081,7 +4162,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_position_mode_locked_in_hedge_mode_blocks_live_start(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.account_position_mode = "dual_side"
                 bot.exchange.set_position_mode_error = RuntimeError(
@@ -4099,7 +4180,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_position_mode_locked_without_mode_confirmation_blocks_live_start(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.account_position_mode = ""
                 bot.exchange.set_position_mode_error = RuntimeError(
@@ -4123,7 +4204,7 @@ class UnifiedBotTests(unittest.TestCase):
                 set_leverage_on_start=True,
             )
             risk = replace(config.RISK, leverage=7)
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False), EXCHANGE=exchange_config, RISK=risk):
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config, RISK=risk):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.symbols = [SYMBOL]
 
@@ -4142,7 +4223,7 @@ class UnifiedBotTests(unittest.TestCase):
                 set_position_mode_on_start=False,
                 set_leverage_on_start=True,
             )
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False), EXCHANGE=exchange_config):
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.symbols = [SYMBOL]
                 bot.exchange.set_leverage_error = RuntimeError("leverage rejected")
@@ -4162,7 +4243,7 @@ class UnifiedBotTests(unittest.TestCase):
                 market_load_retries=2,
                 contract_hostnames=("api.one.test", "api.two.test"),
             )
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False), EXCHANGE=exchange_config):
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.fetch_ohlcv_failures = [
                     ccxt.ExchangeNotAvailable("USDT 504 Gateway Timeout <!DOCTYPE html><html>too much html")
@@ -4219,7 +4300,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_bulk_private_snapshots_fall_back_when_some_payload_symbols_are_missing(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.positions = [
                     {
@@ -4319,7 +4400,7 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_reserved_opposite_position_does_not_disable_combined_profile(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
-            with override_config(RUNTIME=replace(config.RUNTIME, dry_run=False)):
+            with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_reserved_symbols = {SYMBOL}
                 state = bot._get_state(SYMBOL)
@@ -4339,7 +4420,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertEqual(status, "reserved")
                 self.assertNotIn(SYMBOL, bot.disabled_symbols)
-                self.assertTrue(state.entry_orders)
+                self.assertFalse(state.entry_orders)
                 self.assertIn(("short_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
@@ -4385,11 +4466,11 @@ class UnifiedBotTests(unittest.TestCase):
 
         long_profile = replace(
             config.resolve_profile("long"),
-            runtime=replace(config.resolve_profile("long").runtime, dry_run=False),
+            runtime=replace(config.resolve_profile("long").runtime),
         )
         short_profile = replace(
             config.resolve_profile("short"),
-            runtime=replace(config.resolve_profile("short").runtime, dry_run=False),
+            runtime=replace(config.resolve_profile("short").runtime),
         )
         long_bot = ReservationBot(long_profile)
         short_bot = ReservationBot(
@@ -4408,19 +4489,19 @@ class UnifiedBotTests(unittest.TestCase):
         reserved = CombinedHtxFuturesBot._reserved_symbols(combined, exclude=long_bot)
         self.assertIn(SYMBOL, reserved)
 
-    def test_combined_rejects_mixed_dry_run_modes(self):
+    def test_combined_rejects_mismatched_api_credentials(self):
         long_profile = replace(
             config.resolve_profile("long"),
-            runtime=replace(config.resolve_profile("long").runtime, dry_run=False),
+            api_credentials=replace(config.resolve_profile("long").api_credentials, api_key="long_key"),
         )
         short_profile = replace(
             config.resolve_profile("short"),
-            runtime=replace(config.resolve_profile("short").runtime, dry_run=True),
+            api_credentials=replace(config.resolve_profile("short").api_credentials, api_key="short_key"),
         )
         combined = object.__new__(CombinedHtxFuturesBot)
         combined.profiles = [long_profile, short_profile]
 
-        with self.assertRaisesRegex(RuntimeError, "DRY_RUN"):
+        with self.assertRaisesRegex(RuntimeError, "same HTX API credentials"):
             CombinedHtxFuturesBot._validate_shared_exchange_profiles(combined)
 
     def test_combined_uses_separate_external_feeds_for_different_profile_settings(self):
@@ -4434,6 +4515,7 @@ class UnifiedBotTests(unittest.TestCase):
                     api_credentials=replace(profile.api_credentials, api_key="test_key", api_secret="test_secret"),
                     runtime=replace(
                         profile.runtime,
+                        dry_run=True,
                         state_file=str(tmp_path / f"{name}_state.json"),
                         markets_cache_file=str(tmp_path / f"{name}_markets.json"),
                     ),
