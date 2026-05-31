@@ -13,6 +13,8 @@ import config
 
 class ExchangeMixin:
     def _create_exchange(self):
+        if config.RUNTIME.dry_run:
+            return None
         if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
             raise ValueError("HTX API credentials are required")
 

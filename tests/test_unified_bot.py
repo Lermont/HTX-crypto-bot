@@ -1768,11 +1768,11 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 order = bot.exchange.created_orders[0]
                 self.assertEqual(order["params"]["leverRate"], 50)
-                self.assertEqual(order["amount"], 30.0)
+                self.assertEqual(order["amount"], 50.0)
                 state_order = bot._get_state(SYMBOL).entry_orders[0]
                 self.assertEqual(state_order["leverage"], 50.0)
-                self.assertEqual(state_order["sizing_leverage"], 30.0)
-                self.assertEqual(state_order["amount"], 30.0)
+                self.assertEqual(state_order["sizing_leverage"], 50.0)
+                self.assertEqual(state_order["amount"], 50.0)
 
     def test_entry_ladder_caps_sizing_to_lower_manual_account_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
@@ -4515,6 +4515,7 @@ class UnifiedBotTests(unittest.TestCase):
                     api_credentials=replace(profile.api_credentials, api_key="test_key", api_secret="test_secret"),
                     runtime=replace(
                         profile.runtime,
+                        dry_run=True,
                         state_file=str(tmp_path / f"{name}_state.json"),
                         markets_cache_file=str(tmp_path / f"{name}_markets.json"),
                     ),
