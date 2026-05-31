@@ -1380,6 +1380,22 @@ class ExchangeMixin:
             side = str(ref.get("side") or config.EXIT_SIDE).lower()
             if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
                 canceled_all = False
+
+        tracked_ids = {str(ref.get("id")) for ref in entry_refs + sell_refs if ref.get("id")}
+        open_orders = self._fetch_open_orders(symbol)
+        if isinstance(open_orders, list):
+            untracked_orders = [o for o in open_orders if isinstance(o, dict) and str(o.get("id")) not in tracked_ids]
+            if untracked_orders:
+                self._log_event(
+                    "WARNING",
+                    f"Found {len(untracked_orders)} untracked open orders on exchange for {symbol}; canceling them",
+                    event="state_exchange_mismatch",
+                    symbol=symbol,
+                    reason="canceling_untracked_orders",
+                )
+                if not self._cancel_exchange_orders(symbol, untracked_orders, side=None, reason=reason):
+                    canceled_all = False
+
         if not canceled_all:
             return
         state.entry_orders = []
