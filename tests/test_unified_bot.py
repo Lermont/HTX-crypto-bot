@@ -3920,6 +3920,41 @@ class UnifiedBotTests(unittest.TestCase):
                     bot._pending_exit_ladder_signature("urgent_time_exit"),
                 )
 
+    def test_controlled_loss_waits_on_pending_closeable_without_retrying_reduce_only(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True, order_timeout_sec=1, poll_interval_sec=1)
+            strategy = replace(
+                config.STRATEGY,
+                enable_absolute_force_exit=False,
+                enable_controlled_loss_exit=False,
+                urgent_time_exit_after_minutes=0.0,
+                hard_time_exit_after_minutes=1.0,
+                hard_time_exit_close_fraction=1.0,
+                hard_time_exit_step_minutes=0.0,
+                hard_time_exit_fraction_step=0.0,
+                hard_time_exit_bypass_profit_bank=True,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.reject_reduce_only_closeable_amount = True
+                bot.exchange.ticker = {"bid": 90.0, "ask": 90.1, "last": 90.0}
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 0.0
+                state.position_frozen = 5.0
+                state.entry_price = 100.0
+                state.cycle_opened_at = time.time() - 2.0 * 60.0
+
+                self.assertTrue(bot._maybe_apply_controlled_loss_exit(SYMBOL, None))
+                state.pending_exit_ladder_since = time.time() - 5.0
+                self.assertTrue(bot._maybe_apply_controlled_loss_exit(SYMBOL, None))
+
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(state.sell_ladder_mode, "controlled_loss_exit")
+                self.assertTrue(state.sell_ladder_signature.startswith("pending_closeable:controlled_loss_exit|"))
+
     def test_unknown_non_reduce_only_exit_order_blocks_duplicate_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             with override_config(RUNTIME=config.RUNTIME):

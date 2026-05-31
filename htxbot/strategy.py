@@ -1408,7 +1408,10 @@ class StrategyMixin:
             return False
         if state.position_available > 0:
             return False
-        if state.sell_ladder_signature != self._pending_exit_ladder_signature(mode, symbol, state):
+        current_signature = str(state.sell_ladder_signature or "")
+        expected_signature = self._pending_exit_ladder_signature(mode, symbol, state)
+        mode_pending_prefix = f"pending_closeable:{mode}|"
+        if current_signature != expected_signature and not current_signature.startswith(mode_pending_prefix):
             return False
 
         now = time.time()
@@ -3681,6 +3684,9 @@ class StrategyMixin:
             closeable_contracts=close_contracts,
             mode="controlled_loss_exit",
         ))
+        state = self._get_state(symbol)
+        if not state.sell_ladder_orders:
+            return True
         self._log_event(
             "WARNING",
             f"Controlled loss exit ladder activated for {symbol}: contracts={close_contracts}",
@@ -3725,6 +3731,8 @@ class StrategyMixin:
                     ))
                 return True
             if not state.sell_ladder_orders:
+                if self._is_exit_ladder_waiting_for_closeable(symbol, "controlled_loss_exit", state):
+                    return True
                 return self._rebuild_controlled_loss_exit_ladder(symbol, reason="controlled_loss_missing_ladder")
             return self._maybe_reprice_time_exit_ladder(symbol) or True
 
