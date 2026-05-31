@@ -81,6 +81,10 @@ class HtxFuturesBot(
     ]
 
     def __init__(self, profile=None, exchange=None, external_price_feed=None):
+        import threading
+        self._funding_lock = threading.Lock()
+        self._account_pnl_lock = threading.Lock()
+        self._signal_lock = threading.Lock()
         self.profile = config.resolve_profile(profile)
         with config.use_profile(self.profile):
             self.profile_name = self.profile.name
