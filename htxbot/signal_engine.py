@@ -1375,14 +1375,11 @@ class SignalMixin:
             return symbol, (candles, macro_candles, pullback_candles), None
 
         results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(self.symbols) or 1)) as executor:
-            futures = {executor.submit(fetch_symbol_candles, symbol): symbol for symbol in self.symbols}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    results.append(future.result())
-                except Exception as exc:
-                    symbol = futures[future]
-                    self._log_event("WARNING", f"Unhandled exception fetching candles for {symbol}: {exc}", event="signal_invalid", symbol=symbol, reason="unhandled_fetch_exception")
+        for symbol in self.symbols:
+            try:
+                results.append(fetch_symbol_candles(symbol))
+            except Exception as exc:
+                self._log_event("WARNING", f"Unhandled exception fetching candles for {symbol}: {exc}", event="signal_invalid", symbol=symbol, reason="unhandled_fetch_exception")
 
         for symbol, data, log_info in results:
             if log_info:

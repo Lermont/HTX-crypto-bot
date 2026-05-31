@@ -242,8 +242,8 @@ class RunnerMixin:
                 if prefetch_private:
                     prefetch_private()
 
-                with ThreadPoolExecutor(max_workers=min(32, len(self.symbols) or 1)) as executor:
-                    list(executor.map(self._run_step_symbol_safe, self.symbols))
+                for symbol in self.symbols:
+                    self._run_step_symbol_safe(symbol)
 
                 self._save_state()
                 self._sleep_after_poll(started_at)
