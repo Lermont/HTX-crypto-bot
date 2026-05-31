@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import concurrent.futures
 import json
 import re
 import time
@@ -377,7 +378,10 @@ class ExchangeMixin:
         return notional / (contracts * self._contract_size(symbol))
 
     def _fetch_reference_price(self, symbol: str) -> Tuple[float, float]:
-        ticker = self.exchange.fetch_ticker(symbol)
+        tickers = self._bulk_tickers_by_symbol()
+        ticker = tickers.get(symbol) if tickers else None
+        if not ticker:
+            ticker = self.exchange.fetch_ticker(symbol)
         bid = self._safe_float(ticker.get("bid"))
         last = self._safe_float(ticker.get("last"))
         ask = self._safe_float(ticker.get("ask"))
@@ -389,7 +393,10 @@ class ExchangeMixin:
 
     def _ticker_spread_rate(self, symbol: str) -> float:
         try:
-            ticker = self.exchange.fetch_ticker(symbol)
+            tickers = self._bulk_tickers_by_symbol()
+            ticker = tickers.get(symbol) if tickers else None
+            if not ticker:
+                ticker = self.exchange.fetch_ticker(symbol)
         except Exception as exc:
             self._log_event(
                 "DEBUG",
@@ -463,10 +470,6 @@ class ExchangeMixin:
         return payload
 
     def _account_snapshot(self) -> dict:
-        if config.RUNTIME.dry_run:
-            equity = max(config.RUNTIME.dry_run_equity, 0.0)
-            return {"free": equity, "total": equity}
-
         try:
             balance = self.exchange.fetch_balance(
                 {
@@ -544,8 +547,10 @@ class ExchangeMixin:
     def _reset_private_caches(self):
         self._private_positions_by_symbol = None
         self._private_open_orders_by_symbol = None
+        self._private_tickers_by_symbol = None
         self._private_positions_bulk_failed = False
         self._private_open_orders_bulk_failed = False
+        self._private_tickers_bulk_failed = False
         self._external_price_context_cache = {}
 
     def _payload_symbol(self, payload: dict) -> str:
@@ -580,9 +585,43 @@ class ExchangeMixin:
             grouped.setdefault(symbol, []).append(payload)
         return grouped, missing_symbol
 
+
+    def _bulk_tickers_by_symbol(self) -> Optional[Dict[str, dict]]:
+        cached = getattr(self, "_private_tickers_by_symbol", None)
+        if cached is not None:
+            return cached
+        if getattr(self, "_private_tickers_bulk_failed", False):
+            return None
+        if not self.exchange.has.get("fetchTickers"):
+            self._private_tickers_bulk_failed = True
+            return None
+
+        try:
+            tickers = self._private_fetch_with_retry(
+                "",
+                "bulk_tickers_fetch_failed",
+                "bulk tickers",
+                lambda: self.exchange.fetch_tickers(list(self.symbols)),
+            )
+        except Exception as exc:
+            self._private_tickers_bulk_failed = True
+            self._log_event(
+                "DEBUG",
+                f"Bulk tickers fetch unavailable; falling back to per-symbol sync: {exc}",
+                event="state_exchange_mismatch",
+                reason="bulk_tickers_fetch_failed_fallback",
+                exception=exc,
+            )
+            return None
+
+        if isinstance(tickers, dict):
+            self._private_tickers_by_symbol = tickers
+            return tickers
+
+        self._private_tickers_bulk_failed = True
+        return None
+
     def _bulk_positions_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        if config.RUNTIME.dry_run:
-            return {}
         cached = getattr(self, "_private_positions_by_symbol", None)
         if cached is not None:
             return cached
@@ -624,8 +663,6 @@ class ExchangeMixin:
         return grouped
 
     def _bulk_open_orders_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        if config.RUNTIME.dry_run:
-            return {}
         cached = getattr(self, "_private_open_orders_by_symbol", None)
         if cached is not None:
             return cached
@@ -804,17 +841,19 @@ class ExchangeMixin:
             params["reduceOnly"] = True
         return params
 
-    def _extract_margin_mode(self, payload: dict) -> str:
-        if not isinstance(payload, dict):
+    def _extract_margin_mode(self, item: dict) -> str:
+        if not isinstance(item, dict):
             return ""
-        direct = payload.get("marginMode") or payload.get("margin_mode")
-        if direct:
-            return str(direct).lower()
-        info = payload.get("info")
+        for key in ("marginMode", "margin_mode", "margin"):
+            val = item.get(key)
+            if val is not None:
+                return str(val).lower()
+        info = item.get("info")
         if isinstance(info, dict):
-            nested = info.get("margin_mode") or info.get("marginMode")
-            if nested:
-                return str(nested).lower()
+            for key in ("margin_mode", "marginMode", "margin"):
+                val = info.get(key)
+                if val is not None:
+                    return str(val).lower()
         return ""
 
     def _ensure_cross_margin_response(self, payload: dict, context: str, symbol: str = "") -> bool:
@@ -942,8 +981,14 @@ class ExchangeMixin:
             if config.RISK.margin_mode == "cross":
                 self.exchange.set_position_mode(False, None, params=self._position_params())
             else:
-                for symbol in self.symbols:
+                def update_mode(symbol):
                     self.exchange.set_position_mode(False, symbol, params=self._position_params())
+
+                max_workers = min(10, max(1, len(self.symbols)))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(update_mode, symbol) for symbol in self.symbols]
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()
         except Exception as exc:
             if self._is_position_mode_locked_error(exc):
                 mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()

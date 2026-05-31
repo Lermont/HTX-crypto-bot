@@ -2,9 +2,23 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 import config
+
+
+@dataclass
+class SignalContext:
+    closes: List[float]
+    benchmark_closes: List[float]
+    btc_risk: dict
+    latest_ts: int
+    cache_key: str = ""
+    macro_context: Optional[dict] = None
+    macro_closes: Optional[List[float]] = None
+    macro_latest_ts: Optional[int] = None
+    pullback_closes: Optional[List[float]] = None
+    pullback_latest_ts: Optional[int] = None
 
 
 class PositionLifecycle(str, Enum):
@@ -19,6 +33,19 @@ class PositionLifecycle(str, Enum):
 
 
 @dataclass
+class ExitLadderConfig:
+    symbol: str
+    total_contracts: float
+    avg_entry_price: float
+    rebuild: bool
+    closeable_contracts: Optional[float] = None
+    mode: str = "normal"
+    exit_scope: Optional[str] = None
+    signature_override: str = ""
+    use_trailing_exit: bool = True
+
+
+@dataclass
 class ExitLadderPreflight:
     ok: bool
     requested_contracts: float
@@ -27,6 +54,19 @@ class ExitLadderPreflight:
     planned_contracts: float
     existing_tracked_contracts: float = 0.0
     reason: str = "ok"
+
+
+@dataclass
+class SellLadderParams:
+    symbol: str
+    total_contracts: float
+    avg_entry_price: float
+    rebuild: bool
+    closeable_contracts: Optional[float] = None
+    mode: str = "normal"
+    exit_scope: Optional[str] = None
+    signature_override: str = ""
+    use_trailing_exit: bool = True
 
 
 @dataclass
@@ -120,4 +160,11 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
-__all__ = ["ExitLadderPreflight", "PositionLifecycle", "TradeState"]
+__all__ = [
+    "ExitLadderConfig",
+    "ExitLadderPreflight",
+    "PositionLifecycle",
+    "SellLadderParams",
+    "SignalContext",
+    "TradeState",
+]

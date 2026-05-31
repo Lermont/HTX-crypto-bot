@@ -9,7 +9,7 @@ import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
 from typing import Sequence
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import config
 
@@ -62,7 +62,15 @@ class MonitoringMixin:
                         if "ema60" in row and "ema100" not in row:
                             row["ema100"] = row["ema60"]
                         writer.writerow({name: row.get(name, "") for name in header})
-                os.replace(tmp_path, path)
+                for attempt in range(10):
+                    try:
+                        os.replace(tmp_path, path)
+                        break
+                    except PermissionError:
+                        if attempt < 9:
+                            time.sleep(0.1)
+                        else:
+                            raise
                 return
             except Exception as exc:
                 try:
@@ -78,7 +86,15 @@ class MonitoringMixin:
             with tmp_path.open("w", newline="", encoding="utf-8") as dst:
                 csv.writer(dst).writerow(header)
                 dst.write(original_content)
-            os.replace(tmp_path, path)
+            for attempt in range(10):
+                try:
+                    os.replace(tmp_path, path)
+                    break
+                except PermissionError:
+                    if attempt < 9:
+                        time.sleep(0.1)
+                    else:
+                        raise
         except Exception as exc:
             try:
                 tmp_path.unlink(missing_ok=True)
@@ -143,7 +159,15 @@ class MonitoringMixin:
 
         archive_path = self._csv_archive_path(path)
         try:
-            os.replace(path, archive_path)
+            for attempt in range(10):
+                try:
+                    os.replace(path, archive_path)
+                    break
+                except PermissionError:
+                    if attempt < 9:
+                        time.sleep(0.1)
+                    else:
+                        raise
             self._ensure_headered_csv_file(path, header)
             self.log.info("CSV log rotated: %s -> %s", path, archive_path)
         except Exception as exc:
@@ -156,7 +180,15 @@ class MonitoringMixin:
 
         archive_path = self._csv_archive_path(path)
         try:
-            os.replace(path, archive_path)
+            for attempt in range(10):
+                try:
+                    os.replace(path, archive_path)
+                    break
+                except PermissionError:
+                    if attempt < 9:
+                        time.sleep(0.1)
+                    else:
+                        raise
             self._ensure_jsonl_file(path)
             self.log.info("JSONL log rotated: %s -> %s", path, archive_path)
         except Exception as exc:
@@ -752,7 +784,6 @@ class MonitoringMixin:
             int(retryable_value),
             attempt,
             hostname,
-            0,
         ]
 
         csv_path = getattr(self, "diagnostics_csv_path", None)

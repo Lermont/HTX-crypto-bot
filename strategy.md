@@ -13,7 +13,7 @@ Combined mode делает три важные вещи:
 - помечает символ занятым для второго профиля, если у первого уже есть позиция, entry orders или exit orders;
 - после рестарта учитывает не только локальный state, но и видимые биржевые позиции/ордера другого профиля, чтобы пустой state не создавал ложный `unexpected_*` для противоположной стороны.
 
-Live mode требует одинаковые HTX API credentials для всех включенных профилей и одинаковый `DRY_RUN=false`. Если один профиль live, а другой dry-run, запуск combined-режима блокируется.
+Combined mode требует одинаковые HTX API credentials для всех включенных профилей.
 
 ## 2. Торгуемый Рынок
 
@@ -294,7 +294,7 @@ EMA_BREAKEVEN_EXIT_FRACTIONS=1.0
 - `DUST_CLOSE_ENABLED` закрывает слишком маленькую позицию reduce-only market;
 - `TINY_ENTRY_CLOSE_ENABLED` закрывает микроскопический частичный entry, если он слишком мал относительно planned budget.
 
-В dry-run эти market cleanup действия не отправляются на биржу.
+Эти cleanup-действия отправляют реальные reduce-only market orders, поэтому они покрываются unit-тестами через mock/stub exchange.
 
 ## 14. Macro Overlay
 
@@ -347,9 +347,9 @@ Macro overlay сравнивает XAUT/BTC context через RSI и может
 Перед live-запуском:
 
 1. Прогнать `python -m pytest -q`.
-2. Запустить `DRY_RUN=true` и проверить, что оба профиля корректно грузят markets, sync state и пишут diagnostics/signal analytics.
+2. Проверить ключевые runtime-сценарии через mock/stub exchange без подключения к live-аккаунту.
 3. Проверить `long/.env` и `short/.env`: там не должно быть противоречий с `.env`.
 4. Убедиться, что `EMA_POSITION_BUDGET_FRACTION`, `EMA_MAX_POSITION_MARGIN_FRACTION`, `EMA_MAX_TOTAL_MARGIN_FRACTION` остаются консервативными.
 5. Проверить HTX account leverage или задать `ACCOUNT_LEVERAGE`.
 6. Проверить, что runtime diagnostics/signal analytics файлы не staged и не tracked git.
-7. Только после этого включать `DRY_RUN=false`.
+7. После этого запускать бот с минимальными бюджетами и внимательно наблюдать первые циклы.

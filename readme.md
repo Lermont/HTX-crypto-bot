@@ -4,9 +4,9 @@
 
 Python bot for HTX USDT-M futures. The active trading route is an EMA Pullback strategy with separate `long` and `short` profiles that can run together in one process, share market data, and avoid opening opposite exposure on the same symbol.
 
-The default configuration is intentionally conservative and starts in `DRY_RUN=true`. Live mode requires explicit API credentials, matching live settings for both profiles, and an account leverage that the bot can read from HTX or that you define via `ACCOUNT_LEVERAGE`.
+The bot is a live-ordering application: startup requires explicit HTX API credentials, matching credentials for both profiles in combined mode, and an account leverage that the bot can read from HTX or that you define via `ACCOUNT_LEVERAGE`.
 
-Trading futures is risky. This repository is software, not financial advice. Audit the code and run dry-run/paper checks before sending live orders.
+Trading futures is risky. This repository is software, not financial advice. Audit the code and run the unit tests plus mock/stub exchange checks before sending live orders.
 
 ## What Is Active Now
 
@@ -75,7 +75,6 @@ Fill at least:
 HTX_API_KEY=
 HTX_API_SECRET=
 BOT_PROFILES=long,short
-DRY_RUN=true
 ```
 
 Run both profiles:
@@ -103,8 +102,6 @@ Global runtime:
 
 ```dotenv
 BOT_PROFILES=long,short
-DRY_RUN=true
-DRY_RUN_EQUITY=1000
 POLL_INTERVAL_SEC=3
 LOG_LEVEL=INFO
 ```
@@ -196,7 +193,7 @@ EXTERNAL_PRICE_DIRECTIONAL_AVERAGING_1M_BLOCK_BPS=50
 EXTERNAL_PRICE_EXIT_ADJUSTMENT_ENABLED=false
 ```
 
-Per-profile overrides are supported through `LONG_` and `SHORT_` prefixes, for example `LONG_DRY_RUN=true` or `SHORT_LEVERAGE=30`.
+Per-profile overrides are supported through `LONG_` and `SHORT_` prefixes, for example `LONG_LEVERAGE=30` or `SHORT_LEVERAGE=30`.
 
 ## Generated Files
 
@@ -215,14 +212,14 @@ These runtime CSV/JSONL artifacts are local audit output and are ignored by git.
 
 ## Live Launch Checklist
 
-1. Keep `DRY_RUN=true` and run the bot until market loading, state sync, signal analytics, external price diagnostics, and CSV headers look clean.
-2. Check that both profiles use the same live `DRY_RUN` value. Combined live mode requires identical API credentials across enabled profiles.
+1. Run `python -m pytest -q` and any mock/stub exchange scenario checks before starting the bot.
+2. Combined mode requires identical API credentials across enabled profiles.
 3. Confirm HTX account leverage or set `ACCOUNT_LEVERAGE`.
 4. Keep conservative caps first: `EMA_POSITION_BUDGET_FRACTION=0.02`, `EMA_MAX_POSITION_MARGIN_FRACTION=0.03`, `EMA_MAX_TOTAL_MARGIN_FRACTION=0.50`.
 5. Check `long/.env` and `short/.env` for profile-specific overrides.
-6. Run `python -m pytest -q`.
+6. Confirm HTX position mode is one-way and margin mode is cross.
 7. Confirm runtime diagnostics/log artifacts are not staged or committed. If old signed HTX diagnostics were ever shared, rotate the affected HTX API key before live start.
-8. Only then switch `DRY_RUN=false`.
+8. Start with small budgets and watch the first cycles closely.
 
 ## Project Layout
 
