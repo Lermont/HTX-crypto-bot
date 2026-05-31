@@ -1047,6 +1047,7 @@ class SignalMixin:
             rs_edge = max(0.0, rs60)
             score = macro_gap + trigger_gap + pullback_depth + rs_edge
 
+        macro_context = self._macro_context_for_trading(macro_context)
         data_valid = True
         direction_valid = bool(macro_valid)
         entry_valid = bool(
@@ -1071,7 +1072,6 @@ class SignalMixin:
         signal_budget_multiplier = self._signal_budget_multiplier(score)
         btc_budget_multiplier = max(0.0, self._safe_float(btc_risk.get("budget_multiplier"), 1.0))
         btc_ladder_multiplier = max(0.0, self._safe_float(btc_risk.get("ladder_multiplier"), 1.0))
-        macro_context = self._macro_context_for_trading(macro_context)
         if config.POSITION_SIDE == "short":
             macro_budget_multiplier = max(0.0, self._safe_float(macro_context.get("short_budget_multiplier"), 1.0))
         else:

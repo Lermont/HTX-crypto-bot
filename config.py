@@ -1141,7 +1141,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         fetch_fill_details_on_sync=_env_bool("FETCH_FILL_DETAILS_ON_SYNC", True, profile=name),
         fill_detail_lookback_sec=_env_int("FILL_DETAIL_LOOKBACK_SEC", 6 * 60 * 60, profile=name),
         state_file=_path(name, f"bot_futures{'_short' if name == 'short' else ''}_state.json"),
-        markets_cache_file=_path(name, f"bot_futures{'_short_state' if name == 'short' else ''}_markets_cache.json"),
+        markets_cache_file=_path(name, f"bot_futures{'_short' if name == 'short' else ''}_markets_cache.json"),
     )
 
     profile = BotProfile(

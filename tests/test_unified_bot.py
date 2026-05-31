@@ -23,7 +23,7 @@ from htxbot.combined import CombinedHtxFuturesBot
 from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
 from htxbot.indicators import average_true_range, calculate_rsi, compute_log_return, realized_volatility
-from htxbot.models import PositionLifecycle, SellLadderParams
+from htxbot.models import PositionLifecycle, SellLadderParams, SignalContext
 from htxbot.shared_exchange import CachedMarketDataExchange
 
 
@@ -744,6 +744,51 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertAlmostEqual(state.remaining_buy_fees_quote, 0.038)
                 self.assertAlmostEqual(state.base_entry_amount, 4.0)
                 self.assertAlmostEqual(state.base_entry_quote, 38.0)
+
+    def test_legacy_state_load_coerces_string_scalars_and_order_refs(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.state_path.write_text(
+                json.dumps(
+                    {
+                        SYMBOL: {
+                            "symbol": SYMBOL,
+                            "position_size": "3",
+                            "position_available": "2",
+                            "position_frozen": "1",
+                            "entry_price": "11.5",
+                            "total_bought_quote": "34.5",
+                            "total_bought_amount": "3",
+                            "paid_buy_fees_quote": "0.0345",
+                            "frozen_no_more_buys": "false",
+                            "average_stage": "2",
+                            "sell_ladder_orders": {
+                                "id": 12345,
+                                "side": "sell",
+                                "price": "12.0",
+                                "amount": "1",
+                                "created_at": "1700000000",
+                                "stage": "1",
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            state = bot._load_state()[SYMBOL]
+            bot.states = {SYMBOL: state}
+            reloaded = bot._get_state(SYMBOL)
+
+            self.assertEqual(reloaded.position_size, 3.0)
+            self.assertEqual(reloaded.position_available, 2.0)
+            self.assertEqual(reloaded.position_frozen, 1.0)
+            self.assertEqual(reloaded.entry_price, 11.5)
+            self.assertFalse(reloaded.frozen_no_more_buys)
+            self.assertEqual(reloaded.average_stage, 2)
+            self.assertEqual(reloaded.sell_ladder_orders[0]["id"], "12345")
+            self.assertEqual(reloaded.sell_ladder_orders[0]["price"], 12.0)
+            self.assertEqual(reloaded.sell_ladder_orders[0]["amount"], 1.0)
 
     def test_trade_state_serialization_keeps_pending_exit_ladder_metadata(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3462,6 +3507,33 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(math.isclose(signal["rs60"], math.log(112.0 / 90.0), rel_tol=1e-12))
                 self.assertEqual(signal["btc_return_30m"], 0.0)
 
+    def test_signal_builder_handles_missing_macro_context_for_recovery_confirmation(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy(
+                ema_use_rs_confirmation=False,
+                ema_use_btc_risk_filter=False,
+                ema_pullback_recovery_gap=0.0,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                closes = [100.0 + index for index in range(80)]
+                benchmark = [100.0] * len(closes)
+                ctx = SignalContext(
+                    closes=closes,
+                    benchmark_closes=benchmark,
+                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "neutral"},
+                    latest_ts=1000,
+                    candles=ohlcv_series(closes),
+                    cache_key=SYMBOL,
+                    macro_context=None,
+                )
+
+                signal = bot._build_signal_from_closes(ctx)
+
+                self.assertIsNotNone(signal)
+                self.assertTrue(signal["add_valid"])
+                self.assertTrue(signal["frozen_recovery_confirmed"])
+
     def test_signal_update_fetches_higher_timeframe_ema_history(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -3967,6 +4039,42 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(bot.exchange.canceled_orders, [])
                 bot._ensure_sell_ladder(SYMBOL)
                 self.assertEqual(bot.exchange.created_orders, [])
+
+    def test_tracked_exit_orders_clear_after_invisible_timeout(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 5.0
+                state.entry_price = 100.0
+                timeout = bot._unknown_exit_wait_timeout_sec()
+                state.sell_ladder_signature = bot._sell_ladder_signature("normal")
+                state.sell_ladder_orders = [
+                    {
+                        "id": "sell_1",
+                        "side": "sell",
+                        "price": 101.0,
+                        "amount": 5.0,
+                        "invisible_preserved_at": time.time() - timeout - 1.0,
+                    }
+                ]
+
+                valid = bot._validate_sell_orders(SYMBOL, [])
+
+                self.assertFalse(valid)
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(state.sell_ladder_signature, "")
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertTrue(
+                    any(
+                        row["event"] == "state_exchange_mismatch"
+                        and "tracked_exit_orders_invisible_timeout" in row["reason"]
+                        for row in rows
+                    )
+                )
 
     def test_tracked_exit_order_id_rotation_adopts_visible_reduce_only_exit(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

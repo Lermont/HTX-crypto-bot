@@ -3251,8 +3251,8 @@ class StrategyMixin:
             missing_amount = sum(self._safe_float(ref.get("amount"), 0.0) for ref in missing_refs)
             if missing_refs and not open_sell_orders:
                 first_preserve = not all(ref.get("invisible_preserved_at") for ref in missing_refs)
+                now = time.time()
                 if first_preserve:
-                    now = time.time()
                     for ref in missing_refs:
                         ref["invisible_preserved_at"] = now
                     self._log_event(
@@ -3267,7 +3267,38 @@ class StrategyMixin:
                     )
                     self._refresh_active_side(state)
                     self._save_state()
-                return True
+                    return True
+                oldest_preserved_at = min(
+                    self._safe_float(ref.get("invisible_preserved_at"), now)
+                    for ref in missing_refs
+                )
+                invisible_elapsed = max(0.0, now - oldest_preserved_at)
+                invisible_timeout = self._unknown_exit_wait_timeout_sec()
+                if invisible_elapsed < invisible_timeout:
+                    self._refresh_active_side(state)
+                    self._save_state()
+                    return True
+
+                self._log_event(
+                    "WARNING",
+                    f"Tracked {exit_side} exit ladder for {symbol} stayed invisible for {invisible_elapsed:.1f}s; clearing refs so the ladder can be rebuilt",
+                    event="state_exchange_mismatch",
+                    symbol=symbol,
+                    side=exit_side,
+                    amount=missing_amount,
+                    position_size=state.position_size,
+                    reason=(
+                        "tracked_exit_orders_invisible_timeout;"
+                        f"elapsed={invisible_elapsed:.1f};timeout={invisible_timeout:.1f}"
+                    ),
+                )
+                state.sell_ladder_orders = []
+                state.sell_ladder_signature = ""
+                self._clear_pending_exit_ladder(state)
+                self._reset_exit_runner_state(state)
+                self._refresh_active_side(state)
+                self._save_state()
+                return False
 
             self._log_event(
                 "WARNING",

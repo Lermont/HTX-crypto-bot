@@ -43,6 +43,12 @@ class ConfigTests(unittest.TestCase):
         with temporary_env(BTC_HEDGE_ENABLED="false", HTXBOT_BTC_HEDGE_ENABLED=None):
             self.assertFalse(config._make_hedge_settings().btc_hedge_enabled)
 
+    def test_short_profile_markets_cache_filename_matches_profile(self):
+        cache_path = config.resolve_profile("short").runtime.markets_cache_file.replace("\\", "/")
+
+        self.assertTrue(cache_path.endswith("/short/bot_futures_short_markets_cache.json"))
+        self.assertNotIn("short_state_markets_cache", cache_path)
+
     def test_add_config_warning(self):
         # Record initial length to avoid side effects from other tests
         initial_len = len(CONFIG_WARNINGS)

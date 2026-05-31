@@ -20,8 +20,121 @@ _state_io_lock = threading.RLock()
 
 
 class StateMixin:
+    _STATE_FLOAT_FIELDS = {
+        "position_size",
+        "position_available",
+        "position_frozen",
+        "entry_price",
+        "last_buy_price",
+        "last_buy_amount",
+        "planned_quote_budget",
+        "initial_entry_notional",
+        "paid_buy_fees_quote",
+        "paid_sell_fees_quote",
+        "total_bought_amount",
+        "total_bought_quote",
+        "total_sold_amount",
+        "total_sold_quote",
+        "realized_pnl",
+        "unrealized_pnl",
+        "remaining_entry_quote",
+        "remaining_buy_fees_quote",
+        "net_open_pnl",
+        "base_entry_amount",
+        "base_entry_quote",
+        "base_entry_fees_quote",
+        "base_entry_price",
+        "averaging_entry_amount",
+        "averaging_entry_quote",
+        "averaging_entry_fees_quote",
+        "leverage",
+        "last_rs30",
+        "last_rs60",
+        "last_ema30",
+        "last_ema60",
+        "last_ema25d",
+        "last_ema50d",
+        "last_ema1d",
+        "last_ema2d",
+        "last_ema50",
+        "last_ema100",
+        "last_btc_return_30m",
+        "exit_runner_peak_price",
+        "exit_runner_bottom_price",
+        "exit_runner_contracts",
+        "entry_rs30",
+        "entry_rs60",
+        "entry_ema30",
+        "entry_ema60",
+        "entry_ema25d",
+        "entry_ema50d",
+        "entry_ema1d",
+        "entry_ema2d",
+        "entry_ema50",
+        "entry_ema100",
+        "entry_btc_return_30m",
+    }
+    _STATE_OPTIONAL_FLOAT_FIELDS = {
+        "pending_exit_ladder_since",
+        "cycle_opened_at",
+        "cooldown_until",
+        "time_exit_activated_at",
+        "zombie_marked_at",
+        "last_signal_timestamp",
+        "last_entry_ladder_signal_timestamp",
+        "last_average_signal_timestamp",
+        "last_average_at",
+        "last_frozen_recovery_signal_timestamp",
+        "last_frozen_recovery_at",
+        "last_ema_strategy_signal_timestamp",
+        "breakeven_activated_at",
+        "exit_runner_activated_at",
+        "last_account_unload_at",
+    }
+    _STATE_INT_FIELDS = {
+        "buy_stage",
+        "average_stage",
+        "frozen_recovery_buys",
+        "account_unload_count",
+    }
+    _STATE_BOOL_FIELDS = {
+        "frozen_no_more_buys",
+        "zombie_position",
+        "exit_runner_active",
+    }
+
     def _is_transient_replace_error(self, exc: OSError) -> bool:
         return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {5, 32}
+
+    def _coerce_optional_state_float(self, value):
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_state_bool(self, value) -> bool:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off", ""}:
+                return False
+        return bool(value)
+
+    def _coerce_trade_state(self, state: TradeState) -> TradeState:
+        for name in self._STATE_FLOAT_FIELDS:
+            setattr(state, name, self._safe_float(getattr(state, name, 0.0), 0.0))
+        for name in self._STATE_OPTIONAL_FLOAT_FIELDS:
+            setattr(state, name, self._coerce_optional_state_float(getattr(state, name, None)))
+        for name in self._STATE_INT_FIELDS:
+            setattr(state, name, int(self._safe_float(getattr(state, name, 0), 0.0)))
+        for name in self._STATE_BOOL_FIELDS:
+            setattr(state, name, self._coerce_state_bool(getattr(state, name, False)))
+        return state
 
     def _replace_state_file_with_retry(self, tmp_path, target_path):
         for attempt in range(30):
@@ -81,6 +194,7 @@ class StateMixin:
             )
             safe_payload = {key: value for key, value in payload.items() if key in known_fields}
             state = TradeState(**safe_payload)
+            self._coerce_trade_state(state)
             state.symbol = state.symbol or symbol
             state.market_symbol = state.market_symbol or state.symbol
             if self._safe_float(getattr(state, "leverage", 0.0), 0.0) <= 0:
@@ -232,12 +346,27 @@ class StateMixin:
 
     def _normalize_order_refs(self, refs: list) -> list:
         normalized = []
-        for item in refs or []:
+        if isinstance(refs, dict):
+            items = [refs]
+        elif isinstance(refs, (list, tuple, set)):
+            items = list(refs)
+        elif refs:
+            items = [refs]
+        else:
+            items = []
+        for item in items:
             if isinstance(item, dict):
                 ref = dict(item)
-                if ref.get("id") is not None:
-                    ref["id"] = str(ref["id"])
-                    normalized.append(ref)
+                order_id = str(ref.get("id") or "")
+                if not order_id:
+                    continue
+                ref["id"] = order_id
+                for key in ("price", "amount", "filled", "remaining", "created_at", "signal_ts"):
+                    if key in ref and ref.get(key) is not None:
+                        ref[key] = self._safe_float(ref.get(key), 0.0)
+                if "stage" in ref and ref.get("stage") is not None:
+                    ref["stage"] = int(self._safe_float(ref.get("stage"), 0.0))
+                normalized.append(ref)
             elif item:
                 normalized.append({"id": str(item), "created_at": 0.0})
         return normalized
@@ -245,10 +374,8 @@ class StateMixin:
     def _normalize_order_ref(self, ref) -> dict:
         if isinstance(ref, dict):
             normalized = dict(ref)
-            if normalized.get("id") is not None:
-                normalized["id"] = str(normalized["id"])
-                return normalized
-            return {}
+            refs = self._normalize_order_refs([normalized])
+            return refs[0] if refs else {}
         if isinstance(ref, list):
             refs = self._normalize_order_refs(ref)
             return refs[0] if refs else {}
