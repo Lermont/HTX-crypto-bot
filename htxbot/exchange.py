@@ -420,7 +420,11 @@ class ExchangeMixin:
         if not strategy.enable_funding_aware_exit:
             return {"rate": 0.0, "markup_multiplier": 1.0, "reason": "disabled"}
 
-        cached = self.funding_cache.get(symbol)
+        import threading
+        if not hasattr(self, "_funding_lock"):
+            self._funding_lock = threading.Lock()
+        with self._funding_lock:
+            cached = self.funding_cache.get(symbol)
         now = time.time()
         if cached and now - self._safe_float(cached.get("ts"), 0.0) < strategy.funding_cache_ttl_sec:
             return cached
@@ -466,7 +470,11 @@ class ExchangeMixin:
             "reason": reason,
             "ts": now,
         }
-        self.funding_cache[symbol] = payload
+        import threading
+        if not hasattr(self, "_funding_lock"):
+            self._funding_lock = threading.Lock()
+        with self._funding_lock:
+            self.funding_cache[symbol] = payload
         return payload
 
     def _account_snapshot(self) -> dict:
@@ -984,11 +992,8 @@ class ExchangeMixin:
                 def update_mode(symbol):
                     self.exchange.set_position_mode(False, symbol, params=self._position_params())
 
-                max_workers = min(10, max(1, len(self.symbols)))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(update_mode, symbol) for symbol in self.symbols]
-                    for future in concurrent.futures.as_completed(futures):
-                        future.result()
+                for symbol in self.symbols:
+                    update_mode(symbol)
         except Exception as exc:
             if self._is_position_mode_locked_error(exc):
                 mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()
@@ -1377,6 +1382,22 @@ class ExchangeMixin:
             side = str(ref.get("side") or config.EXIT_SIDE).lower()
             if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
                 canceled_all = False
+
+        tracked_ids = {str(ref.get("id")) for ref in entry_refs + sell_refs if ref.get("id")}
+        open_orders = self._fetch_open_orders(symbol)
+        if isinstance(open_orders, list):
+            untracked_orders = [o for o in open_orders if isinstance(o, dict) and str(o.get("id")) not in tracked_ids]
+            if untracked_orders:
+                self._log_event(
+                    "WARNING",
+                    f"Found {len(untracked_orders)} untracked open orders on exchange for {symbol}; canceling them",
+                    event="state_exchange_mismatch",
+                    symbol=symbol,
+                    reason="canceling_untracked_orders",
+                )
+                if not self._cancel_exchange_orders(symbol, untracked_orders, side=None, reason=reason):
+                    canceled_all = False
+
         if not canceled_all:
             return
         state.entry_orders = []
