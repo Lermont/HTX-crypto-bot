@@ -432,6 +432,17 @@ class ExternalPriceFeedSettings:
 
 
 @dataclass(frozen=True)
+class HedgeSettings:
+    btc_hedge_enabled: bool
+    btc_hedge_coin: str
+    btc_hedge_ratio: float
+    btc_hedge_min_rebalance_notional: float
+    btc_hedge_max_notional: float
+    btc_hedge_max_spread_bps: float
+    btc_hedge_cooldown_sec: float
+
+
+@dataclass(frozen=True)
 class MonitoringSettings:
     log_level: str
     cycle_stats_csv_file: str
@@ -457,6 +468,21 @@ class RuntimeSettings:
     fill_detail_lookback_sec: int
     state_file: str
     markets_cache_file: str
+
+
+def _make_hedge_settings() -> HedgeSettings:
+    return HedgeSettings(
+        btc_hedge_enabled=_env_bool("BTC_HEDGE_ENABLED", True),
+        btc_hedge_coin=(_env("BTC_HEDGE_COIN") or "btc").strip().lower(),
+        btc_hedge_ratio=max(0.0, _env_float("BTC_HEDGE_RATIO", 1.0)),
+        btc_hedge_min_rebalance_notional=max(0.0, _env_float("BTC_HEDGE_MIN_REBALANCE_NOTIONAL", 10.0)),
+        btc_hedge_max_notional=max(0.0, _env_float("BTC_HEDGE_MAX_NOTIONAL", 0.0)),
+        btc_hedge_max_spread_bps=max(0.0, _env_float("BTC_HEDGE_MAX_SPREAD_BPS", 30.0)),
+        btc_hedge_cooldown_sec=max(0.0, _env_float("BTC_HEDGE_COOLDOWN_SEC", 30.0)),
+    )
+
+
+HEDGE = _make_hedge_settings()
 
 
 @dataclass(frozen=True)

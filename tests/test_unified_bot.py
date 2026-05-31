@@ -25,6 +25,7 @@ from htxbot.models import PositionLifecycle, SellLadderParams
 
 
 SYMBOL = "TEST/USDT:USDT"
+SECOND_SYMBOL = "ALT2/USDT:USDT"
 BTC_SYMBOL = "BTC/USDT:USDT"
 XAUT_SYMBOL = "XAUT/USDT:USDT"
 MARKET = {
@@ -44,6 +45,12 @@ BTC_MARKET = {
     "symbol": BTC_SYMBOL,
     "id": "BTC-USDT",
     "base": "BTC",
+}
+SECOND_MARKET = {
+    **MARKET,
+    "symbol": SECOND_SYMBOL,
+    "id": "ALT2-USDT",
+    "base": "ALT2",
 }
 XAUT_MARKET = {
     **MARKET,
@@ -88,7 +95,7 @@ class FakeMexcClient:
 
 class FakeExchange:
     def __init__(self):
-        self.markets = {SYMBOL: MARKET}
+        self.markets = {SYMBOL: MARKET, SECOND_SYMBOL: SECOND_MARKET, BTC_SYMBOL: BTC_MARKET}
         self.urls = {"hostnames": {}}
         self.has = {
             "fetchFundingRate": False,
@@ -349,6 +356,8 @@ class UnifiedBotTests(unittest.TestCase):
         logger.handlers.clear()
         logger.addHandler(logging.NullHandler())
         logger.propagate = False
+        instance.profile = config.current_profile()
+        instance.profile_name = config.BOT_NAME
         instance.log = logger
         instance.exchange = FakeExchange()
         instance.state_path = tmp_path / "state.json"
@@ -4488,6 +4497,247 @@ class UnifiedBotTests(unittest.TestCase):
 
         reserved = CombinedHtxFuturesBot._reserved_symbols(combined, exclude=long_bot)
         self.assertIn(SYMBOL, reserved)
+
+    def make_btc_hedge_combined(self, tmp_path: Path, positions=None, open_orders=None, ticker=None):
+        with config.use_profile("long"):
+            long_bot = self.make_bot(tmp_path / "long")
+        with config.use_profile("short"):
+            short_bot = self.make_bot(tmp_path / "short")
+        shared_exchange = FakeExchange()
+        shared_exchange.positions = list(positions or [])
+        shared_exchange.open_orders = list(open_orders or [])
+        if ticker is not None:
+            shared_exchange.ticker = dict(ticker)
+
+        for profile_name, bot in (("long", long_bot), ("short", short_bot)):
+            profile = config.resolve_profile(profile_name)
+            bot.profile = profile
+            bot.profile_name = profile.name
+            bot.exchange = shared_exchange
+            bot.symbols = [SYMBOL, SECOND_SYMBOL]
+            bot.market_by_symbol = {
+                SYMBOL: MARKET,
+                SECOND_SYMBOL: SECOND_MARKET,
+                BTC_SYMBOL: BTC_MARKET,
+            }
+            bot.benchmark_symbol = BTC_SYMBOL
+
+        combined = object.__new__(CombinedHtxFuturesBot)
+        combined.bots = [long_bot, short_bot]
+        combined._last_btc_hedge_action_at = 0.0
+        combined._btc_hedge_log_at = {}
+        return combined, shared_exchange
+
+    def test_btc_hedge_opens_short_for_net_long_exposure(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            positions = [
+                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 5.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+            ]
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(
+                    Path(raw_tmp),
+                    positions=positions,
+                    ticker={"bid": 99.9, "ask": 100.1, "last": 100.0},
+                )
+
+                CombinedHtxFuturesBot._rebalance_btc_hedge(combined)
+
+            self.assertEqual(len(exchange.created_orders), 1)
+            order = exchange.created_orders[-1]
+            self.assertEqual(order["symbol"], BTC_SYMBOL)
+            self.assertEqual(order["type"], "market")
+            self.assertEqual(order["side"], "sell")
+            self.assertEqual(order["amount"], 5.0)
+            self.assertFalse(order["params"].get("reduceOnly", False))
+
+    def test_btc_hedge_reduces_existing_same_side_with_reduce_only(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            positions = [
+                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 5.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {"symbol": BTC_SYMBOL, "side": "short", "contracts": 8.0, "entryPrice": 100.0, "available": 8.0, "marginMode": config.RISK.margin_mode},
+            ]
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(
+                    Path(raw_tmp),
+                    positions=positions,
+                    ticker={"bid": 99.0, "ask": 101.0, "last": 100.0},
+                )
+
+                CombinedHtxFuturesBot._rebalance_btc_hedge(combined)
+
+            self.assertEqual(len(exchange.created_orders), 1)
+            order = exchange.created_orders[-1]
+            self.assertEqual(order["symbol"], BTC_SYMBOL)
+            self.assertEqual(order["side"], "buy")
+            self.assertEqual(order["amount"], 3.0)
+            self.assertTrue(order["params"].get("reduceOnly"))
+
+    def test_btc_hedge_flip_closes_current_side_before_opening_opposite(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            positions = [
+                {"symbol": SYMBOL, "side": "long", "contracts": 1.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 6.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {"symbol": BTC_SYMBOL, "side": "short", "contracts": 3.0, "entryPrice": 100.0, "available": 3.0, "marginMode": config.RISK.margin_mode},
+            ]
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(
+                    Path(raw_tmp),
+                    positions=positions,
+                    ticker={"bid": 99.0, "ask": 101.0, "last": 100.0},
+                )
+
+                CombinedHtxFuturesBot._rebalance_btc_hedge(combined)
+
+            self.assertEqual(len(exchange.created_orders), 1)
+            order = exchange.created_orders[-1]
+            self.assertEqual(order["symbol"], BTC_SYMBOL)
+            self.assertEqual(order["side"], "buy")
+            self.assertEqual(order["amount"], 3.0)
+            self.assertTrue(order["params"].get("reduceOnly"))
+
+    def test_btc_hedge_waits_when_btc_open_orders_exist(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            positions = [
+                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+            ]
+            open_orders = [
+                {"id": "btc_pending", "symbol": BTC_SYMBOL, "side": "sell", "amount": 1.0, "remaining": 1.0},
+            ]
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(
+                    Path(raw_tmp),
+                    positions=positions,
+                    open_orders=open_orders,
+                    ticker={"bid": 99.0, "ask": 101.0, "last": 100.0},
+                )
+
+                CombinedHtxFuturesBot._rebalance_btc_hedge(combined)
+
+            self.assertEqual(exchange.created_orders, [])
+
+    def test_btc_hedge_waits_when_reduce_closeable_is_zero(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            positions = [
+                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 5.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {"symbol": BTC_SYMBOL, "side": "short", "contracts": 8.0, "entryPrice": 100.0, "available": 0.0, "marginMode": config.RISK.margin_mode},
+            ]
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(
+                    Path(raw_tmp),
+                    positions=positions,
+                    ticker={"bid": 99.0, "ask": 101.0, "last": 100.0},
+                )
+
+                CombinedHtxFuturesBot._rebalance_btc_hedge(combined)
+
+            self.assertEqual(exchange.created_orders, [])
+
+    def test_btc_hedge_default_does_not_open_with_single_profile(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            positions = [
+                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+            ]
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(
+                    Path(raw_tmp),
+                    positions=positions,
+                    ticker={"bid": 99.0, "ask": 101.0, "last": 100.0},
+                )
+                combined.bots = [combined.bots[0]]
+
+                CombinedHtxFuturesBot._rebalance_btc_hedge(combined)
+
+            self.assertEqual(exchange.created_orders, [])
+
+    def test_btc_hedge_single_profile_closes_existing_hedge_reduce_only(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            positions = [
+                {"symbol": BTC_SYMBOL, "side": "short", "contracts": 3.0, "entryPrice": 100.0, "available": 3.0, "marginMode": config.RISK.margin_mode},
+            ]
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(
+                    Path(raw_tmp),
+                    positions=positions,
+                    ticker={"bid": 80.0, "ask": 120.0, "last": 100.0},
+                )
+                combined.bots = [combined.bots[0]]
+
+                CombinedHtxFuturesBot._rebalance_btc_hedge(combined)
+
+            self.assertEqual(len(exchange.created_orders), 1)
+            order = exchange.created_orders[-1]
+            self.assertEqual(order["symbol"], BTC_SYMBOL)
+            self.assertEqual(order["side"], "buy")
+            self.assertEqual(order["amount"], 3.0)
+            self.assertTrue(order["params"].get("reduceOnly"))
+
+    def test_btc_hedge_open_waits_when_btc_spread_is_too_wide(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_max_spread_bps=30.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            positions = [
+                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+            ]
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(
+                    Path(raw_tmp),
+                    positions=positions,
+                    ticker={"bid": 90.0, "ask": 110.0, "last": 100.0},
+                )
+
+                CombinedHtxFuturesBot._rebalance_btc_hedge(combined)
+
+            self.assertEqual(exchange.created_orders, [])
 
     def test_combined_rejects_mismatched_api_credentials(self):
         long_profile = replace(
