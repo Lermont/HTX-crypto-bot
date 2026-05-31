@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
+import threading
 from typing import Dict, List, Optional
 
 import config
 
+from .concurrency import ensure_runtime_locks
 from .exchange import ExchangeMixin
 from .external_price import ExternalPriceFeed
 from .models import TradeState
@@ -84,6 +86,7 @@ class HtxFuturesBot(
         self.profile = config.resolve_profile(profile)
         with config.use_profile(self.profile):
             self.profile_name = self.profile.name
+            ensure_runtime_locks(self)
             self.log = self._build_logger()
             self.exchange = exchange or self._create_exchange()
             self.external_price_feed = external_price_feed or ExternalPriceFeed(config.EXTERNAL_PRICE_FEED)
@@ -126,6 +129,9 @@ class HtxFuturesBot(
             self.skip_futures_account_setup = False
             self.funding_cache: Dict[str, dict] = {}
             self.order_leverage_cache: Dict[str, float] = {}
+            self._account_pnl_lock = threading.RLock()
+            self._funding_cache_lock = threading.RLock()
+            self._private_cache_lock = threading.RLock()
             self._reset_private_caches()
             self.states = self._load_state()
             self.signal_cache = {

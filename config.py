@@ -265,6 +265,9 @@ class StrategySettings:
     ema_averaging_base_fraction: float
     ema_averaging_power: float
     ema_averaging_interval_hours: float
+    ema_averaging_atr_enabled: bool
+    ema_averaging_atr_period: int
+    ema_averaging_atr_multiplier: float
     ema_max_averaging_stages: int
     account_pnl_enabled: bool
     account_pnl_window_minutes: float
@@ -280,6 +283,10 @@ class StrategySettings:
     account_profit_unload_min_position_pnl_quote: float
     account_profit_unload_min_position_pnl_rate: float
     account_profit_unload_cooldown_sec: float
+    account_pnl_trailing_enabled: bool
+    account_pnl_trailing_activation_rate: float
+    account_pnl_trailing_stop_rate: float
+    account_pnl_trailing_min_pnl_quote: float
     account_averaging_enabled: bool
     account_averaging_min_samples: int
     account_averaging_percentile: float
@@ -311,6 +318,9 @@ class StrategySettings:
     entry_crowded_min_score: float
     entry_crowded_min_rs60_abs: float
     entry_crowded_min_rs30_abs: float
+    entry_spread_filter_enabled: bool
+    entry_spread_filter_max_bps: float
+    entry_spread_filter_block_if_unavailable: bool
     max_buy_stages: int
     averaging_drawdown_steps: Tuple[float, ...]
     averaging_budget_fractions: Tuple[float, ...]
@@ -323,6 +333,8 @@ class StrategySettings:
     hard_time_exit_fraction_step: float
     hard_time_exit_max_loss_on_notional: float
     hard_time_exit_bypass_profit_bank: bool
+    hard_stop_loss_enabled: bool
+    hard_stop_loss_pct: float
     enable_absolute_force_exit: bool
     absolute_force_exit_after_minutes: float
     enable_controlled_loss_exit: bool
@@ -675,14 +687,29 @@ def _validate_profile(profile: "BotProfile") -> None:
         "account_profit_unload_fraction",
         "account_profit_unload_drawdown_fraction",
         "account_profit_unload_peak_drawdown_fraction",
+        "account_pnl_trailing_activation_rate",
+        "account_pnl_trailing_stop_rate",
         "account_averaging_percentile",
         "account_averaging_near_trough_fraction",
         "account_averaging_falling_guard_fraction",
         "account_averaging_budget_scale",
+        "hard_stop_loss_pct",
     ):
         value = getattr(profile.strategy, setting_name)
         if value < 0.0 or value > 1.0:
             raise ValueError(f"{profile.name}.STRATEGY.{setting_name} must be between 0 and 1")
+
+    if (
+        profile.strategy.account_pnl_trailing_enabled
+        and profile.strategy.account_pnl_trailing_stop_rate
+        > profile.strategy.account_pnl_trailing_activation_rate
+    ):
+        _add_config_warning(
+            f"{profile.name}: account_pnl_trailing_stop_rate is above activation_rate; "
+            "global trailing may close immediately after activation"
+        )
+    if profile.strategy.hard_stop_loss_enabled and profile.strategy.hard_stop_loss_pct <= 0:
+        raise ValueError(f"{profile.name}.STRATEGY.hard_stop_loss_pct must be positive when hard stop is enabled")
 
     if profile.risk.max_position_notional_fraction > 0.03 + 1e-12:
         _add_config_warning(
@@ -889,6 +916,9 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_averaging_base_fraction=ema_averaging_base_fraction,
         ema_averaging_power=ema_averaging_power,
         ema_averaging_interval_hours=_env_float("EMA_AVERAGING_INTERVAL_HOURS", 8.0, profile=name),
+        ema_averaging_atr_enabled=_env_bool("EMA_AVERAGING_ATR_ENABLED", False, profile=name),
+        ema_averaging_atr_period=max(1, _env_int("EMA_AVERAGING_ATR_PERIOD", 14, profile=name)),
+        ema_averaging_atr_multiplier=max(0.0, _env_float("EMA_AVERAGING_ATR_MULTIPLIER", 1.0, profile=name)),
         ema_max_averaging_stages=ema_max_averaging_stages,
         account_pnl_enabled=_env_bool("ACCOUNT_PNL_ENABLED", True, profile=name),
         account_pnl_window_minutes=_env_float("ACCOUNT_PNL_WINDOW_MINUTES", 360.0, profile=name),
@@ -904,6 +934,10 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         account_profit_unload_min_position_pnl_quote=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_POSITION_PNL_QUOTE", 0.50, profile=name),
         account_profit_unload_min_position_pnl_rate=_env_float("ACCOUNT_PROFIT_UNLOAD_MIN_POSITION_PNL_RATE", 0.001, profile=name),
         account_profit_unload_cooldown_sec=_env_float("ACCOUNT_PROFIT_UNLOAD_COOLDOWN_SEC", 300.0, profile=name),
+        account_pnl_trailing_enabled=_env_bool("ACCOUNT_PNL_TRAILING_ENABLED", False, profile=name),
+        account_pnl_trailing_activation_rate=_env_float("ACCOUNT_PNL_TRAILING_ACTIVATION_RATE", 0.050, profile=name),
+        account_pnl_trailing_stop_rate=_env_float("ACCOUNT_PNL_TRAILING_STOP_RATE", 0.035, profile=name),
+        account_pnl_trailing_min_pnl_quote=_env_float("ACCOUNT_PNL_TRAILING_MIN_PNL_QUOTE", 0.0, profile=name),
         account_averaging_enabled=_env_bool("ACCOUNT_AVERAGING_ENABLED", False, profile=name),
         account_averaging_min_samples=_env_int("ACCOUNT_AVERAGING_MIN_SAMPLES", 6, profile=name),
         account_averaging_percentile=_env_float("ACCOUNT_AVERAGING_PERCENTILE", 0.25, profile=name),
@@ -935,6 +969,13 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         entry_crowded_min_score=_env_float("ENTRY_CROWDED_MIN_SCORE", 0.04, profile=name),
         entry_crowded_min_rs60_abs=_env_float("ENTRY_CROWDED_MIN_RS60_ABS", 0.003, profile=name),
         entry_crowded_min_rs30_abs=_env_float("ENTRY_CROWDED_MIN_RS30_ABS", 0.0015, profile=name),
+        entry_spread_filter_enabled=_env_bool("ENTRY_SPREAD_FILTER_ENABLED", True, profile=name),
+        entry_spread_filter_max_bps=_env_float(
+            "ENTRY_SPREAD_FILTER_MAX_BPS",
+            _env_float("EXTERNAL_PRICE_MAX_INTERNAL_SPREAD_BPS", 30.0, profile=name),
+            profile=name,
+        ),
+        entry_spread_filter_block_if_unavailable=_env_bool("ENTRY_SPREAD_FILTER_BLOCK_IF_UNAVAILABLE", False, profile=name),
         max_buy_stages=_env_int("MAX_BUY_STAGES", ema_max_averaging_stages + 1, profile=name),
         averaging_drawdown_steps=tuple(
             _env_float(
@@ -965,6 +1006,8 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         hard_time_exit_fraction_step=_env_float("HARD_TIME_EXIT_FRACTION_STEP", 0.25, profile=name),
         hard_time_exit_max_loss_on_notional=_env_float("HARD_TIME_EXIT_MAX_LOSS_ON_NOTIONAL", 0.03, profile=name),
         hard_time_exit_bypass_profit_bank=_env_bool("HARD_TIME_EXIT_BYPASS_PROFIT_BANK", True, profile=name),
+        hard_stop_loss_enabled=_env_bool("HARD_STOP_LOSS_ENABLED", False, profile=name),
+        hard_stop_loss_pct=_env_float("HARD_STOP_LOSS_PCT", 0.0, profile=name),
         enable_absolute_force_exit=False,
         absolute_force_exit_after_minutes=0.0,
         enable_controlled_loss_exit=False,

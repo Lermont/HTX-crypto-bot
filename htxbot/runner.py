@@ -178,11 +178,14 @@ class RunnerMixin:
         if state.position_size > 0:
             if not signal_valid:
                 self._freeze_no_more_buys(symbol, reason="signal_invalid_or_missing")
+            self._ensure_hard_stop_loss(symbol)
             if self._maybe_apply_absolute_force_exit(symbol, reason="absolute_force_exit_elapsed"):
                 return
             if self._maybe_apply_controlled_loss_exit(symbol, signal):
                 return
             if self._maybe_apply_urgent_time_exit(symbol, signal):
+                return
+            if self._maybe_apply_account_pnl_trailing(symbol, signal):
                 return
             if self._maybe_apply_account_profit_unload(symbol, signal):
                 return
@@ -209,6 +212,16 @@ class RunnerMixin:
                     reason="flat_symbol_exit_order",
                 )
                 self._cancel_sell_orders(symbol, reason="flat_symbol_exit_order")
+            if state.hard_stop_order:
+                self._log_event(
+                    "WARNING",
+                    f"Tracked {exit_side} hard stop remains on flat {symbol}; canceling tracked bot order",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=exit_side,
+                    reason="flat_symbol_hard_stop_order",
+                )
+                self._cancel_hard_stop_order(symbol, reason="flat_symbol_hard_stop_order")
             if not state.entry_orders:
                 self._maybe_place_initial_buy(symbol, signal)
 
@@ -221,15 +234,19 @@ class RunnerMixin:
             from concurrent.futures import ThreadPoolExecutor
 
             while True:
+                started_at = time.time()
                 self._reset_private_caches()
                 self._update_signal_cache_if_needed()
                 self._prepare_new_entry_gate()
+                prefetch_private = getattr(self, "_prefetch_private_snapshots", None)
+                if prefetch_private:
+                    prefetch_private()
 
                 with ThreadPoolExecutor(max_workers=min(32, len(self.symbols) or 1)) as executor:
                     list(executor.map(self._run_step_symbol_safe, self.symbols))
 
                 self._save_state()
-                time.sleep(config.RUNTIME.poll_interval_sec)
+                self._sleep_after_poll(started_at)
         finally:
             self._release_runtime_lock()
 
@@ -238,3 +255,8 @@ class RunnerMixin:
             self.step_symbol(symbol)
         except Exception as exc:
             self._log_step_exception(symbol, exc)
+
+    def _sleep_after_poll(self, started_at: float):
+        elapsed = max(0.0, time.time() - started_at)
+        interval = max(0.0, float(config.RUNTIME.poll_interval_sec))
+        time.sleep(max(0.0, interval - elapsed))

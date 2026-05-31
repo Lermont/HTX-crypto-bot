@@ -2,7 +2,9 @@
 
 import concurrent.futures
 import json
+import math
 import re
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -10,8 +12,23 @@ import ccxt
 
 import config
 
+from .concurrency import instance_rlock
+
 
 class ExchangeMixin:
+    def _runtime_rlock(self, name: str):
+        lock = getattr(self, name, None)
+        if lock is None:
+            lock = threading.RLock()
+            setattr(self, name, lock)
+        return lock
+
+    def _private_cache_runtime_lock(self):
+        return self._runtime_rlock("_private_cache_lock")
+
+    def _funding_cache_runtime_lock(self):
+        return self._runtime_rlock("_funding_cache_lock")
+
     def _create_exchange(self):
         if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
             raise ValueError("HTX API credentials are required")
@@ -113,9 +130,10 @@ class ExchangeMixin:
         hostnames = self._contract_hostnames()
         for attempt in range(1, retries + 1):
             for hostname in hostnames:
-                self._set_contract_hostname(self.exchange, hostname)
                 try:
-                    markets = self.exchange.load_markets(reload=reload)
+                    with instance_rlock(self, "_exchange_host_lock"):
+                        self._set_contract_hostname(self.exchange, hostname)
+                        markets = self.exchange.load_markets(reload=reload)
                     self._save_markets_cache(markets)
                     return markets
                 except (ccxt.RequestTimeout, ccxt.NetworkError) as exc:
@@ -185,16 +203,17 @@ class ExchangeMixin:
         last_exc = None
         for attempt in range(1, attempts + 1):
             hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
-            if hostname:
-                self._set_contract_hostname(self.exchange, hostname)
             try:
-                return self.exchange.fetch_ohlcv(
-                    symbol,
-                    timeframe=timeframe,
-                    since=since,
-                    limit=limit,
-                    params=params or {},
-                )
+                with instance_rlock(self, "_exchange_host_lock"):
+                    if hostname:
+                        self._set_contract_hostname(self.exchange, hostname)
+                    return self.exchange.fetch_ohlcv(
+                        symbol,
+                        timeframe=timeframe,
+                        since=since,
+                        limit=limit,
+                        params=params or {},
+                    )
             except Exception as exc:
                 if not self._is_transient_exchange_error(exc):
                     raise
@@ -230,10 +249,11 @@ class ExchangeMixin:
         last_exc = None
         for attempt in range(1, attempts + 1):
             hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
-            if hostname:
-                self._set_contract_hostname(self.exchange, hostname)
             try:
-                return fetch()
+                with instance_rlock(self, "_exchange_host_lock"):
+                    if hostname:
+                        self._set_contract_hostname(self.exchange, hostname)
+                    return fetch()
             except (ccxt.RequestTimeout, ccxt.NetworkError) as exc:
                 last_exc = exc
                 if attempt >= attempts:
@@ -418,20 +438,39 @@ class ExchangeMixin:
         if not strategy.enable_funding_aware_exit:
             return {"rate": 0.0, "markup_multiplier": 1.0, "reason": "disabled"}
 
-        cached = self.funding_cache.get(symbol)
-        now = time.time()
-        if cached and now - self._safe_float(cached.get("ts"), 0.0) < strategy.funding_cache_ttl_sec:
-            return cached
+        with self._funding_cache_runtime_lock():
+            now = time.time()
+            cached = self.funding_cache.get(symbol)
+            cached_until = self._safe_float((cached or {}).get("expires_at"), 0.0) if isinstance(cached, dict) else 0.0
+            if cached and cached_until > now:
+                return dict(cached)
+            if (
+                cached
+                and cached_until <= 0
+                and now - self._safe_float(cached.get("ts"), 0.0) < strategy.funding_cache_ttl_sec
+            ):
+                return dict(cached)
 
-        rate = 0.0
-        reason = "unavailable"
-        if self.exchange.has.get("fetchFundingRate"):
+            rate = 0.0
+            reason = "unavailable"
+            if not self.exchange.has.get("fetchFundingRate"):
+                payload = {
+                    "rate": 0.0,
+                    "markup_multiplier": 1.0,
+                    "reason": "funding_rate_unavailable",
+                    "valid": False,
+                    "ts": now,
+                    "expires_at": now + min(max(1.0, self._safe_float(strategy.funding_cache_ttl_sec, 1.0)), 30.0),
+                }
+                self.funding_cache[symbol] = payload
+                return dict(payload)
+
             try:
                 funding = self.exchange.fetch_funding_rate(symbol)
-                rate = self._safe_float(
-                    funding.get("fundingRate", funding.get("rate", (funding.get("info") or {}).get("funding_rate"))),
-                    0.0,
-                )
+                parsed_rate = self._parse_funding_rate_payload(funding)
+                if parsed_rate is None:
+                    raise ValueError("funding rate payload is missing a numeric rate")
+                rate = parsed_rate
                 reason = "neutral"
             except Exception as exc:
                 self._log_event(
@@ -441,31 +480,61 @@ class ExchangeMixin:
                     symbol=symbol,
                     reason="funding_rate_unavailable",
                 )
+                payload = {
+                    "rate": 0.0,
+                    "markup_multiplier": 1.0,
+                    "reason": "funding_rate_unavailable",
+                    "valid": False,
+                    "ts": now,
+                    "expires_at": now + min(max(1.0, self._safe_float(strategy.funding_cache_ttl_sec, 1.0)), 30.0),
+                }
+                self.funding_cache[symbol] = payload
+                return dict(payload)
 
-        markup_multiplier = 1.0
-        if config.POSITION_SIDE == "short":
-            if rate >= strategy.funding_positive_threshold:
-                markup_multiplier = strategy.funding_negative_markup_multiplier
-                reason = "positive_funding_short_receives"
-            elif rate <= strategy.funding_negative_threshold:
-                markup_multiplier = strategy.funding_positive_markup_multiplier
-                reason = "negative_funding_short_pays"
-        else:
-            if rate >= strategy.funding_positive_threshold:
-                markup_multiplier = strategy.funding_positive_markup_multiplier
-                reason = "positive_funding_long_pays"
-            elif rate <= strategy.funding_negative_threshold:
-                markup_multiplier = strategy.funding_negative_markup_multiplier
-                reason = "negative_funding_long_receives"
+            markup_multiplier = 1.0
+            if config.POSITION_SIDE == "short":
+                if rate >= strategy.funding_positive_threshold:
+                    markup_multiplier = strategy.funding_negative_markup_multiplier
+                    reason = "positive_funding_short_receives"
+                elif rate <= strategy.funding_negative_threshold:
+                    markup_multiplier = strategy.funding_positive_markup_multiplier
+                    reason = "negative_funding_short_pays"
+            else:
+                if rate >= strategy.funding_positive_threshold:
+                    markup_multiplier = strategy.funding_positive_markup_multiplier
+                    reason = "positive_funding_long_pays"
+                elif rate <= strategy.funding_negative_threshold:
+                    markup_multiplier = strategy.funding_negative_markup_multiplier
+                    reason = "negative_funding_long_receives"
 
-        payload = {
-            "rate": rate,
-            "markup_multiplier": markup_multiplier,
-            "reason": reason,
-            "ts": now,
-        }
-        self.funding_cache[symbol] = payload
-        return payload
+            payload = {
+                "rate": rate,
+                "markup_multiplier": markup_multiplier,
+                "reason": reason,
+                "valid": True,
+                "ts": now,
+                "expires_at": now + max(0.0, self._safe_float(strategy.funding_cache_ttl_sec, 0.0)),
+            }
+            self.funding_cache[symbol] = payload
+            return dict(payload)
+
+    def _parse_funding_rate_payload(self, funding: dict) -> Optional[float]:
+        if not isinstance(funding, dict):
+            return None
+        info = funding.get("info") if isinstance(funding.get("info"), dict) else {}
+        for source in (funding, info):
+            if not isinstance(source, dict):
+                continue
+            for key in ("fundingRate", "funding_rate", "rate"):
+                if key not in source or source.get(key) in (None, ""):
+                    continue
+                try:
+                    rate = float(source.get(key))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(rate):
+                    return rate
+        return None
 
     def _account_snapshot(self) -> dict:
         try:
@@ -543,13 +612,14 @@ class ExchangeMixin:
         return {"free": free, "total": total}
 
     def _reset_private_caches(self):
-        self._private_positions_by_symbol = None
-        self._private_open_orders_by_symbol = None
-        self._private_tickers_by_symbol = None
-        self._private_positions_bulk_failed = False
-        self._private_open_orders_bulk_failed = False
-        self._private_tickers_bulk_failed = False
-        self._external_price_context_cache = {}
+        with self._private_cache_runtime_lock():
+            self._private_positions_by_symbol = None
+            self._private_open_orders_by_symbol = None
+            self._private_tickers_by_symbol = None
+            self._private_positions_bulk_failed = False
+            self._private_open_orders_bulk_failed = False
+            self._private_tickers_bulk_failed = False
+            self._external_price_context_cache = {}
 
     def _payload_symbol(self, payload: dict) -> str:
         if not isinstance(payload, dict):
@@ -585,127 +655,135 @@ class ExchangeMixin:
 
 
     def _bulk_tickers_by_symbol(self) -> Optional[Dict[str, dict]]:
-        cached = getattr(self, "_private_tickers_by_symbol", None)
-        if cached is not None:
-            return cached
-        if getattr(self, "_private_tickers_bulk_failed", False):
-            return None
-        if not self.exchange.has.get("fetchTickers"):
+        with self._private_cache_runtime_lock():
+            cached = getattr(self, "_private_tickers_by_symbol", None)
+            if cached is not None:
+                return cached
+            if getattr(self, "_private_tickers_bulk_failed", False):
+                return None
+            if not self.exchange.has.get("fetchTickers"):
+                self._private_tickers_bulk_failed = True
+                return None
+
+            try:
+                tickers = self._private_fetch_with_retry(
+                    "",
+                    "bulk_tickers_fetch_failed",
+                    "bulk tickers",
+                    lambda: self.exchange.fetch_tickers(list(self.symbols)),
+                )
+            except Exception as exc:
+                self._private_tickers_bulk_failed = True
+                self._log_event(
+                    "DEBUG",
+                    f"Bulk tickers fetch unavailable; falling back to per-symbol sync: {exc}",
+                    event="state_exchange_mismatch",
+                    reason="bulk_tickers_fetch_failed_fallback",
+                    exception=exc,
+                )
+                return None
+
+            if isinstance(tickers, dict):
+                self._private_tickers_by_symbol = tickers
+                return tickers
+
             self._private_tickers_bulk_failed = True
             return None
-
-        try:
-            tickers = self._private_fetch_with_retry(
-                "",
-                "bulk_tickers_fetch_failed",
-                "bulk tickers",
-                lambda: self.exchange.fetch_tickers(list(self.symbols)),
-            )
-        except Exception as exc:
-            self._private_tickers_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                f"Bulk tickers fetch unavailable; falling back to per-symbol sync: {exc}",
-                event="state_exchange_mismatch",
-                reason="bulk_tickers_fetch_failed_fallback",
-                exception=exc,
-            )
-            return None
-
-        if isinstance(tickers, dict):
-            self._private_tickers_by_symbol = tickers
-            return tickers
-
-        self._private_tickers_bulk_failed = True
-        return None
 
     def _bulk_positions_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        cached = getattr(self, "_private_positions_by_symbol", None)
-        if cached is not None:
-            return cached
-        if getattr(self, "_private_positions_bulk_failed", False):
-            return None
-        if not self.exchange.has.get("fetchPositions"):
-            self._private_positions_bulk_failed = True
-            return None
+        with self._private_cache_runtime_lock():
+            cached = getattr(self, "_private_positions_by_symbol", None)
+            if cached is not None:
+                return cached
+            if getattr(self, "_private_positions_bulk_failed", False):
+                return None
+            if not self.exchange.has.get("fetchPositions"):
+                self._private_positions_bulk_failed = True
+                return None
 
-        try:
-            positions = self._private_fetch_with_retry(
-                "",
-                "bulk_positions_fetch_failed",
-                "bulk positions",
-                lambda: self.exchange.fetch_positions(list(self.symbols), self._position_params()),
-            )
-        except Exception as exc:
-            self._private_positions_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                f"Bulk positions fetch unavailable; falling back to per-symbol sync: {exc}",
-                event="state_exchange_mismatch",
-                reason="bulk_positions_fetch_failed",
-                exception=exc,
-            )
-            return None
+            try:
+                positions = self._private_fetch_with_retry(
+                    "",
+                    "bulk_positions_fetch_failed",
+                    "bulk positions",
+                    lambda: self.exchange.fetch_positions(list(self.symbols), self._position_params()),
+                )
+            except Exception as exc:
+                self._private_positions_bulk_failed = True
+                self._log_event(
+                    "DEBUG",
+                    f"Bulk positions fetch unavailable; falling back to per-symbol sync: {exc}",
+                    event="state_exchange_mismatch",
+                    reason="bulk_positions_fetch_failed",
+                    exception=exc,
+                )
+                return None
 
-        grouped, missing_symbol = self._group_payloads_by_symbol(positions)
-        if positions and missing_symbol:
-            self._private_positions_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                "Bulk positions response contains payloads without symbols; falling back to per-symbol sync",
-                event="state_exchange_mismatch",
-                reason="bulk_positions_missing_symbol_fallback",
-            )
-            return None
-        self._private_positions_by_symbol = grouped
-        return grouped
+            grouped, missing_symbol = self._group_payloads_by_symbol(positions)
+            if positions and missing_symbol:
+                self._private_positions_bulk_failed = True
+                self._log_event(
+                    "DEBUG",
+                    "Bulk positions response contains payloads without symbols; falling back to per-symbol sync",
+                    event="state_exchange_mismatch",
+                    reason="bulk_positions_missing_symbol_fallback",
+                )
+                return None
+            self._private_positions_by_symbol = grouped
+            return grouped
 
     def _bulk_open_orders_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        cached = getattr(self, "_private_open_orders_by_symbol", None)
-        if cached is not None:
-            return cached
-        if getattr(self, "_private_open_orders_bulk_failed", False):
-            return None
-        if not self.exchange.has.get("fetchOpenOrders"):
-            self._private_open_orders_bulk_failed = True
-            return None
+        with self._private_cache_runtime_lock():
+            cached = getattr(self, "_private_open_orders_by_symbol", None)
+            if cached is not None:
+                return cached
+            if getattr(self, "_private_open_orders_bulk_failed", False):
+                return None
+            if not self.exchange.has.get("fetchOpenOrders"):
+                self._private_open_orders_bulk_failed = True
+                return None
 
-        def fetch_bulk_open_orders():
+            def fetch_bulk_open_orders():
+                try:
+                    return self.exchange.fetch_open_orders(None, params=self._position_params())
+                except TypeError:
+                    return self.exchange.fetch_open_orders()
+
             try:
-                return self.exchange.fetch_open_orders(None, params=self._position_params())
-            except TypeError:
-                return self.exchange.fetch_open_orders()
+                orders = self._private_fetch_with_retry(
+                    "",
+                    "bulk_open_orders_fetch_failed",
+                    "bulk open orders",
+                    fetch_bulk_open_orders,
+                )
+            except Exception as exc:
+                self._private_open_orders_bulk_failed = True
+                self._log_event(
+                    "DEBUG",
+                    f"Bulk open-orders fetch unavailable; falling back to per-symbol sync: {exc}",
+                    event="state_exchange_mismatch",
+                    reason="bulk_open_orders_fetch_failed",
+                    exception=exc,
+                )
+                return None
 
-        try:
-            orders = self._private_fetch_with_retry(
-                "",
-                "bulk_open_orders_fetch_failed",
-                "bulk open orders",
-                fetch_bulk_open_orders,
-            )
-        except Exception as exc:
-            self._private_open_orders_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                f"Bulk open-orders fetch unavailable; falling back to per-symbol sync: {exc}",
-                event="state_exchange_mismatch",
-                reason="bulk_open_orders_fetch_failed",
-                exception=exc,
-            )
-            return None
+            grouped, missing_symbol = self._group_payloads_by_symbol(orders)
+            if orders and missing_symbol:
+                self._private_open_orders_bulk_failed = True
+                self._log_event(
+                    "DEBUG",
+                    "Bulk open-orders response contains payloads without symbols; falling back to per-symbol sync",
+                    event="state_exchange_mismatch",
+                    reason="bulk_open_orders_missing_symbol_fallback",
+                )
+                return None
+            self._private_open_orders_by_symbol = grouped
+            return grouped
 
-        grouped, missing_symbol = self._group_payloads_by_symbol(orders)
-        if orders and missing_symbol:
-            self._private_open_orders_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                "Bulk open-orders response contains payloads without symbols; falling back to per-symbol sync",
-                event="state_exchange_mismatch",
-                reason="bulk_open_orders_missing_symbol_fallback",
-            )
-            return None
-        self._private_open_orders_by_symbol = grouped
-        return grouped
+    def _prefetch_private_snapshots(self):
+        self._bulk_positions_by_symbol()
+        self._bulk_open_orders_by_symbol()
+        self._bulk_tickers_by_symbol()
 
     def _position_params(self) -> dict:
         return {"marginMode": config.RISK.margin_mode}
@@ -1059,10 +1137,13 @@ class ExchangeMixin:
         reduce_only: bool = False,
         post_only: bool = False,
         leverage: Optional[float] = None,
+        extra_params: Optional[dict] = None,
     ) -> dict:
         if leverage is None:
             leverage = self._fetch_account_order_leverage(symbol)
         params = self._order_params(reduce_only=reduce_only, post_only=post_only, leverage=leverage)
+        if extra_params:
+            params.update(dict(extra_params))
         try:
             return self.exchange.create_order(
                 symbol=symbol,
@@ -1342,6 +1423,19 @@ class ExchangeMixin:
         self._refresh_active_side(state)
         self._save_state()
 
+    def _cancel_hard_stop_order(self, symbol: str, reason: str):
+        state = self._get_state(symbol)
+        ref = dict(state.hard_stop_order or {})
+        if not ref:
+            return
+        side = str(ref.get("side") or config.EXIT_SIDE).lower()
+        if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+            return
+        state.hard_stop_order = {}
+        state.hard_stop_signature = ""
+        self._refresh_active_side(state)
+        self._save_state()
+
     def _cancel_exchange_orders(self, symbol: str, orders: List[dict], side: Optional[str], reason: str) -> bool:
         all_canceled = True
         for order in orders:
@@ -1366,6 +1460,7 @@ class ExchangeMixin:
         state = self._get_state(symbol)
         entry_refs = list(state.entry_orders)
         sell_refs = list(state.sell_ladder_orders)
+        hard_stop_ref = dict(state.hard_stop_order or {})
         canceled_all = True
         for ref in entry_refs:
             side = str(ref.get("side") or config.ENTRY_SIDE).lower()
@@ -1375,11 +1470,17 @@ class ExchangeMixin:
             side = str(ref.get("side") or config.EXIT_SIDE).lower()
             if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
                 canceled_all = False
+        if hard_stop_ref:
+            side = str(hard_stop_ref.get("side") or config.EXIT_SIDE).lower()
+            if not self._cancel_order_ref(symbol, hard_stop_ref, event=f"{side}_order_canceled", reason=reason):
+                canceled_all = False
         if not canceled_all:
             return
         state.entry_orders = []
         state.sell_ladder_orders = []
         state.sell_ladder_signature = ""
+        state.hard_stop_order = {}
+        state.hard_stop_signature = ""
         self._clear_pending_exit_ladder(state)
         self._refresh_active_side(state)
         self._save_state()

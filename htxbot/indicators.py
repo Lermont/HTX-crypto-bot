@@ -98,8 +98,42 @@ def realized_volatility(closes: Sequence[float], window: int) -> float:
     return math.sqrt(max(0.0, variance))
 
 
+def average_true_range(candles: Sequence[Sequence[float]], period: int) -> float:
+    period = int(period)
+    if period <= 0 or len(candles) < period + 1:
+        return 0.0
+
+    rows = []
+    for row in candles:
+        if len(row) < 5:
+            continue
+        try:
+            high = float(row[2])
+            low = float(row[3])
+            close = float(row[4])
+        except (TypeError, ValueError):
+            continue
+        if high <= 0 or low <= 0 or close <= 0 or high < low:
+            continue
+        rows.append((high, low, close))
+
+    if len(rows) < period + 1:
+        return 0.0
+
+    true_ranges = []
+    for index in range(1, len(rows)):
+        high, low, _close = rows[index]
+        previous_close = rows[index - 1][2]
+        true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+
+    if len(true_ranges) < period:
+        return 0.0
+    return sum(true_ranges[-period:]) / period
+
+
 __all__ = [
     "HAS_NUMPY",
+    "average_true_range",
     "calculate_ema",
     "calculate_rsi",
     "clamp",

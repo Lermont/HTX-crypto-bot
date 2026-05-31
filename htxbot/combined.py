@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import threading
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -21,6 +22,7 @@ class CombinedHtxFuturesBot:
         shared_exchange = None
         shared_external_price_feeds: Dict[config.ExternalPriceFeedSettings, object] = {}
         shared_account_pnl_runtime = {"history": [], "last_sample_at": 0.0}
+        shared_account_pnl_lock = threading.RLock()
         for profile in self.profiles:
             feed_settings = profile.external_price_feed
             shared_external_price_feed = shared_external_price_feeds.get(feed_settings)
@@ -32,6 +34,7 @@ class CombinedHtxFuturesBot:
             bot.skip_futures_account_setup = bool(self.bots)
             bot.skip_live_balance_log = bool(self.bots)
             bot.account_pnl_runtime = shared_account_pnl_runtime
+            bot._account_pnl_lock = shared_account_pnl_lock
             self.bots.append(bot)
         for bot in self.bots:
             bot.account_pnl_bots = list(self.bots)
@@ -63,6 +66,9 @@ class CombinedHtxFuturesBot:
                 prepare_entry_gate = getattr(bot, "_prepare_new_entry_gate", None)
                 if prepare_entry_gate:
                     prepare_entry_gate()
+                prefetch_private = getattr(bot, "_prefetch_private_snapshots", None)
+                if prefetch_private:
+                    prefetch_private()
                 for symbol in bot.symbols:
                     try:
                         bot.step_symbol(symbol)
@@ -106,7 +112,7 @@ class CombinedHtxFuturesBot:
                 continue
             with config.use_profile(bot.profile):
                 for symbol, state in bot.states.items():
-                    if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders:
+                    if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders or state.hard_stop_order:
                         reserved.add(symbol)
                 reserved.update(self._exchange_reserved_symbols(bot))
         return reserved
@@ -269,7 +275,7 @@ class CombinedHtxFuturesBot:
             symbols.update(getattr(bot, "symbols", []) or [])
             states = getattr(bot, "states", {}) or {}
             for symbol, state in states.items():
-                if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders:
+                if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders or state.hard_stop_order:
                     symbols.add(symbol)
         symbols.discard(hedge_symbol)
         return symbols

@@ -13,6 +13,7 @@ class SignalContext:
     benchmark_closes: List[float]
     btc_risk: dict
     latest_ts: int
+    candles: Optional[List[list]] = None
     cache_key: str = ""
     macro_context: Optional[dict] = None
     macro_closes: Optional[List[float]] = None
@@ -90,6 +91,8 @@ class TradeState:
     sell_ladder_orders: list = field(default_factory=list)
     sell_ladder_mode: str = "normal"
     sell_ladder_signature: str = ""
+    hard_stop_order: dict = field(default_factory=dict)
+    hard_stop_signature: str = ""
     pending_exit_ladder_since: Optional[float] = None
     pending_exit_ladder_reason: str = ""
     frozen_no_more_buys: bool = False

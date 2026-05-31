@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 
+from .concurrency import instance_rlock
 from .models import PositionLifecycle, TradeState
 
 
@@ -19,6 +20,20 @@ _state_io_lock = threading.RLock()
 
 
 class StateMixin:
+    def _is_transient_replace_error(self, exc: OSError) -> bool:
+        return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {5, 32}
+
+    def _replace_state_file_with_retry(self, tmp_path, target_path):
+        for attempt in range(30):
+            try:
+                os.replace(tmp_path, target_path)
+                return
+            except OSError as exc:
+                if self._is_transient_replace_error(exc) and attempt < 29:
+                    time.sleep(min(0.05 * (attempt + 1), 0.5))
+                    continue
+                raise
+
     def _load_state(self) -> Dict[str, TradeState]:
         if not self.state_path.exists():
             return {}
@@ -74,6 +89,7 @@ class StateMixin:
                 state.margin_mode = config.RISK.margin_mode
             state.entry_orders = self._normalize_order_refs(state.entry_orders)
             state.sell_ladder_orders = self._normalize_order_refs(state.sell_ladder_orders)
+            state.hard_stop_order = self._normalize_order_ref(state.hard_stop_order)
             if has_remaining_cost_basis:
                 self._refresh_net_open_pnl(state)
             else:
@@ -85,27 +101,20 @@ class StateMixin:
         return result
 
     def _save_state(self):
-        with _state_io_lock:
-            payload = {symbol: asdict(state) for symbol, state in list(self.states.items())}
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-            try:
-                tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                for attempt in range(30):
-                    try:
-                        os.replace(tmp_path, self.state_path)
-                        break
-                    except PermissionError:
-                        if attempt < 29:
-                            time.sleep(min(0.05 * (attempt + 1), 0.5))
-                        else:
-                            raise
-            except Exception:
+        with instance_rlock(self, "_state_lock"):
+            with _state_io_lock:
+                payload = {symbol: asdict(state) for symbol, state in list(self.states.items())}
+                self.state_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
                 try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
+                    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    self._replace_state_file_with_retry(tmp_path, self.state_path)
+                except Exception:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
 
     def _pid_is_running(self, pid: int) -> bool:
         if pid <= 0:
@@ -191,28 +200,30 @@ class StateMixin:
             pass
 
     def _get_state(self, symbol: str) -> TradeState:
-        if symbol not in self.states:
-            self.states[symbol] = TradeState(symbol=symbol, market_symbol=symbol)
-        state = self.states[symbol]
-        state.symbol = state.symbol or symbol
-        state.market_symbol = state.market_symbol or symbol
-        if state.position_size <= 0 or self._safe_float(state.leverage, 0.0) <= 0:
-            state.leverage = config.RISK.leverage
-        state.margin_mode = config.RISK.margin_mode
-        self._ensure_entry_buckets_initialized(symbol, state)
-        self._refresh_active_side(state)
-        return state
+        with instance_rlock(self, "_state_lock"):
+            if symbol not in self.states:
+                self.states[symbol] = TradeState(symbol=symbol, market_symbol=symbol)
+            state = self.states[symbol]
+            state.symbol = state.symbol or symbol
+            state.market_symbol = state.market_symbol or symbol
+            if state.position_size <= 0 or self._safe_float(state.leverage, 0.0) <= 0:
+                state.leverage = config.RISK.leverage
+            state.margin_mode = config.RISK.margin_mode
+            self._ensure_entry_buckets_initialized(symbol, state)
+            self._refresh_active_side(state)
+            return state
 
     def _reset_state(self, symbol: str, preserve_cooldown: Optional[float] = None):
-        now = time.time()
-        cooldown = preserve_cooldown if preserve_cooldown and preserve_cooldown > now else None
-        self.states[symbol] = TradeState(
-            symbol=symbol,
-            market_symbol=symbol,
-            cooldown_until=cooldown,
-            leverage=config.RISK.leverage,
-            margin_mode=config.RISK.margin_mode,
-        )
+        with instance_rlock(self, "_state_lock"):
+            now = time.time()
+            cooldown = preserve_cooldown if preserve_cooldown and preserve_cooldown > now else None
+            self.states[symbol] = TradeState(
+                symbol=symbol,
+                market_symbol=symbol,
+                cooldown_until=cooldown,
+                leverage=config.RISK.leverage,
+                margin_mode=config.RISK.margin_mode,
+            )
         self._save_state()
 
     def _clear_pending_exit_ladder(self, state: TradeState):
@@ -230,6 +241,20 @@ class StateMixin:
             elif item:
                 normalized.append({"id": str(item), "created_at": 0.0})
         return normalized
+
+    def _normalize_order_ref(self, ref) -> dict:
+        if isinstance(ref, dict):
+            normalized = dict(ref)
+            if normalized.get("id") is not None:
+                normalized["id"] = str(normalized["id"])
+                return normalized
+            return {}
+        if isinstance(ref, list):
+            refs = self._normalize_order_refs(ref)
+            return refs[0] if refs else {}
+        if ref:
+            return {"id": str(ref), "created_at": 0.0}
+        return {}
 
     def _order_ids(self, refs: list) -> set:
         return {str(item.get("id")) for item in refs or [] if item.get("id") is not None}
@@ -311,6 +336,8 @@ class StateMixin:
             str(ref.get("side") or config.EXIT_SIDE).lower()
             for ref in state.sell_ladder_orders or []
         )
+        if state.hard_stop_order:
+            sides.add(str(state.hard_stop_order.get("side") or config.EXIT_SIDE).lower())
         sides.discard("")
         if len(sides) > 1:
             state.active_side = "both"
@@ -337,7 +364,7 @@ class StateMixin:
         if self._safe_float(getattr(state, "position_size", 0.0), 0.0) <= 0:
             if getattr(state, "entry_orders", None):
                 return PositionLifecycle.ENTERING.value
-            if getattr(state, "sell_ladder_orders", None):
+            if getattr(state, "sell_ladder_orders", None) or getattr(state, "hard_stop_order", None):
                 return PositionLifecycle.EXITING.value
             return PositionLifecycle.FLAT.value
 
@@ -1230,6 +1257,8 @@ class StateMixin:
                     self._cancel_entry_orders(symbol, reason="reserved_by_other_profile")
                 if state.sell_ladder_orders:
                     self._cancel_sell_orders(symbol, reason="reserved_by_other_profile")
+                if state.hard_stop_order:
+                    self._cancel_hard_stop_order(symbol, reason="reserved_by_other_profile")
                 if symbol in self.disabled_symbols:
                     self.disabled_symbols.discard(symbol)
                 self._log_reserved_by_other_profile(symbol, side=opposite_side, amount=opposite_size)
@@ -1247,6 +1276,7 @@ class StateMixin:
                 )
             self._cancel_entry_orders(symbol, reason=f"unexpected_{opposite_side}_position")
             self._cancel_sell_orders(symbol, reason=f"unexpected_{opposite_side}_position")
+            self._cancel_hard_stop_order(symbol, reason=f"unexpected_{opposite_side}_position")
             self.disabled_symbols.add(symbol)
             return "disabled"
 
@@ -1294,6 +1324,7 @@ class StateMixin:
             self._refresh_net_open_pnl(state)
             self._clear_pending_exit_ladder(state)
             self._cancel_sell_orders(symbol, reason="rebuild_after_entry_fill")
+            self._cancel_hard_stop_order(symbol, reason="rebuild_after_entry_fill")
             self._save_state()
             return "position_changed"
 
@@ -1319,6 +1350,7 @@ class StateMixin:
             self._refresh_net_open_pnl(state)
             self._clear_pending_exit_ladder(state)
             self._cancel_sell_orders(symbol, reason="rebuild_after_add")
+            self._cancel_hard_stop_order(symbol, reason="rebuild_after_add")
             self._save_state()
             return "position_changed"
 
@@ -1343,6 +1375,7 @@ class StateMixin:
             self._refresh_net_open_pnl(state)
             self._clear_pending_exit_ladder(state)
             self._cancel_sell_orders(symbol, reason="rebuild_after_partial_exit")
+            self._cancel_hard_stop_order(symbol, reason="rebuild_after_partial_exit")
             self._save_state()
             return "position_changed"
 
@@ -1385,6 +1418,7 @@ class StateMixin:
         state = self._get_state(symbol)
         self._cancel_sell_orders(symbol, reason="cycle_closed")
         self._cancel_entry_orders(symbol, reason="cycle_closed")
+        self._cancel_hard_stop_order(symbol, reason="cycle_closed")
 
         if config.POSITION_SIDE == "short":
             entry_notional = state.total_sold_quote

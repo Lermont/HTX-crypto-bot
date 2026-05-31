@@ -3,11 +3,11 @@
 import math
 import time
 import concurrent.futures
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import config
 
-from .indicators import calculate_ema, calculate_rsi, clamp, compute_log_return, realized_volatility
+from .indicators import average_true_range, calculate_ema, calculate_rsi, clamp, compute_log_return, realized_volatility
 from .models import SignalContext
 
 
@@ -23,6 +23,17 @@ class SignalMixin:
 
     def _realized_volatility(self, closes: List[float], window: int) -> float:
         return realized_volatility(closes, window)
+
+    def _average_true_range(self, candles: List[list], period: int) -> float:
+        return average_true_range(candles, period)
+
+    def _average_true_range_rate(self, candles: Optional[List[list]], close_price: float, period: int) -> Tuple[float, float]:
+        if not candles or close_price <= 0:
+            return 0.0, 0.0
+        atr = self._average_true_range(candles, period)
+        if atr <= 0:
+            return 0.0, 0.0
+        return atr, atr / close_price
 
     def _signal_score(self, rs30: float, rs60: float, ema50: float, ema100: float, price: float) -> float:
         if config.POSITION_SIDE == "short":
@@ -842,6 +853,8 @@ class SignalMixin:
             "ladder_multiplier": 1.0,
             "volatility": 0.0,
             "volatility_multiplier": 1.0,
+            "atr": 0.0,
+            "atr_rate": 0.0,
             "daily_volatility": 0.0,
             "daily_volatility_multiplier": 1.0,
             "signal_budget_multiplier": 1.0,
@@ -879,6 +892,7 @@ class SignalMixin:
                 benchmark_closes=list(benchmark_closes or []),
                 btc_risk=dict(btc_risk or {}),
                 latest_ts=int(latest_ts),
+                candles=None,
                 cache_key=cache_key,
                 macro_context=macro_context,
                 macro_closes=macro_closes,
@@ -890,6 +904,7 @@ class SignalMixin:
         benchmark_closes = ctx.benchmark_closes
         btc_risk = ctx.btc_risk
         latest_ts = ctx.latest_ts
+        candles = ctx.candles
         cache_key = ctx.cache_key
         macro_context = ctx.macro_context
         macro_closes = ctx.macro_closes
@@ -1042,8 +1057,16 @@ class SignalMixin:
             and btc_entry_valid
         )
         add_valid = bool(macro_valid and (trigger_valid or pullback_valid))
+        recovery_confirmation = self._frozen_recovery_confirmation(candles, benchmark_closes, btc_risk)
+        frozen_recovery_confirmed = bool(
+            add_valid
+            and btc_entry_valid
+            and recovery_confirmation.get("frozen_recovery_confirmed")
+            and not macro_context.get("disable_recovery", False)
+        )
         volatility = self._realized_volatility(closes, strategy.volatility_window)
         volatility_multiplier = self._volatility_multiplier(volatility)
+        atr, atr_rate = self._average_true_range_rate(candles, current_close, strategy.ema_averaging_atr_period)
         daily_volatility = self._daily_volatility_context(closes)
         signal_budget_multiplier = self._signal_budget_multiplier(score)
         btc_budget_multiplier = max(0.0, self._safe_float(btc_risk.get("budget_multiplier"), 1.0))
@@ -1074,6 +1097,7 @@ class SignalMixin:
             f"trigger_valid={int(trigger_valid)};rs_confirm_valid={int(rs_confirm_valid)};"
             f"btc_entry_valid={int(btc_entry_valid)};entry_valid={int(entry_valid)};"
             f"add_valid={int(add_valid)};score={score:.6f};"
+            f"atr_rate={atr_rate:.6f};"
             f"signal_budget_multiplier={signal_budget_multiplier:.3f};"
             f"btc_budget_multiplier={btc_budget_multiplier:.3f};"
             f"macro_budget_multiplier={macro_budget_multiplier:.3f};"
@@ -1138,6 +1162,8 @@ class SignalMixin:
             "btc_entry_valid": btc_entry_valid,
             "volatility": volatility,
             "volatility_multiplier": volatility_multiplier,
+            "atr": atr,
+            "atr_rate": atr_rate,
             "daily_volatility": daily_volatility["daily_volatility"],
             "daily_volatility_multiplier": daily_volatility["daily_volatility_multiplier"],
             "volatility_budget_multiplier": daily_volatility["volatility_budget_multiplier"],
@@ -1156,11 +1182,35 @@ class SignalMixin:
             "valid": direction_valid,
             "entry_valid": entry_valid,
             "add_valid": add_valid,
+            "frozen_recovery_confirmed": frozen_recovery_confirmed,
+            "frozen_recovery_confirmed_candles": int(
+                recovery_confirmation.get("frozen_recovery_confirmed_candles", 0)
+            ),
             "reason": reason,
             "ts": latest_ts,
         }
 
     def _frozen_recovery_confirmation(self, candles: list, benchmark_closes: List[float], btc_risk: dict) -> dict:
+        closes = [self._safe_float(row[4], 0.0) for row in candles or [] if row and len(row) > 4]
+        confirmed_candles = 0
+        for index in range(len(closes) - 1, 0, -1):
+            current = closes[index]
+            previous = closes[index - 1]
+            if current <= 0 or previous <= 0:
+                break
+            if config.POSITION_SIDE == "short":
+                favorable = current < previous
+            else:
+                favorable = current > previous
+            if not favorable:
+                break
+            confirmed_candles += 1
+
+        btc_budget = self._safe_float((btc_risk or {}).get("budget_multiplier"), 1.0)
+        return {
+            "frozen_recovery_confirmed": confirmed_candles > 0 and btc_budget > 0,
+            "frozen_recovery_confirmed_candles": confirmed_candles,
+        }
         return {
             "frozen_recovery_confirmed": False,
             "frozen_recovery_confirmed_candles": 0,
@@ -1367,6 +1417,7 @@ class SignalMixin:
                 benchmark_closes=benchmark_closes,
                 btc_risk=btc_risk,
                 latest_ts=latest_ts,
+                candles=candles,
                 cache_key=symbol,
                 macro_context=macro_context,
                 macro_closes=macro_closes,
