@@ -1296,6 +1296,8 @@ class SignalMixin:
                 event="signal_invalid",
                 symbol=self.benchmark_symbol,
                 reason="benchmark_unavailable",
+                exception=exc,
+                retryable=getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc),
             )
             return True
 
@@ -1335,7 +1337,13 @@ class SignalMixin:
                     timeframe=trigger_timeframe,
                 )
             except Exception as exc:
-                return symbol, None, ("WARNING", f"Signal candles unavailable for {symbol}: {exc}", "signal_invalid", "symbol_candles_unavailable")
+                return symbol, None, (
+                    "WARNING",
+                    f"Signal candles unavailable for {symbol}: {exc}",
+                    "signal_invalid",
+                    "symbol_candles_unavailable",
+                    exc,
+                )
 
             if len(candles) < 2:
                 return symbol, None, ("DEBUG", f"Signal skipped for {symbol}: not enough closed candles", "signal_invalid", "symbol_history_short")
@@ -1369,7 +1377,8 @@ class SignalMixin:
                     "WARNING",
                     f"EMA timeframe candles unavailable for {symbol}: {exc}",
                     "ema_signal_invalid",
-                    f"ema_timeframe_candles_unavailable;macro_tf={macro_timeframe};pullback_tf={pullback_timeframe};trigger_tf={trigger_timeframe}"
+                    f"ema_timeframe_candles_unavailable;macro_tf={macro_timeframe};pullback_tf={pullback_timeframe};trigger_tf={trigger_timeframe}",
+                    exc,
                 )
 
             return symbol, (candles, macro_candles, pullback_candles), None
@@ -1383,8 +1392,21 @@ class SignalMixin:
 
         for symbol, data, log_info in results:
             if log_info:
-                level, msg, event, reason = log_info
-                self._log_event(level, msg, event=event, symbol=symbol, reason=reason)
+                level, msg, event, reason = log_info[:4]
+                exc = log_info[4] if len(log_info) > 4 else None
+                self._log_event(
+                    level,
+                    msg,
+                    event=event,
+                    symbol=symbol,
+                    reason=reason,
+                    exception=exc,
+                    retryable=(
+                        getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc)
+                        if exc
+                        else None
+                    ),
+                )
                 continue
 
             if not data:

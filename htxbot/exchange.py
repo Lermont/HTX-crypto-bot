@@ -152,7 +152,38 @@ class ExchangeMixin:
         raise last_exc
 
     def _is_transient_exchange_error(self, exc: Exception) -> bool:
-        return isinstance(exc, (ccxt.RequestTimeout, ccxt.NetworkError))
+        if not isinstance(exc, (ccxt.RequestTimeout, ccxt.NetworkError)):
+            return False
+        text = str(exc or "").lower()
+        diagnostic_error_code = getattr(self, "_diagnostic_error_code", None)
+        error_code = ""
+        if diagnostic_error_code:
+            try:
+                error_code = str(diagnostic_error_code(exc, "") or "").lower()
+            except Exception:
+                error_code = ""
+        non_retryable_codes = {
+            "bad-request",
+            "bad_request",
+            "invalid-parameter",
+            "invalid_parameter",
+            "invalid-symbol",
+            "invalid_symbol",
+        }
+        if error_code in non_retryable_codes:
+            return False
+        if any(
+            marker in text
+            for marker in (
+                "invalid-parameter",
+                "invalid parameter",
+                "invalid-symbol",
+                "invalid symbol",
+                "bad request",
+            )
+        ):
+            return False
+        return True
 
     def _markets_loaded(self) -> bool:
         markets = getattr(self.exchange, "markets", None)

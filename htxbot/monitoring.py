@@ -682,9 +682,8 @@ class MonitoringMixin:
     def _diagnostic_error_code(self, exc: Optional[Exception], message: str = "") -> str:
         text = f"{message} {exc or ''}"
         for pattern in (
-            r'"err_code"\s*:\s*"?([0-9A-Za-z_-]+)"?',
-            r'"code"\s*:\s*"?([0-9A-Za-z_-]+)"?',
-            r"\berr(?:or)?[_ -]?code[=:]\s*([0-9A-Za-z_-]+)",
+            r'"(?:err[_-]?code|error[_-]?code|code)"\s*:\s*"?([0-9A-Za-z_-]+)"?',
+            r"\berr(?:or)?[_ -]?code[\"'\s:=]+\"?([0-9A-Za-z_-]+)\"?",
         ):
             match = re.search(pattern, text, re.IGNORECASE)
             if match:

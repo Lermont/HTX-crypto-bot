@@ -5079,6 +5079,63 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(rows[-1]["event"], "signal_invalid")
                 self.assertEqual(rows[-1]["reason"], "ohlcv_network_retry")
 
+    def test_public_ohlcv_fetch_does_not_retry_htx_invalid_parameter(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            exchange_config = replace(
+                config.EXCHANGE,
+                market_load_retries=4,
+                contract_hostnames=("api.one.test", "api.two.test"),
+            )
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.fetch_ohlcv_failures = [
+                    ccxt.NetworkError(
+                        'htx {"status":"error","err-code":"invalid-parameter",'
+                        '"err-msg":"invalid parameter"}'
+                    )
+                ]
+
+                with self.assertRaises(ccxt.NetworkError):
+                    bot._closed_candles(SYMBOL, 2, timeframe="1m")
+
+                self.assertEqual(len(bot.exchange.ohlcv_calls), 1)
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertFalse(
+                    any(row["reason"] == "ohlcv_network_retry" for row in rows)
+                )
+
+    def test_signal_candle_failure_logs_exception_type_and_htx_error_code(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.benchmark_symbol = BTC_SYMBOL
+            bot.symbols = [SECOND_SYMBOL]
+            bot.entry_symbols = {SECOND_SYMBOL}
+            bot.market_by_symbol = {BTC_SYMBOL: BTC_MARKET, SECOND_SYMBOL: SECOND_MARKET}
+            benchmark_candles = ohlcv_series([100.0 + index for index in range(120)])
+
+            def fake_closed_candles(symbol, limit, max_ts=None, timeframe=None, exchange=None):
+                if symbol == BTC_SYMBOL:
+                    return benchmark_candles[-int(limit):]
+                raise ccxt.NetworkError(
+                    'htx {"status":"error","err-code":"invalid-parameter",'
+                    '"err-msg":"invalid parameter"}'
+                )
+
+            bot._closed_candles = fake_closed_candles
+
+            bot._update_signal_cache_if_needed()
+
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = [
+                    row for row in csv.DictReader(handle)
+                    if row["reason"] == "symbol_candles_unavailable"
+                ]
+            self.assertTrue(rows)
+            self.assertEqual(rows[-1]["exception_type"], "NetworkError")
+            self.assertEqual(rows[-1]["error_code"], "invalid-parameter")
+            self.assertEqual(rows[-1]["retryable"], "0")
+
     def test_log_message_omits_html_gateway_body(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
