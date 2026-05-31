@@ -4,14 +4,13 @@
 
 HTX Futures EMA Pullback Bot 是一个用于 HTX USDT-M 合约的 Python crypto trading bot。它可以运行 long 和 short 两个交易配置，扫描可配置的山寨币列表，基于已收盘 K 线生成 EMA pullback strategy 信号，并在一个进程中管理限价入场、补仓、reduce-only 出场和 breakeven 行为。
 
-这个项目适合希望快速启动、通过 `.env` 灵活配置，并直接使用一套完整 EMA Pullback strategy 的交易者和开发者。默认启用 `DRY_RUN=true`，首次运行可以验证配置、市场加载、信号生成、日志和订单计划，不会发送真实订单。
+这个项目适合希望快速启动、通过 `.env` 灵活配置，并直接使用一套完整 EMA Pullback strategy 的交易者和开发者。机器人是 live-ordering 应用：启动前需要 HTX API credentials，并应先通过测试或 mock/stub exchange 场景验证关键流程。
 
 > 合约交易风险很高。本项目只是软件，不是投资建议。启用真实交易前，请先审计代码、纸面交易、回测，并理解每一个配置项。
 
 ## 项目亮点
 
 - **启动简单**：安装依赖，复制 `.env.example`，运行 `python bot.py`。
-- **默认 dry-run**：`DRY_RUN=true` 让首次运行不会下真实订单。
 - **Long 和 short 配置**：可以只运行 `long`、只运行 `short`，也可以两个同时运行。
 - **开箱即用的 EMA Pullback strategy**：包含 macro trend、pullback recovery、trigger EMA、相对 BTC 强弱、BTC risk filter、score、top-N 选择和拥挤行情限速。
 - **灵活的 `.env` 配置**：EMA 周期、entry gates、risk budget、averaging、breakeven、外部参考价格和 macro overlay 都可以不改代码直接调整。
@@ -63,7 +62,6 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 
 关键默认值：
 
-- `DRY_RUN=true`。
 - `BOT_PROFILES=long,short`。
 - 默认用两个限价订单完成初始入场。
 - 新入场需要通过 quality gates：score、RS60、RS30、top-N、rate-limit 和 crowded-market rules。
@@ -80,14 +78,14 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 - 本地已在 Python 3.14 验证；建议 Python 3.11+。
 - 真实交易需要 HTX account：[使用 invite code `6hc25223` 开通 HTX](https://www.htx.com/invite/en-us/1f?invite_code=6hc25223)。
 - 可选的 MEXC account 可用于参考市场研究：[通过此 referral link 开通 MEXC](https://promote.mexc.com/r/lxcLKaZgvh)。当前 MEXC radar 使用公开市场数据，不需要 MEXC API keys。
-- `DRY_RUN=false` 时需要 USDT-M futures 权限。
+- 需要 USDT-M futures 权限。
 
-安装并以 dry-run 运行：
+安装并进行本地检查：
 
 ```powershell
 python -m pip install -r requirements.txt
 copy .env.example .env
-python bot.py
+python -m pytest -q
 ```
 
 只运行一个 profile：
@@ -103,7 +101,7 @@ python bot.py --profiles short
 python bot.py --profiles long,short
 ```
 
-首次 dry-run 运行应能看到市场加载、BTC benchmark 选择、信号更新、entry gate 决策和计划订单行为，但不会发送真实订单。
+运行 `python bot.py` 会连接 HTX，并可能发送真实订单；启动前请确认 `.env`、账户状态、risk limits 和测试结果。
 
 ## 配置
 
@@ -114,15 +112,12 @@ python bot.py --profiles long,short
 ```dotenv
 HTX_API_KEY=
 HTX_API_SECRET=
-DRY_RUN=true
 BOT_PROFILES=long,short
 ```
 
 常用 profile 覆盖：
 
 ```dotenv
-LONG_DRY_RUN=true
-SHORT_DRY_RUN=true
 LONG_LEVERAGE=30
 SHORT_LEVERAGE=30
 ```
@@ -246,7 +241,7 @@ docs/                  多语言发布文档
 
 - 不要提交 `.env`、`long/.env` 或 `short/.env`。
 - 限制 API key 权限；如果怀疑泄露，请立即轮换。
-- 从 `DRY_RUN=true` 开始。
+- 启动前运行测试，并用 mock/stub exchange 验证关键场景。
 - 在明确启用真实订单前，尽量使用最小 API 权限。
 
 ## 免责声明

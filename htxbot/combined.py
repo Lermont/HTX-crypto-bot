@@ -82,12 +82,9 @@ class CombinedHtxFuturesBot:
 
     def _validate_shared_exchange_profiles(self):
         first = self.profiles[0].api_credentials
-        first_dry = self.profiles[0].runtime.dry_run
         for profile in self.profiles[1:]:
             if profile.api_credentials != first:
                 raise RuntimeError("Combined live profiles must use the same HTX API credentials")
-            if profile.runtime.dry_run != first_dry:
-                raise RuntimeError("Combined profiles must all have the same DRY_RUN setting")
 
     def _reserved_symbols(self, exclude: HtxFuturesBot) -> set:
         reserved = set()

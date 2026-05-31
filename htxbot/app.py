@@ -77,7 +77,7 @@ class HtxFuturesBot(
         "ts", "profile", "severity", "category", "event", "symbol",
         "operation_id", "signal_id", "order_id", "exception_type",
         "error_code", "message", "reason", "retryable", "attempt",
-        "hostname", "dry_run",
+        "hostname",
     ]
 
     def __init__(self, profile=None, exchange=None, external_price_feed=None):

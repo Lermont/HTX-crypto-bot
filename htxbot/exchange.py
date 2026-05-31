@@ -468,10 +468,6 @@ class ExchangeMixin:
         return payload
 
     def _account_snapshot(self) -> dict:
-        if config.RUNTIME.dry_run:
-            equity = max(config.RUNTIME.dry_run_equity, 0.0)
-            return {"free": equity, "total": equity}
-
         try:
             balance = self.exchange.fetch_balance(
                 {
@@ -589,8 +585,6 @@ class ExchangeMixin:
 
 
     def _bulk_tickers_by_symbol(self) -> Optional[Dict[str, dict]]:
-        if config.RUNTIME.dry_run:
-            return {}
         cached = getattr(self, "_private_tickers_by_symbol", None)
         if cached is not None:
             return cached
@@ -626,8 +620,6 @@ class ExchangeMixin:
         return None
 
     def _bulk_positions_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        if config.RUNTIME.dry_run:
-            return {}
         cached = getattr(self, "_private_positions_by_symbol", None)
         if cached is not None:
             return cached
@@ -669,8 +661,6 @@ class ExchangeMixin:
         return grouped
 
     def _bulk_open_orders_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        if config.RUNTIME.dry_run:
-            return {}
         cached = getattr(self, "_private_open_orders_by_symbol", None)
         if cached is not None:
             return cached

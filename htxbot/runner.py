@@ -125,9 +125,9 @@ class RunnerMixin:
             account = self._account_snapshot()
             self._log_event(
                 "INFO",
-                f"LIVE mode: futures cross balance free={account['free']:.8f} total={account['total']:.8f} USDT",
+                f"Futures cross balance free={account['free']:.8f} total={account['total']:.8f} USDT",
                 event="futures_setup",
-                reason="live_cross_balance_checked",
+                reason="cross_balance_checked",
             )
         self._save_state()
 

@@ -860,8 +860,32 @@ class SignalMixin:
 
     def _build_signal_from_closes(
         self,
-        ctx: SignalContext,
+        ctx: SignalContext | List[float],
+        benchmark_closes: Optional[List[float]] = None,
+        btc_risk: Optional[dict] = None,
+        latest_ts: Optional[int] = None,
+        cache_key: str = "",
+        macro_context: Optional[dict] = None,
+        macro_closes: Optional[List[float]] = None,
+        macro_latest_ts: Optional[int] = None,
+        pullback_closes: Optional[List[float]] = None,
+        pullback_latest_ts: Optional[int] = None,
     ) -> Optional[dict]:
+        if not isinstance(ctx, SignalContext):
+            if benchmark_closes is None or latest_ts is None:
+                raise TypeError("_build_signal_from_closes requires benchmark_closes and latest_ts")
+            ctx = SignalContext(
+                closes=list(ctx or []),
+                benchmark_closes=list(benchmark_closes or []),
+                btc_risk=dict(btc_risk or {}),
+                latest_ts=int(latest_ts),
+                cache_key=cache_key,
+                macro_context=macro_context,
+                macro_closes=macro_closes,
+                macro_latest_ts=macro_latest_ts,
+                pullback_closes=pullback_closes,
+                pullback_latest_ts=pullback_latest_ts,
+            )
         closes = ctx.closes
         benchmark_closes = ctx.benchmark_closes
         btc_risk = ctx.btc_risk

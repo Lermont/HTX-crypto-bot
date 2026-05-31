@@ -784,7 +784,6 @@ class MonitoringMixin:
             int(retryable_value),
             attempt,
             hostname,
-            0,
         ]
 
         csv_path = getattr(self, "diagnostics_csv_path", None)

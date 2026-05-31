@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from dataclasses import asdict, fields
 from typing import Dict, List, Optional, Tuple
@@ -12,6 +13,9 @@ from typing import Dict, List, Optional, Tuple
 import config
 
 from .models import PositionLifecycle, TradeState
+
+
+_state_io_lock = threading.RLock()
 
 
 class StateMixin:
@@ -81,26 +85,27 @@ class StateMixin:
         return result
 
     def _save_state(self):
-        payload = {symbol: asdict(state) for symbol, state in self.states.items()}
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-        try:
-            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            for attempt in range(10):
-                try:
-                    os.replace(tmp_path, self.state_path)
-                    break
-                except PermissionError:
-                    if attempt < 9:
-                        time.sleep(0.1)
-                    else:
-                        raise
-        except Exception:
+        with _state_io_lock:
+            payload = {symbol: asdict(state) for symbol, state in list(self.states.items())}
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
             try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
+                tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                for attempt in range(30):
+                    try:
+                        os.replace(tmp_path, self.state_path)
+                        break
+                    except PermissionError:
+                        if attempt < 29:
+                            time.sleep(min(0.05 * (attempt + 1), 0.5))
+                        else:
+                            raise
+            except Exception:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
 
     def _pid_is_running(self, pid: int) -> bool:
         if pid <= 0:
@@ -275,9 +280,6 @@ class StateMixin:
             return float(value)
         except (TypeError, ValueError):
             return float(default)
-
-    def _runtime_dry_run(self) -> bool:
-        return bool(getattr(config.RUNTIME, "dry_run", False))
 
     def _log_reserved_by_other_profile(self, symbol: str, side: str = "", amount: float = 0.0):
         now = time.time()
