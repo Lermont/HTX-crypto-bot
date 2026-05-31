@@ -225,8 +225,8 @@ class RunnerMixin:
                 self._update_signal_cache_if_needed()
                 self._prepare_new_entry_gate()
 
-                with ThreadPoolExecutor(max_workers=min(32, len(self.symbols) or 1)) as executor:
-                    list(executor.map(self._run_step_symbol_safe, self.symbols))
+                for symbol in self.symbols:
+                    self._run_step_symbol_safe(symbol)
 
                 self._save_state()
                 time.sleep(config.RUNTIME.poll_interval_sec)

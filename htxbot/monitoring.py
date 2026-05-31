@@ -82,10 +82,13 @@ class MonitoringMixin:
 
         tmp_path = path.with_name(f"{path.name}.tmp")
         try:
-            original_content = path.read_text(encoding="utf-8")
-            with tmp_path.open("w", newline="", encoding="utf-8") as dst:
+            with path.open("r", encoding="utf-8") as src, tmp_path.open("w", newline="", encoding="utf-8") as dst:
                 csv.writer(dst).writerow(header)
-                dst.write(original_content)
+                while True:
+                    chunk = src.read(8192)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
             for attempt in range(10):
                 try:
                     os.replace(tmp_path, path)

@@ -119,10 +119,14 @@ class StrategyMixin:
         realized_open = sum(self._safe_float(row.get("realized_pnl"), 0.0) for row in rows)
         open_notional = sum(max(0.0, self._safe_float(row.get("notional"), 0.0)) for row in rows)
         runtime = self._account_pnl_runtime()
-        history = runtime.get("history")
-        if not isinstance(history, list):
-            history = []
-            runtime["history"] = history
+        import threading
+        if not hasattr(self, "_account_pnl_lock"):
+            self._account_pnl_lock = threading.Lock()
+        with self._account_pnl_lock:
+            history = runtime.get("history")
+            if not isinstance(history, list):
+                history = []
+                runtime["history"] = history
 
         window_sec = max(0.0, self._safe_float(strategy.account_pnl_window_minutes, 0.0)) * 60.0
         if window_sec > 0:
@@ -135,17 +139,21 @@ class StrategyMixin:
             force_sample or not history or sample_interval <= 0 or now - last_sample_at >= sample_interval
         )
         if should_sample:
-            history.append(
-                {
-                    "ts": now,
-                    "open_pnl": open_pnl,
-                    "unrealized_pnl": unrealized,
-                    "realized_open_pnl": realized_open,
-                    "open_notional": open_notional,
-                    "position_count": len(rows),
-                }
-            )
-            runtime["last_sample_at"] = now
+            import threading
+            if not hasattr(self, "_account_pnl_lock"):
+                self._account_pnl_lock = threading.Lock()
+            with self._account_pnl_lock:
+                history.append(
+                    {
+                        "ts": now,
+                        "open_pnl": open_pnl,
+                        "unrealized_pnl": unrealized,
+                        "realized_open_pnl": realized_open,
+                        "open_notional": open_notional,
+                        "position_count": len(rows),
+                    }
+                )
+                runtime["last_sample_at"] = now
 
         values = [self._safe_float(item.get("open_pnl"), 0.0) for item in history]
         previous = values[-2] if len(values) >= 2 else 0.0
@@ -555,6 +563,33 @@ class StrategyMixin:
         strategy = config.STRATEGY
         if not (strategy.account_pnl_enabled and strategy.account_profit_unload_enabled):
             return False
+
+        context = self._account_pnl_context(reason="account_profit_unload")
+        account_pnl = self._safe_float(context.get("open_pnl"), 0.0)
+        account_notional = self._safe_float(context.get("open_notional"), 0.0)
+
+        trigger_threshold = max(0.0, strategy.account_profit_unload_min_pnl_quote)
+        rate_threshold = account_notional * max(0.0, strategy.account_profit_unload_min_pnl_rate)
+        activation_level = max(trigger_threshold, rate_threshold)
+
+        if account_pnl > 0 and account_notional > 0 and activation_level > 0:
+            peak = self._safe_float(context.get("max_open_pnl"), account_pnl)
+            if peak >= activation_level:
+                drawdown = max(0.0, peak - account_pnl)
+                peak_fraction = max(0.0, strategy.account_profit_unload_peak_drawdown_fraction)
+
+                if peak > 0 and peak_fraction > 0 and drawdown >= peak * peak_fraction:
+                    for bot in self._account_pnl_bots():
+                        states = getattr(bot, "states", {}) or {}
+                        for sym, st in states.items():
+                            if st.position_size > 0 and st.entry_price > 0:
+                                bot._place_account_reduce_only_close(
+                                    sym,
+                                    fraction=1.0,
+                                    reason=f"global_account_trailing_profit;peak={peak:.8f};drawdown={drawdown:.8f}"
+                                )
+                    return True
+
         state = self._get_state(symbol)
         if state.position_size <= 0 or state.entry_price <= 0:
             return False
@@ -4235,7 +4270,7 @@ class StrategyMixin:
             strategy.account_averaging_falling_guard_quote,
             abs(current) * max(0.0, strategy.account_averaging_falling_guard_fraction),
         )
-        if previous and delta < -falling_guard:
+        if context.get("history_samples", 0) >= 2 and delta < -falling_guard:
             return (
                 "account_averaging_falling_account_pnl;"
                 f"delta={delta:.8f};guard={falling_guard:.8f};account_pnl={current:.8f}"
@@ -4491,7 +4526,40 @@ class StrategyMixin:
         if macro_context.get("disable_recovery"):
             self._log_macro_action_blocked("macro_recovery_blocked", symbol, signal, macro_context)
             return
-        return
+
+        state = self._get_state(symbol)
+        if state.position_size <= 0 or not state.frozen_no_more_buys:
+            return
+
+        if not signal or not signal.get("add_valid"):
+            return
+
+        reference_price, _ = self._fetch_reference_price(symbol)
+        if reference_price <= 0:
+            return
+
+        drawdown = self._position_drawdown(state, reference_price)
+        if drawdown < self._ema_averaging_drawdown_threshold(state.average_stage):
+            return
+
+        self._log_event(
+            "INFO",
+            f"Placing recovery buy for frozen position {symbol}",
+            event="ema_average_placed",
+            symbol=symbol,
+            side=config.ENTRY_SIDE,
+            price=reference_price,
+            position_size=state.position_size,
+            entry_price=state.entry_price,
+            reason="frozen_recovery_buy",
+        )
+        original_frozen = state.frozen_no_more_buys
+        state.frozen_no_more_buys = False
+        try:
+            self._maybe_place_average_buy(symbol, signal)
+        finally:
+            if not state.entry_orders:
+                state.frozen_no_more_buys = original_frozen
 
     def _maybe_apply_absolute_force_exit(self, symbol: str, reason: str) -> bool:
         state = self._get_state(symbol)
