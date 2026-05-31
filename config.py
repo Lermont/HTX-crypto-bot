@@ -449,6 +449,8 @@ class MonitoringSettings:
 
 @dataclass(frozen=True)
 class RuntimeSettings:
+    dry_run: bool
+    dry_run_equity: float
     order_timeout_sec: int
     poll_interval_sec: int
     post_only_enabled: bool
@@ -1070,6 +1072,8 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
     )
 
     runtime = RuntimeSettings(
+        dry_run=_env_bool("DRY_RUN", False, profile=name),
+        dry_run_equity=_env_float("DRY_RUN_EQUITY", 1000.0, profile=name),
         order_timeout_sec=_env_int("ORDER_TIMEOUT_SEC", 90, profile=name),
         poll_interval_sec=_env_int("POLL_INTERVAL_SEC", 3, profile=name),
         post_only_enabled=_env_bool("POST_ONLY_ENABLED", True, profile=name),

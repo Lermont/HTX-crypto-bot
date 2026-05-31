@@ -56,6 +56,11 @@ class MonitoringMixin:
                     writer = csv.DictWriter(dst, fieldnames=header, extrasaction="ignore")
                     writer.writeheader()
                     for row in reader:
+                        # Migration for legacy ema names
+                        if "ema30" in row and "ema50" not in row:
+                            row["ema50"] = row["ema30"]
+                        if "ema60" in row and "ema100" not in row:
+                            row["ema100"] = row["ema60"]
                         writer.writerow({name: row.get(name, "") for name in header})
                 os.replace(tmp_path, path)
                 return
@@ -367,6 +372,9 @@ class MonitoringMixin:
             self._fmt_monitoring_float(signal.get("ema2d", signal.get("ema_pullback_slow")), 12),
             self._fmt_monitoring_float(signal.get("ema25d", signal.get("ema_macro_fast")), 12),
             self._fmt_monitoring_float(signal.get("ema50d", signal.get("ema_macro_slow")), 12),
+            self._fmt_monitoring_float(signal.get("macro_gap"), 8),
+            self._fmt_monitoring_float(signal.get("trigger_gap"), 8),
+            self._fmt_monitoring_float(signal.get("pullback_depth"), 8),
             self._fmt_monitoring_float(signal.get("btc_return_30m"), 8),
             self._fmt_monitoring_float(signal.get("volatility"), 8),
             self._fmt_monitoring_float(signal.get("budget_multiplier"), 8),

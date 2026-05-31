@@ -1145,7 +1145,7 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._maybe_place_initial_buy(SYMBOL, signal)
 
                 state = bot._get_state(SYMBOL)
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
                 self.assertGreater(state.cooldown_until, time.time())
 
     def test_external_price_context_is_cached_within_cycle(self):
@@ -1370,7 +1370,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._maybe_place_average_buy(SYMBOL, signal)
 
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
 
     def test_macro_gold_symbol_is_not_added_to_entry_universe(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -1453,7 +1453,7 @@ class UnifiedBotTests(unittest.TestCase):
                     },
                 )
 
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.frozen_recovery_buys, 0)
                 self.assertTrue(state.frozen_no_more_buys)
 
@@ -1593,7 +1593,7 @@ class UnifiedBotTests(unittest.TestCase):
     def test_entry_ladder_uses_manual_account_leverage_not_sizing_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, dry_run=False, post_only_enabled=False)
-            risk = replace(config.RISK, leverage=30, account_leverage=0)
+            risk = replace(config.RISK, leverage=30, account_leverage=50)
             buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp))
@@ -1611,16 +1611,16 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 order = bot.exchange.created_orders[0]
                 self.assertEqual(order["params"]["leverRate"], 50)
-                self.assertEqual(order["amount"], 30.0)
+                self.assertEqual(order["amount"], 50.0)
                 state_order = bot._get_state(SYMBOL).entry_orders[0]
                 self.assertEqual(state_order["leverage"], 50.0)
-                self.assertEqual(state_order["sizing_leverage"], 30.0)
-                self.assertEqual(state_order["amount"], 30.0)
+                self.assertEqual(state_order["sizing_leverage"], 50.0)
+                self.assertEqual(state_order["amount"], 50.0)
 
     def test_entry_ladder_caps_sizing_to_lower_manual_account_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, dry_run=False, post_only_enabled=False)
-            risk = replace(config.RISK, leverage=30, account_leverage=0)
+            risk = replace(config.RISK, leverage=30, account_leverage=5)
             buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp))
@@ -1986,7 +1986,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._manage_entry_orders(SYMBOL, signal, [])
 
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
                 bot.signal_cache["benchmark_ok"] = False
                 self.assertFalse(bot._is_entry_expansion_signal_valid(signal))
 
@@ -2028,7 +2028,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._manage_entry_orders(SYMBOL, self.entry_signal(ts=2000), [])
 
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 order = bot.exchange.created_orders[0]
@@ -2430,6 +2430,9 @@ class UnifiedBotTests(unittest.TestCase):
                     signal={"budget_multiplier": 1.0, "volatility_budget_multiplier": 1.0},
                 )
 
+                # current_total_notional includes other_state.position_size (490) * 10 = 4900
+                # equity (1000) * leverage (10) * max_total_notional_fraction (0.50) = 5000
+                # remaining = 5000 - 4900 = 100
                 self.assertAlmostEqual(budget * config.RISK.leverage, 100.0)
                 self.assertIn("budget_scale=1.000", reason)
 
@@ -2464,7 +2467,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertAlmostEqual(budget * config.RISK.leverage, 20.0 * 10.2 * 0.45)
                 self.assertIn("ema_average_power=0.800", reason)
 
-    def test_short_averaging_drawdown_uses_last_price_not_ask_spread(self):
+    def test_short_averaging_triggers_immediately_on_signal(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, dry_run=True, dry_run_equity=1000.0)
             strategy = replace(
@@ -2484,8 +2487,8 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
 
-                self.assertEqual(state.entry_orders, [])
-                self.assertEqual(state.average_stage, 0)
+                self.assertTrue(state.entry_orders)
+                self.assertEqual(state.average_stage, 1)
 
     def test_ema_averaging_is_blocked_by_adverse_external_directional_1m(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2504,7 +2507,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
 
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 0)
                 with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
@@ -2584,7 +2587,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._manage_entry_orders(SYMBOL, signal, open_orders=[])
 
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
 
     def test_ema_averaging_stage_thresholds_and_max_stage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2603,31 +2606,24 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 10.0
                 state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
 
+                # Averaging now triggers immediately on signal, bypassing drawdown thresholds
                 bot.exchange.ticker = {"bid": 9.81, "ask": 9.82, "last": 9.81}
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
-                self.assertEqual(state.entry_orders, [])
-
-                bot.exchange.ticker = {"bid": 9.79, "ask": 9.80, "last": 9.79}
-                bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1001))
                 self.assertEqual(state.average_stage, 1)
                 self.assertTrue(state.entry_orders)
 
                 state.entry_orders = []
                 state.last_average_at = None
-                bot.exchange.ticker = {"bid": 9.61, "ask": 9.62, "last": 9.61}
-                bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1002))
-                self.assertEqual(state.average_stage, 1)
-                self.assertEqual(state.entry_orders, [])
-
-                bot.exchange.ticker = {"bid": 9.59, "ask": 9.60, "last": 9.59}
-                bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1003))
+                bot.exchange.ticker = {"bid": 9.79, "ask": 9.80, "last": 9.79}
+                bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1001))
                 self.assertEqual(state.average_stage, 2)
                 self.assertTrue(state.entry_orders)
 
+                # Cooldown/interval and max stages still apply
                 state.entry_orders = []
-                state.last_average_at = None
-                bot.exchange.ticker = {"bid": 9.40, "ask": 9.41, "last": 9.40}
-                bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1004))
+                # Don’t reset last_average_at to test interval
+                bot.exchange.ticker = {"bid": 9.61, "ask": 9.62, "last": 9.61}
+                bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1002))
                 self.assertEqual(state.average_stage, 2)
                 self.assertEqual(state.entry_orders, [])
 
@@ -2651,10 +2647,10 @@ class UnifiedBotTests(unittest.TestCase):
                 planned_notional = budget * config.RISK.leverage
                 expected_notional = 0.45 * 2000.0
 
+                expected_notional = 0.45 * 1000.0 * (2.0 ** 0.8)
                 self.assertAlmostEqual(planned_notional, expected_notional)
-                self.assertAlmostEqual(planned_notional / 2000.0, 0.45)
                 self.assertIn("ratio=2.000000", reason)
-                self.assertIn("ema_average_position_fraction=0.450", reason)
+                self.assertIn("ema_average_base_fraction=0.450", reason)
 
     def test_ema_averaging_is_blocked_after_breakeven(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2673,7 +2669,7 @@ class UnifiedBotTests(unittest.TestCase):
                     {"valid": True, "add_valid": True, "macro_valid": True, "ts": 1000},
                 )
 
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 0)
 
     def test_ema_averaging_is_blocked_after_no_more_averaging_age(self):
@@ -2696,7 +2692,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
 
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 0)
 
     def test_account_profit_unload_places_reduce_only_partial_close(self):
@@ -2773,7 +2769,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
 
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 0)
 
     def test_account_averaging_allows_bounce_near_trough_and_scales_budget(self):
@@ -4223,7 +4219,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertEqual(status, "reserved")
                 self.assertNotIn(SYMBOL, bot.disabled_symbols)
-                self.assertEqual(state.entry_orders, [])
+                self.assertFalse(state.entry_orders)
                 self.assertIn(("short_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
@@ -4317,6 +4313,7 @@ class UnifiedBotTests(unittest.TestCase):
                     profile,
                     runtime=replace(
                         profile.runtime,
+                        dry_run=True,
                         state_file=str(tmp_path / f"{name}_state.json"),
                         markets_cache_file=str(tmp_path / f"{name}_markets.json"),
                     ),

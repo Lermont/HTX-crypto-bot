@@ -12,6 +12,8 @@ import config
 
 class ExchangeMixin:
     def _create_exchange(self):
+        if config.RUNTIME.dry_run:
+            return None
         if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
             raise ValueError("HTX API credentials are required")
 
@@ -989,12 +991,13 @@ class ExchangeMixin:
     def _set_leverage_safe(self, symbol: str, leverage: int) -> bool:
         try:
             self.exchange.set_leverage(int(leverage), symbol, params=self._position_params())
-            if hasattr(self, "order_leverage_cache"):
-                self.order_leverage_cache.pop(symbol, None)
+            if not hasattr(self, "order_leverage_cache"):
+                self.order_leverage_cache = {}
+            self.order_leverage_cache[symbol] = float(leverage)
             return True
         except Exception as exc:
             self._log_event(
-                "WARNING",
+                "ERROR",
                 f"Could not set leverage {leverage} for {symbol}: {exc}",
                 event="futures_setup",
                 symbol=symbol,
@@ -1530,9 +1533,7 @@ class ExchangeMixin:
                 raise RuntimeError("Could not enforce HTX one-way position mode")
 
         if config.EXCHANGE.set_leverage_on_start:
-            self._log_event(
-                "WARNING",
-                "SET_LEVERAGE_ON_START is ignored: leverage is managed manually in HTX",
-                event="futures_setup",
-                reason="leverage_setup_manual_only",
-            )
+            leverage = int(config.RISK.leverage)
+            for symbol in self.symbols:
+                if not self._set_leverage_safe(symbol, leverage):
+                    raise RuntimeError(f"Could not set configured HTX leverage {leverage} for {symbol}")

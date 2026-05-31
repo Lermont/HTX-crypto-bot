@@ -12,17 +12,19 @@ from .models import ExitLadderPreflight, TradeState
 class StrategyMixin:
     def _current_total_notional(self) -> float:
         total = 0.0
-        for symbol, state in self.states.items():
-            if symbol not in self.market_by_symbol:
-                continue
-            if state.position_size > 0 and state.entry_price > 0:
-                total += self._contracts_to_notional(symbol, state.position_size, state.entry_price)
-            for ref in state.entry_orders or []:
-                total += self._contracts_to_notional(
-                    symbol,
-                    self._safe_float(ref.get("amount"), 0.0),
-                    self._safe_float(ref.get("price"), 0.0),
-                )
+        for bot in self._account_pnl_bots():
+            states = getattr(bot, "states", {}) or {}
+            for symbol, state in states.items():
+                if symbol not in getattr(bot, "market_by_symbol", {}):
+                    continue
+                if state.position_size > 0 and state.entry_price > 0:
+                    total += bot._contracts_to_notional(symbol, state.position_size, state.entry_price)
+                for ref in state.entry_orders or []:
+                    total += bot._contracts_to_notional(
+                        symbol,
+                        bot._safe_float(ref.get("amount"), 0.0),
+                        bot._safe_float(ref.get("price"), 0.0),
+                    )
         return total
 
     def _symbol_open_notional(self, symbol: str, state: TradeState) -> float:
@@ -1077,20 +1079,30 @@ class StrategyMixin:
     def _controlled_loss_move_fraction(self, state: Optional[TradeState]) -> float:
         if state is None:
             return 0.0
-        strategy = config.STRATEGY
-        # Start with a base move fraction of 0.1 (10% towards market) instead of TP markup
-        base_move = 0.1
-        if not self._hard_time_exit_elapsed(state):
-            return base_move
 
-        step_minutes = max(0.0, strategy.hard_time_exit_step_minutes)
-        step_increase = max(0.0, strategy.hard_time_exit_fraction_step)
-        if step_minutes > 0 and step_increase > 0:
-            overdue_minutes = max(
-                0.0,
-                self._position_held_minutes(state) - max(0.0, strategy.hard_time_exit_after_minutes),
-            )
-            base_move += (overdue_minutes // step_minutes) * step_increase
+        # Base move for controlled loss exit
+        base_move = 0.1
+
+        # If in controlled loss mode, we want to reach 1.0 (market price) within 24 hours
+        # from the moment it was activated.
+        if state.sell_ladder_mode == "controlled_loss_exit" and state.time_exit_activated_at:
+            elapsed_minutes = (time.time() - state.time_exit_activated_at) / 60.0
+            # Linear ramp from 0.1 to 1.0 over 1440 minutes (24 hours)
+            time_move = base_move + (1.0 - base_move) * (elapsed_minutes / 1440.0)
+            base_move = max(base_move, time_move)
+
+        # Existing hard time exit logic as a secondary ramp
+        if self._hard_time_exit_elapsed(state):
+            strategy = config.STRATEGY
+            step_minutes = max(0.0, strategy.hard_time_exit_step_minutes)
+            step_increase = max(0.0, strategy.hard_time_exit_fraction_step)
+            if step_minutes > 0 and step_increase > 0:
+                overdue_minutes = max(
+                    0.0,
+                    self._position_held_minutes(state) - max(0.0, strategy.hard_time_exit_after_minutes),
+                )
+                hard_move = 0.1 + (overdue_minutes // step_minutes) * step_increase
+                base_move = max(base_move, hard_move)
 
         return self._clamp(base_move, 0.0, 1.0)
 
@@ -3517,6 +3529,15 @@ class StrategyMixin:
         after_minutes = max(0.0, config.STRATEGY.absolute_force_exit_after_minutes)
         return bool(after_minutes > 0 and self._position_held_minutes(state) >= after_minutes)
 
+    def _is_opposite_signal(self, symbol: str) -> bool:
+        macro_context = self._macro_guard_context()
+        regime = macro_context.get("regime", "neutral")
+        if config.POSITION_SIDE == "long":
+            return regime in {"gold_performs_well", "crypto_underperforms_gold"}
+        if config.POSITION_SIDE == "short":
+            return regime in {"crypto_performs_well", "gold_underperforms_crypto"}
+        return False
+
     def _hard_time_exit_bypasses_profit_bank(self, state: TradeState) -> bool:
         return bool(
             config.STRATEGY.hard_time_exit_bypass_profit_bank
@@ -3576,15 +3597,16 @@ class StrategyMixin:
             return 0.0
 
         strategy = config.STRATEGY
-        if self._hard_time_exit_elapsed(state):
-            close_fraction = self._hard_time_exit_close_fraction(state)
+        opposite_signal = self._is_opposite_signal(symbol)
+        if self._hard_time_exit_elapsed(state) or opposite_signal:
+            close_fraction = self._hard_time_exit_close_fraction(state) if not opposite_signal else 1.0
         else:
             close_fraction = self._clamp(strategy.controlled_loss_max_position_fraction, 0.0, 1.0)
         max_fraction_contracts = state.position_size * close_fraction
         if max_fraction_contracts <= 0:
             return 0.0
 
-        if self._hard_time_exit_bypasses_profit_bank(state):
+        if self._hard_time_exit_bypasses_profit_bank(state) or opposite_signal:
             contracts = min(closeable, max_fraction_contracts)
             return self._amount_to_precision(symbol, contracts)
 
@@ -3608,16 +3630,19 @@ class StrategyMixin:
     def _controlled_loss_block_reason(self, symbol: str, state: TradeState, reference_price: float) -> str:
         strategy = config.STRATEGY
         hard_time_exit = self._hard_time_exit_elapsed(state)
-        if not strategy.enable_controlled_loss_exit and not hard_time_exit:
+        opposite_signal = self._is_opposite_signal(symbol)
+        force_exit = hard_time_exit or opposite_signal
+
+        if not strategy.enable_controlled_loss_exit and not force_exit:
             return "controlled_loss_disabled"
         if state.position_size <= 0 or state.entry_price <= 0:
             return "no_position"
 
-        if not state.zombie_position and not hard_time_exit:
+        if not state.zombie_position and not force_exit:
             return "not_zombie"
         if state.entry_orders:
             return "entry_orders_active"
-        if not hard_time_exit:
+        if not force_exit:
             if state.zombie_marked_at:
                 zombie_age = (time.time() - state.zombie_marked_at) / 60.0
                 if zombie_age < max(0.0, strategy.controlled_loss_after_zombie_minutes):
@@ -3626,11 +3651,11 @@ class StrategyMixin:
                 return "controlled_loss_missing_zombie_age"
 
         drawdown = self._position_drawdown(state, reference_price)
-        if not hard_time_exit and drawdown < max(0.0, strategy.controlled_loss_min_drawdown):
+        if not force_exit and drawdown < max(0.0, strategy.controlled_loss_min_drawdown):
             return f"controlled_loss_drawdown_too_small;drawdown={drawdown:.5f}"
 
         budget = self._controlled_loss_available_budget()
-        if budget <= 0 and not self._hard_time_exit_bypasses_profit_bank(state):
+        if budget <= 0 and not self._hard_time_exit_bypasses_profit_bank(state) and not opposite_signal:
             return "controlled_loss_no_profit_bank"
         return ""
 
@@ -4384,15 +4409,6 @@ class StrategyMixin:
 
         drawdown = self._position_drawdown(state, reference_price)
         drawdown_threshold = self._ema_averaging_drawdown_threshold(state.average_stage)
-        if drawdown < drawdown_threshold:
-            self._record_signal_analytics(
-                "averaging_checked",
-                symbol=symbol,
-                signal=signal,
-                block_reason="drawdown_below_threshold",
-                context={"drawdown": drawdown, "threshold": drawdown_threshold, "stage": state.average_stage + 1},
-            )
-            return
 
         external_directional_reason = self._external_directional_1m_block_reason(symbol, scope="averaging")
         if external_directional_reason:
