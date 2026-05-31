@@ -745,6 +745,52 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertAlmostEqual(state.base_entry_amount, 4.0)
                 self.assertAlmostEqual(state.base_entry_quote, 38.0)
 
+    def test_state_load_net_open_pnl_includes_remaining_entry_fees(self):
+        scenarios = (
+            (
+                "long",
+                {
+                    "total_bought_base": 3.0,
+                    "total_bought_quote": 33.0,
+                    "total_buy_fees_quote": 0.033,
+                    "unrealized_pnl": 1.25,
+                },
+                1.217,
+            ),
+            (
+                "short",
+                {
+                    "total_sold_base": 4.0,
+                    "total_sold_quote": 38.0,
+                    "total_sell_fees_quote": 0.038,
+                    "unrealized_pnl": 1.25,
+                },
+                1.212,
+            ),
+        )
+        for profile_name, payload, expected_net in scenarios:
+            with self.subTest(profile=profile_name):
+                with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile(profile_name):
+                    bot = self.make_bot(Path(raw_tmp))
+                    bot.state_path.write_text(
+                        json.dumps(
+                            {
+                                SYMBOL: {
+                                    "symbol": SYMBOL,
+                                    "position_size": payload.get("total_bought_base", payload.get("total_sold_base")),
+                                    "position_available": payload.get("total_bought_base", payload.get("total_sold_base")),
+                                    "entry_price": 11.0,
+                                    **payload,
+                                }
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    state = bot._load_state()[SYMBOL]
+
+                    self.assertAlmostEqual(state.net_open_pnl, expected_net)
+
     def test_legacy_state_load_coerces_string_scalars_and_order_refs(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -2205,6 +2251,117 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual([ref["exit_scope"] for ref in state.sell_ladder_orders], ["base", "base", "base", "base", "average_recovery"])
                 self.assertEqual(state.exit_runner_contracts, 0.0)
                 self.assertIn("split_exit=1", state.sell_ladder_signature)
+
+    def test_exit_ladder_partial_create_failure_clears_signature_for_retry(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_adaptive_exit_enabled=False,
+                ema_exit_ladder_fractions=(0.5, 0.5),
+                ema_exit_runner_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+                original_create_order = bot.exchange.create_order
+                calls = {"count": 0}
+
+                def flaky_create_order(symbol, type, side, amount, price, params=None):
+                    calls["count"] += 1
+                    if calls["count"] == 2:
+                        bot.exchange.create_order_calls += 1
+                        raise RuntimeError("stage rejected")
+                    return original_create_order(symbol, type, side, amount, price, params=params)
+
+                bot.exchange.create_order = flaky_create_order
+
+                bot._place_sell_ladder(
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=10.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=10.0,
+                        mode="normal",
+                    )
+                )
+
+                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [5.0])
+                self.assertEqual([ref["amount"] for ref in state.sell_ladder_orders], [5.0])
+                self.assertEqual(state.sell_ladder_signature, "")
+
+    def test_exit_runner_ladder_full_create_failure_resets_runner_state(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 100.0
+                state.position_available = 100.0
+                state.entry_price = 100.0
+                state.initial_entry_notional = 10000.0
+
+                def failing_create_order(symbol, type, side, amount, price, params=None):
+                    bot.exchange.create_order_calls += 1
+                    raise RuntimeError("exchange rejected")
+
+                bot.exchange.create_order = failing_create_order
+
+                bot._place_sell_ladder(
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
+                )
+
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(state.sell_ladder_signature, "")
+                self.assertEqual(state.exit_runner_contracts, 0.0)
+
+    def test_split_exit_ladder_recovery_failure_clears_signature_for_retry(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 145.0
+                state.position_available = 145.0
+                state.entry_price = (100.0 * 100.0 + 45.0 * 90.0) / 145.0
+                state.initial_entry_notional = 10000.0
+                state.remaining_entry_quote = 14050.0
+                state.remaining_buy_fees_quote = 1.405
+                state.base_entry_amount = 100.0
+                state.base_entry_quote = 10000.0
+                state.base_entry_fees_quote = 1.0
+                state.base_entry_price = 100.0
+                state.averaging_entry_amount = 45.0
+                state.averaging_entry_quote = 4050.0
+                state.averaging_entry_fees_quote = 0.405
+                original_create_order = bot.exchange.create_order
+
+                def reject_recovery_order(symbol, type, side, amount, price, params=None):
+                    if float(amount) == 45.0:
+                        bot.exchange.create_order_calls += 1
+                        raise RuntimeError("recovery rejected")
+                    return original_create_order(symbol, type, side, amount, price, params=params)
+
+                bot.exchange.create_order = reject_recovery_order
+
+                bot._ensure_sell_ladder(SYMBOL)
+
+                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 25.0, 15.0])
+                self.assertEqual([ref["exit_scope"] for ref in state.sell_ladder_orders], ["base", "base", "base", "base"])
+                self.assertEqual(state.sell_ladder_signature, "")
 
     def test_average_recovery_fill_reduces_only_average_bucket(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

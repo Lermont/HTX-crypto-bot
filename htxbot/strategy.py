@@ -2245,8 +2245,10 @@ class StrategyMixin:
                 ),
             )
 
+        planned_fixed_contracts = sum(self._safe_float(contracts, 0.0) for _, _, contracts in allocations)
         sell_total = sum(self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders)
-        if sell_total > ladder_contracts + max(self._get_min_contracts(symbol) * 1e-9, 1e-12):
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+        if sell_total > ladder_contracts + eps:
             self._log_event(
                 "ERROR",
                 f"{exit_label} exit ladder total exceeds {config.POSITION_SIDE} position for {symbol}; canceling",
@@ -2258,6 +2260,28 @@ class StrategyMixin:
                 reason="exit_amount_exceeds_position",
             )
             self._cancel_sell_orders(symbol, reason="exit_amount_exceeds_position")
+            return
+        if allocated + eps < planned_fixed_contracts:
+            state.sell_ladder_signature = ""
+            if allocated <= eps:
+                self._reset_exit_runner_state(state)
+            self._refresh_active_side(state)
+            self._log_event(
+                "WARNING",
+                f"{exit_label} exit ladder only partially placed for {symbol}; will retry",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=exit_side,
+                amount=sell_total,
+                position_size=ladder_contracts,
+                reason=(
+                    "exit_ladder_partially_placed;"
+                    f"planned_fixed_contracts={planned_fixed_contracts:.12f};"
+                    f"placed_fixed_contracts={allocated:.12f};"
+                    f"runner_contracts={runner_contracts:.12f}"
+                ),
+            )
+            self._save_state()
             return
 
         self._refresh_active_side(state)
@@ -2505,7 +2529,8 @@ class StrategyMixin:
 
         state = self._get_state(symbol)
         sell_total = sum(self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders)
-        if sell_total > closeable_total + max(self._get_min_contracts(symbol) * 1e-9, 1e-12):
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+        if sell_total > closeable_total + eps:
             self._log_event(
                 "ERROR",
                 f"{config.EXIT_SIDE.title()} split exit ladder total exceeds closeable position for {symbol}; canceling",
@@ -2517,6 +2542,29 @@ class StrategyMixin:
                 reason="split_exit_amount_exceeds_position",
             )
             self._cancel_sell_orders(symbol, reason="split_exit_amount_exceeds_position")
+            return
+        expected_total = self._amount_to_precision(symbol, base_closeable + recovery_contracts)
+        if sell_total + eps < expected_total:
+            state.sell_ladder_signature = ""
+            self._reset_exit_runner_state(state)
+            self._refresh_active_side(state)
+            self._log_event(
+                "WARNING",
+                f"{config.EXIT_SIDE.title()} split exit ladder only partially placed for {symbol}; will retry",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                amount=sell_total,
+                position_size=expected_total,
+                reason=(
+                    "split_exit_ladder_partially_placed;"
+                    f"expected_contracts={expected_total:.12f};"
+                    f"placed_contracts={sell_total:.12f};"
+                    f"base_contracts={base_closeable:.12f};"
+                    f"recovery_contracts={recovery_contracts:.12f}"
+                ),
+            )
+            self._save_state()
             return
         state.sell_ladder_signature = signature
         self._refresh_active_side(state)

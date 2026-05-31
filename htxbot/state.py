@@ -854,7 +854,11 @@ class StateMixin:
     def _refresh_net_open_pnl(self, state: TradeState):
         state.remaining_entry_quote = max(0.0, self._safe_float(state.remaining_entry_quote, 0.0))
         state.remaining_buy_fees_quote = max(0.0, self._safe_float(state.remaining_buy_fees_quote, 0.0))
-        state.net_open_pnl = self._safe_float(state.realized_pnl, 0.0) + self._safe_float(state.unrealized_pnl, 0.0)
+        state.net_open_pnl = (
+            self._safe_float(state.realized_pnl, 0.0)
+            + self._safe_float(state.unrealized_pnl, 0.0)
+            - state.remaining_buy_fees_quote
+        )
 
     def _entry_bucket_total_amount(self, state: TradeState) -> float:
         return (
