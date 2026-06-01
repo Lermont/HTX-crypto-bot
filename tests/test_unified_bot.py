@@ -140,6 +140,11 @@ class FakeExchange:
         self.set_position_mode_error = None
         self.ticker = {"bid": 9.9, "ask": 10.1, "last": 10.0}
         self.order_book = {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]]}
+        self.order_books = {}
+        self.fetch_order_book_calls = 0
+        self.order_book_calls = []
+        self.fetch_order_book_delay = 0.0
+        self.fetch_order_book_failures = []
         self.balance_free = 1000.0
         self.balance_total = 1000.0
 
@@ -162,9 +167,16 @@ class FakeExchange:
         return dict(self.ticker)
 
     def fetch_order_book(self, symbol, limit=None):
+        self.fetch_order_book_calls += 1
+        self.order_book_calls.append(symbol)
+        if self.fetch_order_book_delay > 0:
+            time.sleep(self.fetch_order_book_delay)
+        if self.fetch_order_book_failures:
+            raise self.fetch_order_book_failures.pop(0)
+        book = self.order_books.get(symbol, self.order_book)
         return {
-            "bids": [list(item) for item in self.order_book.get("bids", [])],
-            "asks": [list(item) for item in self.order_book.get("asks", [])],
+            "bids": [list(item) for item in book.get("bids", [])],
+            "asks": [list(item) for item in book.get("asks", [])],
         }
 
     def fetch_balance(self, params=None):
@@ -1648,6 +1660,79 @@ class UnifiedBotTests(unittest.TestCase):
                 with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertIn("htx_orderbook_spread_too_wide", rows[-1]["block_reason"])
+
+    def test_order_book_prefetch_fetches_symbols_in_parallel_and_reuses_cycle_cache(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, market_data_max_workers=4, poll_interval_sec=3)
+            strategy = replace(
+                config.STRATEGY,
+                entry_spread_filter_enabled=True,
+                entry_spread_filter_max_bps=30.0,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                symbols = [SYMBOL, SECOND_SYMBOL, "ALT3/USDT:USDT", "ALT4/USDT:USDT"]
+                bot.symbols = list(symbols)
+
+                original_fetch_order_book = bot.exchange.fetch_order_book
+                active = {"count": 0, "max": 0}
+                lock = threading.Lock()
+
+                def slow_fetch_order_book(symbol, limit=None):
+                    with lock:
+                        active["count"] += 1
+                        active["max"] = max(active["max"], active["count"])
+                    try:
+                        time.sleep(0.03)
+                        return original_fetch_order_book(symbol, limit=limit)
+                    finally:
+                        with lock:
+                            active["count"] -= 1
+
+                bot.exchange.fetch_order_book = slow_fetch_order_book
+
+                bot._reset_market_data_caches()
+                bot._prefetch_market_data_snapshots()
+
+                self.assertGreater(active["max"], 1)
+                self.assertEqual(set(bot.exchange.order_book_calls), set(symbols))
+                calls_after_prefetch = bot.exchange.fetch_order_book_calls
+
+                for symbol in symbols:
+                    spread_bps, bid, ask = bot._entry_orderbook_spread_bps(symbol)
+                    self.assertGreater(spread_bps, 0.0)
+                    self.assertGreater(bid, 0.0)
+                    self.assertGreater(ask, 0.0)
+
+                self.assertEqual(bot.exchange.fetch_order_book_calls, calls_after_prefetch)
+
+    def test_parallel_order_book_prefetch_preserves_profile_context(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, market_data_max_workers=2)
+            strategy = replace(
+                config.STRATEGY,
+                entry_spread_filter_enabled=True,
+                entry_spread_filter_max_bps=30.0,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+                seen_sides = []
+                lock = threading.Lock()
+
+                def fetch_order_book_with_context(symbol, limit=None):
+                    with lock:
+                        seen_sides.append(config.POSITION_SIDE)
+                    time.sleep(0.01)
+                    return {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]]}
+
+                bot.exchange.fetch_order_book = fetch_order_book_with_context
+
+                bot._reset_market_data_caches()
+                bot._prefetch_market_data_snapshots()
+
+                self.assertTrue(seen_sides)
+                self.assertEqual(set(seen_sides), {"short"})
 
     def test_profitable_cycle_uses_post_win_cooldown(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5361,6 +5446,27 @@ class UnifiedBotTests(unittest.TestCase):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             results = list(executor.map(lambda _index: cached.fetch_ticker(SYMBOL), range(8)))
+
+        self.assertEqual(exchange.calls, 1)
+        self.assertTrue(all(result["symbol"] == SYMBOL for result in results))
+
+    def test_shared_exchange_order_book_cache_is_singleflight_across_threads(self):
+        class SlowOrderBookExchange:
+            def __init__(self):
+                self.calls = 0
+                self.lock = threading.Lock()
+
+            def fetch_order_book(self, symbol, limit=None, params=None):
+                with self.lock:
+                    self.calls += 1
+                time.sleep(0.02)
+                return {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]], "symbol": symbol}
+
+        exchange = SlowOrderBookExchange()
+        cached = CachedMarketDataExchange(exchange, order_book_ttl_sec=60)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _index: cached.fetch_order_book(SYMBOL, limit=5), range(8)))
 
         self.assertEqual(exchange.calls, 1)
         self.assertTrue(all(result["symbol"] == SYMBOL for result in results))

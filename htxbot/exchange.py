@@ -33,6 +33,9 @@ class ExchangeMixin:
     def _funding_cache_runtime_lock(self):
         return self._runtime_rlock("_funding_cache_lock")
 
+    def _market_data_cache_runtime_lock(self):
+        return self._runtime_rlock("_market_data_cache_lock")
+
     def _create_exchange(self):
         if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
             raise ValueError("HTX API credentials are required")
@@ -723,6 +726,137 @@ class ExchangeMixin:
             self._private_open_orders_bulk_failed = False
             self._private_tickers_bulk_failed = False
             self._external_price_context_cache = {}
+
+    def _reset_market_data_caches(self):
+        with self._market_data_cache_runtime_lock():
+            self._order_book_cache = {}
+            self._order_book_inflight = {}
+
+    def _market_data_cache_ttl_sec(self) -> float:
+        try:
+            poll_interval = self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 1.0), 1.0)
+        except Exception:
+            poll_interval = 1.0
+        return max(1.0, min(10.0, poll_interval))
+
+    def _fetch_order_book_uncached(self, symbol: str, limit: int = 5):
+        try:
+            return self.exchange.fetch_order_book(symbol, limit=limit)
+        except TypeError:
+            return self.exchange.fetch_order_book(symbol)
+
+    def _cached_order_book(self, symbol: str, limit: int = 5) -> dict:
+        now = time.time()
+        key = (symbol, int(limit or 0))
+        ttl = self._market_data_cache_ttl_sec()
+        entry = None
+        owner = False
+
+        with self._market_data_cache_runtime_lock():
+            cache = getattr(self, "_order_book_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._order_book_cache = cache
+            inflight = getattr(self, "_order_book_inflight", None)
+            if not isinstance(inflight, dict):
+                inflight = {}
+                self._order_book_inflight = inflight
+
+            cached = cache.get(key)
+            if cached and now - self._safe_float(cached[0], 0.0) <= ttl:
+                return cached[1]
+
+            entry = inflight.get(key)
+            if entry is None:
+                entry = {"event": threading.Event(), "value": None, "exception": None}
+                inflight[key] = entry
+                owner = True
+
+        if not owner:
+            entry["event"].wait()
+            if entry.get("exception") is not None:
+                raise entry["exception"]
+            return entry.get("value") or {}
+
+        value = None
+        try:
+            value = self._fetch_order_book_uncached(symbol, limit=limit)
+            if isinstance(value, dict) and isinstance(value.get("bids"), list) and isinstance(value.get("asks"), list):
+                with self._market_data_cache_runtime_lock():
+                    self._order_book_cache[key] = (time.time(), value)
+            return value
+        except Exception as exc:
+            entry["exception"] = exc
+            raise
+        finally:
+            if entry.get("exception") is None:
+                entry["value"] = value
+            with self._market_data_cache_runtime_lock():
+                inflight = getattr(self, "_order_book_inflight", {})
+                if isinstance(inflight, dict):
+                    inflight.pop(key, None)
+                entry["event"].set()
+
+    def _order_book_prefetch_symbols(self) -> List[str]:
+        symbols = []
+        seen = set()
+        for symbol in list(getattr(self, "symbols", []) or []):
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            symbols.append(symbol)
+        return symbols
+
+    def _prefetch_market_data_snapshots(self):
+        strategy = config.STRATEGY
+        if not getattr(strategy, "entry_spread_filter_enabled", False):
+            return
+        max_spread = max(0.0, self._safe_float(getattr(strategy, "entry_spread_filter_max_bps", 0.0), 0.0))
+        if max_spread <= 0 or not hasattr(self.exchange, "fetch_order_book"):
+            return
+
+        symbols = self._order_book_prefetch_symbols()
+        if not symbols:
+            return
+
+        max_workers_resolver = getattr(self, "_market_data_max_workers", None)
+        if max_workers_resolver:
+            max_workers = max_workers_resolver()
+        else:
+            try:
+                max_workers = int(getattr(config.RUNTIME, "market_data_max_workers", 1) or 1)
+            except (TypeError, ValueError):
+                max_workers = 1
+            max_workers = max(1, max_workers)
+        max_workers = min(max_workers, len(symbols))
+        profile = getattr(self, "profile", None) or config.current_profile()
+
+        def fetch_order_book_safe(symbol: str):
+            try:
+                with config.use_profile(profile):
+                    self._cached_order_book(symbol, limit=5)
+                return symbol, None
+            except Exception as exc:
+                return symbol, exc
+
+        if max_workers <= 1 or len(symbols) <= 1:
+            results = [fetch_order_book_safe(symbol) for symbol in symbols]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = list(executor.map(fetch_order_book_safe, symbols))
+
+        for symbol, exc in results:
+            if exc is None:
+                continue
+            self._log_event(
+                "DEBUG",
+                f"HTX order book prefetch failed for {symbol}: {exc}",
+                event="market_data_prefetch",
+                symbol=symbol,
+                reason="order_book_prefetch_failed",
+                exception=exc,
+                retryable=getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc),
+            )
 
     def _payload_symbol(self, payload: dict) -> str:
         if not isinstance(payload, dict):

@@ -39,14 +39,23 @@ def _cache_key(value: Any):
 class CachedMarketDataExchange:
     """Small shared cache for immutable-ish market reads inside one bot process."""
 
-    def __init__(self, exchange, ticker_ttl_sec: float = 1.0, funding_ttl_sec: float = 300.0):
+    def __init__(
+        self,
+        exchange,
+        ticker_ttl_sec: float = 1.0,
+        funding_ttl_sec: float = 300.0,
+        order_book_ttl_sec: float = 1.0,
+    ):
         object.__setattr__(self, "_exchange", exchange)
         object.__setattr__(self, "_ticker_ttl_sec", max(0.0, ticker_ttl_sec))
         object.__setattr__(self, "_funding_ttl_sec", max(0.0, funding_ttl_sec))
+        object.__setattr__(self, "_order_book_ttl_sec", max(0.0, order_book_ttl_sec))
         object.__setattr__(self, "_ohlcv_cache", {})
         object.__setattr__(self, "_ohlcv_bucket_by_timeframe", {})
         object.__setattr__(self, "_ohlcv_inflight", {})
         object.__setattr__(self, "_ticker_cache", {})
+        object.__setattr__(self, "_order_book_cache", {})
+        object.__setattr__(self, "_order_book_inflight", {})
         object.__setattr__(self, "_funding_cache", {})
         object.__setattr__(self, "_cache_lock", threading.RLock())
 
@@ -157,6 +166,60 @@ class CachedMarketDataExchange:
                     result[symbol] = value
 
             return result
+
+    def _fetch_order_book_uncached(self, symbol: str, limit=None, params=None):
+        try:
+            return self._exchange.fetch_order_book(symbol, limit=limit, params=params or {})
+        except TypeError:
+            return self._exchange.fetch_order_book(symbol, limit=limit)
+
+    @staticmethod
+    def _valid_order_book_payload(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        return isinstance(payload.get("bids"), list) and isinstance(payload.get("asks"), list)
+
+    def fetch_order_book(self, symbol: str, limit=None, params=None):
+        ttl = self._order_book_ttl_sec
+        if ttl <= 0:
+            return self._fetch_order_book_uncached(symbol, limit=limit, params=params)
+
+        now = time.time()
+        key = (symbol, limit, _cache_key(params))
+        entry = None
+        owner = False
+        with self._cache_lock:
+            cached = self._order_book_cache.get(key)
+            if cached and now - cached[0] <= ttl:
+                return cached[1]
+            entry = self._order_book_inflight.get(key)
+            if entry is None:
+                entry = {"event": threading.Event(), "value": None, "exception": None}
+                self._order_book_inflight[key] = entry
+                owner = True
+
+        if not owner:
+            entry["event"].wait()
+            if entry.get("exception") is not None:
+                raise entry["exception"]
+            return entry.get("value")
+
+        value = None
+        try:
+            value = self._fetch_order_book_uncached(symbol, limit=limit, params=params)
+            if self._valid_order_book_payload(value):
+                with self._cache_lock:
+                    self._order_book_cache[key] = (time.time(), value)
+            return value
+        except Exception as exc:
+            entry["exception"] = exc
+            raise
+        finally:
+            if entry.get("exception") is None:
+                entry["value"] = value
+            with self._cache_lock:
+                self._order_book_inflight.pop(key, None)
+                entry["event"].set()
 
     def _funding_rate_value(self, payload: Any):
         if not isinstance(payload, dict):

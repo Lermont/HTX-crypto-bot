@@ -22,6 +22,7 @@ def ensure_runtime_locks(owner: Any) -> None:
         "_monitoring_lock",
         "_account_pnl_lock",
         "_exchange_host_lock",
+        "_market_data_cache_lock",
     ):
         instance_rlock(owner, attr_name)
 

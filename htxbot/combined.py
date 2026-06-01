@@ -55,6 +55,9 @@ class CombinedHtxFuturesBot:
                 reset_private_caches = getattr(bot, "_reset_private_caches", None)
                 if reset_private_caches:
                     reset_private_caches()
+                reset_market_data = getattr(bot, "_reset_market_data_caches", None)
+                if reset_market_data:
+                    reset_market_data()
 
         for bot in self.bots:
             with config.use_profile(bot.profile):
@@ -66,6 +69,9 @@ class CombinedHtxFuturesBot:
                 prepare_entry_gate = getattr(bot, "_prepare_new_entry_gate", None)
                 if prepare_entry_gate:
                     prepare_entry_gate()
+                prefetch_market_data = getattr(bot, "_prefetch_market_data_snapshots", None)
+                if prefetch_market_data:
+                    prefetch_market_data()
                 prefetch_private = getattr(bot, "_prefetch_private_snapshots", None)
                 if prefetch_private:
                     prefetch_private()

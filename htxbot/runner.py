@@ -228,13 +228,17 @@ class RunnerMixin:
             self.setup()
             self._log_event("INFO", "HTX futures bot loop started", event="futures_setup", reason="bot_started")
 
-            from concurrent.futures import ThreadPoolExecutor
-
             while True:
                 started_at = time.time()
                 self._reset_private_caches()
+                reset_market_data = getattr(self, "_reset_market_data_caches", None)
+                if reset_market_data:
+                    reset_market_data()
                 self._update_signal_cache_if_needed()
                 self._prepare_new_entry_gate()
+                prefetch_market_data = getattr(self, "_prefetch_market_data_snapshots", None)
+                if prefetch_market_data:
+                    prefetch_market_data()
                 prefetch_private = getattr(self, "_prefetch_private_snapshots", None)
                 if prefetch_private:
                     prefetch_private()

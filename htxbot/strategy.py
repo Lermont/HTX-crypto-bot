@@ -3418,7 +3418,8 @@ class StrategyMixin:
         return ""
 
     def _entry_orderbook_spread_bps(self, symbol: str) -> Tuple[float, float, float]:
-        book = self.exchange.fetch_order_book(symbol, limit=5)
+        fetch_cached = getattr(self, "_cached_order_book", None)
+        book = fetch_cached(symbol, limit=5) if fetch_cached else self.exchange.fetch_order_book(symbol, limit=5)
         bids = book.get("bids") or []
         asks = book.get("asks") or []
         bid = self._safe_float((bids[0] if bids else [0.0])[0], 0.0)
