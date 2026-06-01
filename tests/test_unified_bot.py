@@ -140,6 +140,10 @@ class FakeExchange:
         self.set_position_mode_calls = []
         self.set_position_mode_error = None
         self.ticker = {"bid": 9.9, "ask": 10.1, "last": 10.0}
+        self.tickers = {}
+        self.fetch_ticker_calls = 0
+        self.ticker_calls = []
+        self.fetch_ticker_delay = 0.0
         self.order_book = {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]]}
         self.order_books = {}
         self.fetch_order_book_calls = 0
@@ -148,6 +152,8 @@ class FakeExchange:
         self.fetch_order_book_failures = []
         self.balance_free = 1000.0
         self.balance_total = 1000.0
+        self.fetch_balance_calls = 0
+        self.fetch_balance_delay = 0.0
 
     def market(self, symbol):
         return self.markets[symbol]
@@ -165,7 +171,12 @@ class FakeExchange:
         return f"{round(float(price), 2):.2f}"
 
     def fetch_ticker(self, symbol):
-        return dict(self.ticker)
+        self.fetch_ticker_calls += 1
+        self.ticker_calls.append(symbol)
+        if self.fetch_ticker_delay > 0:
+            time.sleep(self.fetch_ticker_delay)
+        ticker = self.tickers.get(symbol, self.ticker)
+        return dict(ticker)
 
     def fetch_order_book(self, symbol, limit=None):
         self.fetch_order_book_calls += 1
@@ -181,6 +192,9 @@ class FakeExchange:
         }
 
     def fetch_balance(self, params=None):
+        self.fetch_balance_calls += 1
+        if self.fetch_balance_delay > 0:
+            time.sleep(self.fetch_balance_delay)
         quote = config.EXCHANGE.quote_currency
         return {
             "free": {quote: self.balance_free},
@@ -1825,6 +1839,73 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._reset_market_data_caches()
                 bot._prefetch_market_data_snapshots()
+
+                self.assertTrue(seen_sides)
+                self.assertEqual(set(seen_sides), {"short"})
+
+    def test_ticker_prefetch_fetches_symbols_in_parallel_and_reuses_cycle_cache(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, market_data_max_workers=4, poll_interval_sec=3)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                symbols = [SYMBOL, SECOND_SYMBOL, "ALT3/USDT:USDT", "ALT4/USDT:USDT"]
+                bot.symbols = list(symbols)
+                bot.market_by_symbol.update({symbol: MARKET for symbol in symbols if symbol not in bot.market_by_symbol})
+                bot.exchange.has["fetchTickers"] = False
+
+                original_fetch_ticker = bot.exchange.fetch_ticker
+                active = {"count": 0, "max": 0}
+                lock = threading.Lock()
+
+                def slow_fetch_ticker(symbol):
+                    with lock:
+                        active["count"] += 1
+                        active["max"] = max(active["max"], active["count"])
+                    try:
+                        time.sleep(0.03)
+                        return original_fetch_ticker(symbol)
+                    finally:
+                        with lock:
+                            active["count"] -= 1
+
+                bot.exchange.fetch_ticker = slow_fetch_ticker
+
+                bot._reset_private_caches()
+                bot._reset_market_data_caches()
+                bot._prefetch_ticker_snapshots(symbols)
+
+                self.assertGreater(active["max"], 1)
+                self.assertEqual(set(bot.exchange.ticker_calls), set(symbols))
+                calls_after_prefetch = bot.exchange.fetch_ticker_calls
+
+                for symbol in symbols:
+                    reference, last = bot._fetch_reference_price(symbol)
+                    self.assertGreater(reference, 0.0)
+                    self.assertGreater(last, 0.0)
+
+                self.assertEqual(bot.exchange.fetch_ticker_calls, calls_after_prefetch)
+
+    def test_parallel_ticker_prefetch_preserves_profile_context(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, market_data_max_workers=2)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+                bot.exchange.has["fetchTickers"] = False
+                seen_sides = []
+                lock = threading.Lock()
+
+                def fetch_ticker_with_context(symbol):
+                    with lock:
+                        seen_sides.append(config.POSITION_SIDE)
+                    time.sleep(0.01)
+                    return {"bid": 9.9, "ask": 10.1, "last": 10.0, "symbol": symbol}
+
+                bot.exchange.fetch_ticker = fetch_ticker_with_context
+
+                bot._reset_private_caches()
+                bot._reset_market_data_caches()
+                bot._prefetch_ticker_snapshots()
 
                 self.assertTrue(seen_sides)
                 self.assertEqual(set(seen_sides), {"short"})
@@ -5414,6 +5495,27 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(all(snapshot["long_size"] == 5.0 for snapshot in snapshots))
                 self.assertEqual(bot.exchange.fetch_positions_calls, 1)
 
+    def test_account_snapshot_is_cached_per_cycle_and_singleflight(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_config(RUNTIME=config.RUNTIME):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.fetch_balance_delay = 0.02
+
+                bot._reset_private_caches()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                    snapshots = list(executor.map(lambda _index: bot._account_snapshot(), range(8)))
+
+                self.assertTrue(all(snapshot["free"] == 1000.0 for snapshot in snapshots))
+                self.assertEqual(bot.exchange.fetch_balance_calls, 1)
+
+                second = bot._account_snapshot()
+                self.assertEqual(second["total"], 1000.0)
+                self.assertEqual(bot.exchange.fetch_balance_calls, 1)
+
+                bot._reset_private_caches()
+                bot._account_snapshot()
+                self.assertEqual(bot.exchange.fetch_balance_calls, 2)
+
     def test_private_position_fetch_retries_transient_network_failure(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             exchange_config = replace(
@@ -6005,6 +6107,37 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(exchange.calls, 1)
         self.assertTrue(all(result["symbol"] == SYMBOL for result in results))
 
+    def test_shared_exchange_fetches_distinct_tickers_in_parallel(self):
+        class SlowTickerExchange:
+            def __init__(self):
+                self.calls = []
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+
+            def fetch_ticker(self, symbol, params=None):
+                with self.lock:
+                    self.calls.append(symbol)
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    time.sleep(0.03)
+                    return {"symbol": symbol, "last": 10.0}
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        exchange = SlowTickerExchange()
+        cached = CachedMarketDataExchange(exchange, ticker_ttl_sec=60)
+        symbols = [SYMBOL, SECOND_SYMBOL, BTC_SYMBOL, XAUT_SYMBOL]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(cached.fetch_ticker, symbols))
+
+        self.assertEqual(len(results), len(symbols))
+        self.assertGreater(exchange.max_active, 1)
+        self.assertEqual(set(exchange.calls), set(symbols))
+
     def test_shared_exchange_order_book_cache_is_singleflight_across_threads(self):
         class SlowOrderBookExchange:
             def __init__(self):
@@ -6228,6 +6361,45 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.POSITION_SIDE, "short")
             self.assertEqual(config.ENTRY_SIDE, "sell")
             self.assertEqual(config.EXIT_SIDE, "buy")
+
+    def test_combined_updates_signal_caches_in_parallel_for_profiles(self):
+        active = {"count": 0, "max": 0}
+        seen_sides = []
+        lock = threading.Lock()
+
+        class SignalBot:
+            def __init__(self, profile):
+                self.profile = profile
+
+            def _market_data_max_workers(self):
+                return self.profile.runtime.market_data_max_workers
+
+            def _update_signal_cache_if_needed(self):
+                with lock:
+                    seen_sides.append(config.POSITION_SIDE)
+                    active["count"] += 1
+                    active["max"] = max(active["max"], active["count"])
+                try:
+                    time.sleep(0.03)
+                finally:
+                    with lock:
+                        active["count"] -= 1
+
+        long_profile = replace(
+            config.resolve_profile("long"),
+            runtime=replace(config.resolve_profile("long").runtime, market_data_max_workers=2),
+        )
+        short_profile = replace(
+            config.resolve_profile("short"),
+            runtime=replace(config.resolve_profile("short").runtime, market_data_max_workers=2),
+        )
+        combined = object.__new__(CombinedHtxFuturesBot)
+        combined.bots = [SignalBot(long_profile), SignalBot(short_profile)]
+
+        CombinedHtxFuturesBot._update_signal_caches(combined)
+
+        self.assertGreater(active["max"], 1)
+        self.assertEqual(set(seen_sides), {"long", "short"})
 
     def test_combined_run_once_rechecks_disabled_symbols(self):
         class FakeBot:

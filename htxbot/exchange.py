@@ -531,7 +531,7 @@ class ExchangeMixin:
         tickers = self._bulk_tickers_by_symbol()
         ticker = tickers.get(symbol) if tickers else None
         if not ticker:
-            ticker = self.exchange.fetch_ticker(symbol)
+            ticker = self._ticker_from_market_data_cache(symbol) or self._fetch_ticker_uncached(symbol)
         bid = self._safe_float(ticker.get("bid"))
         last = self._safe_float(ticker.get("last"))
         ask = self._safe_float(ticker.get("ask"))
@@ -546,7 +546,7 @@ class ExchangeMixin:
             tickers = self._bulk_tickers_by_symbol()
             ticker = tickers.get(symbol) if tickers else None
             if not ticker:
-                ticker = self.exchange.fetch_ticker(symbol)
+                ticker = self._ticker_from_market_data_cache(symbol) or self._fetch_ticker_uncached(symbol)
         except Exception as exc:
             self._log_event(
                 "DEBUG",
@@ -669,6 +669,43 @@ class ExchangeMixin:
         return None
 
     def _account_snapshot(self) -> dict:
+        entry = None
+        owner = False
+        with self._private_cache_runtime_lock():
+            cached = getattr(self, "_account_snapshot_cache", None)
+            if isinstance(cached, dict):
+                return dict(cached)
+            entry = getattr(self, "_account_snapshot_inflight", None)
+            if not isinstance(entry, dict):
+                entry = {"event": threading.Event(), "value": None, "exception": None}
+                self._account_snapshot_inflight = entry
+                owner = True
+
+        if not owner:
+            entry["event"].wait()
+            if entry.get("exception") is not None:
+                raise entry["exception"]
+            value = entry.get("value") or {"free": 0.0, "total": 0.0}
+            return dict(value) if isinstance(value, dict) else {"free": 0.0, "total": 0.0}
+
+        value = None
+        try:
+            value = self._fetch_account_snapshot_uncached()
+            with self._private_cache_runtime_lock():
+                self._account_snapshot_cache = dict(value)
+            return dict(value)
+        except Exception as exc:
+            entry["exception"] = exc
+            raise
+        finally:
+            if entry.get("exception") is None:
+                entry["value"] = dict(value) if isinstance(value, dict) else value
+            with self._private_cache_runtime_lock():
+                if getattr(self, "_account_snapshot_inflight", None) is entry:
+                    self._account_snapshot_inflight = None
+                entry["event"].set()
+
+    def _fetch_account_snapshot_uncached(self) -> dict:
         try:
             balance = self.exchange.fetch_balance(
                 {
@@ -748,6 +785,8 @@ class ExchangeMixin:
             self._private_positions_by_symbol = None
             self._private_open_orders_by_symbol = None
             self._private_tickers_by_symbol = None
+            self._account_snapshot_cache = None
+            self._account_snapshot_inflight = None
             self._private_positions_bulk_failed = False
             self._private_open_orders_bulk_failed = False
             self._private_tickers_bulk_failed = False
@@ -755,6 +794,8 @@ class ExchangeMixin:
 
     def _reset_market_data_caches(self):
         with self._market_data_cache_runtime_lock():
+            self._ticker_cache = {}
+            self._ticker_inflight = {}
             self._order_book_cache = {}
             self._order_book_inflight = {}
 
@@ -764,6 +805,144 @@ class ExchangeMixin:
         except Exception:
             poll_interval = 1.0
         return max(1.0, min(10.0, poll_interval))
+
+    def _fetch_ticker_uncached(self, symbol: str) -> dict:
+        return self.exchange.fetch_ticker(symbol)
+
+    def _ticker_from_market_data_cache(self, symbol: str) -> Optional[dict]:
+        now = time.time()
+        key = (symbol,)
+        ttl = self._market_data_cache_ttl_sec()
+        with self._market_data_cache_runtime_lock():
+            cache = getattr(self, "_ticker_cache", None)
+            if not isinstance(cache, dict):
+                return None
+            cached = cache.get(key)
+            if cached and now - self._safe_float(cached[0], 0.0) <= ttl:
+                value = cached[1]
+                return dict(value) if isinstance(value, dict) else None
+        return None
+
+    def _cached_ticker(self, symbol: str) -> dict:
+        now = time.time()
+        key = (symbol,)
+        ttl = self._market_data_cache_ttl_sec()
+        entry = None
+        owner = False
+
+        with self._market_data_cache_runtime_lock():
+            cache = getattr(self, "_ticker_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._ticker_cache = cache
+            inflight = getattr(self, "_ticker_inflight", None)
+            if not isinstance(inflight, dict):
+                inflight = {}
+                self._ticker_inflight = inflight
+
+            cached = cache.get(key)
+            if cached and now - self._safe_float(cached[0], 0.0) <= ttl:
+                return dict(cached[1])
+
+            entry = inflight.get(key)
+            if entry is None:
+                entry = {"event": threading.Event(), "value": None, "exception": None}
+                inflight[key] = entry
+                owner = True
+
+        if not owner:
+            entry["event"].wait()
+            if entry.get("exception") is not None:
+                raise entry["exception"]
+            value = entry.get("value") or {}
+            return dict(value) if isinstance(value, dict) else {}
+
+        value = None
+        try:
+            value = self._fetch_ticker_uncached(symbol)
+            if isinstance(value, dict) and not self._is_ccxt_error_payload(value):
+                with self._market_data_cache_runtime_lock():
+                    self._ticker_cache[key] = (time.time(), dict(value))
+            return value
+        except Exception as exc:
+            entry["exception"] = exc
+            raise
+        finally:
+            if entry.get("exception") is None:
+                entry["value"] = dict(value) if isinstance(value, dict) else value
+            with self._market_data_cache_runtime_lock():
+                inflight = getattr(self, "_ticker_inflight", {})
+                if isinstance(inflight, dict):
+                    inflight.pop(key, None)
+                entry["event"].set()
+
+    def _ticker_prefetch_symbols(self) -> List[str]:
+        symbols = []
+        seen = set()
+        for symbol in list(getattr(self, "symbols", []) or []):
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            symbols.append(symbol)
+        return symbols
+
+    def _prefetch_ticker_snapshots(self, symbols: Optional[List[str]] = None) -> Dict[str, dict]:
+        if not hasattr(self.exchange, "fetch_ticker"):
+            return {}
+
+        prefetch_symbols = list(symbols) if symbols is not None else self._ticker_prefetch_symbols()
+        if not prefetch_symbols:
+            return {}
+
+        max_workers_resolver = getattr(self, "_market_data_max_workers", None)
+        if max_workers_resolver:
+            max_workers = max_workers_resolver()
+        else:
+            try:
+                max_workers = int(getattr(config.RUNTIME, "market_data_max_workers", 1) or 1)
+            except (TypeError, ValueError):
+                max_workers = 1
+            max_workers = max(1, max_workers)
+        max_workers = min(max_workers, len(prefetch_symbols))
+        profile = getattr(self, "profile", None) or config.current_profile()
+
+        def fetch_ticker_safe(symbol: str):
+            try:
+                with config.use_profile(profile):
+                    return symbol, self._cached_ticker(symbol), None
+            except Exception as exc:
+                return symbol, None, exc
+
+        if max_workers <= 1 or len(prefetch_symbols) <= 1:
+            results = [fetch_ticker_safe(symbol) for symbol in prefetch_symbols]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = list(executor.map(fetch_ticker_safe, prefetch_symbols))
+
+        tickers: Dict[str, dict] = {}
+        for symbol, ticker, exc in results:
+            if exc is not None:
+                self._log_event(
+                    "DEBUG",
+                    f"HTX ticker prefetch failed for {symbol}: {exc}",
+                    event="market_data_prefetch",
+                    symbol=symbol,
+                    reason="ticker_prefetch_failed",
+                    exception=exc,
+                    retryable=getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc),
+                )
+                continue
+            if isinstance(ticker, dict) and ticker:
+                tickers[symbol] = dict(ticker)
+
+        if tickers:
+            with self._private_cache_runtime_lock():
+                cached = getattr(self, "_private_tickers_by_symbol", None)
+                if not isinstance(cached, dict):
+                    cached = {}
+                cached.update(tickers)
+                self._private_tickers_by_symbol = cached
+        return tickers
 
     def _fetch_order_book_uncached(self, symbol: str, limit: int = 5):
         try:
@@ -834,15 +1013,19 @@ class ExchangeMixin:
         return symbols
 
     def _prefetch_market_data_snapshots(self):
+        symbols = self._order_book_prefetch_symbols()
+        if not symbols:
+            return
+
+        exchange_has = getattr(self.exchange, "has", {}) or {}
+        if not exchange_has.get("fetchTickers"):
+            self._prefetch_ticker_snapshots(symbols)
+
         strategy = config.STRATEGY
         if not getattr(strategy, "entry_spread_filter_enabled", False):
             return
         max_spread = max(0.0, self._safe_float(getattr(strategy, "entry_spread_filter_max_bps", 0.0), 0.0))
         if max_spread <= 0 or not hasattr(self.exchange, "fetch_order_book"):
-            return
-
-        symbols = self._order_book_prefetch_symbols()
-        if not symbols:
             return
 
         max_workers_resolver = getattr(self, "_market_data_max_workers", None)
@@ -1053,7 +1236,8 @@ class ExchangeMixin:
     def _prefetch_private_snapshots(self):
         self._bulk_positions_by_symbol()
         self._bulk_open_orders_by_symbol()
-        self._bulk_tickers_by_symbol()
+        if self._bulk_tickers_by_symbol() is None:
+            self._prefetch_ticker_snapshots()
 
     def _position_params(self) -> dict:
         return {"marginMode": config.RISK.margin_mode}

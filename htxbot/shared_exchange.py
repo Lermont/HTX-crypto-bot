@@ -54,6 +54,7 @@ class CachedMarketDataExchange:
         object.__setattr__(self, "_ohlcv_bucket_by_timeframe", {})
         object.__setattr__(self, "_ohlcv_inflight", {})
         object.__setattr__(self, "_ticker_cache", {})
+        object.__setattr__(self, "_ticker_inflight", {})
         object.__setattr__(self, "_order_book_cache", {})
         object.__setattr__(self, "_order_book_inflight", {})
         object.__setattr__(self, "_funding_cache", {})
@@ -129,13 +130,39 @@ class CachedMarketDataExchange:
             return self._exchange.fetch_ticker(symbol, params=params or {})
         now = time.time()
         key = (symbol, _cache_key(params))
+        entry = None
+        owner = False
         with self._cache_lock:
             cached = self._ticker_cache.get(key)
             if cached and now - cached[0] <= ttl:
                 return cached[1]
+            entry = self._ticker_inflight.get(key)
+            if entry is None:
+                entry = {"event": threading.Event(), "value": None, "exception": None}
+                self._ticker_inflight[key] = entry
+                owner = True
+
+        if not owner:
+            entry["event"].wait()
+            if entry.get("exception") is not None:
+                raise entry["exception"]
+            return entry.get("value")
+
+        value = None
+        try:
             value = self._exchange.fetch_ticker(symbol, params=params or {})
-            self._ticker_cache[key] = (now, value)
+            with self._cache_lock:
+                self._ticker_cache[key] = (time.time(), value)
             return value
+        except Exception as exc:
+            entry["exception"] = exc
+            raise
+        finally:
+            if entry.get("exception") is None:
+                entry["value"] = value
+            with self._cache_lock:
+                self._ticker_inflight.pop(key, None)
+                entry["event"].set()
 
     def fetch_tickers(self, symbols=None, params=None):
         ttl = self._ticker_ttl_sec

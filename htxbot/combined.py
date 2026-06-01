@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import concurrent.futures
 import threading
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -59,9 +60,7 @@ class CombinedHtxFuturesBot:
                 if reset_market_data:
                     reset_market_data()
 
-        for bot in self.bots:
-            with config.use_profile(bot.profile):
-                bot._update_signal_cache_if_needed()
+        self._update_signal_caches()
 
         for bot in self.bots:
             bot.external_reserved_symbols = self._reserved_symbols(exclude=bot)
@@ -104,6 +103,43 @@ class CombinedHtxFuturesBot:
                 exception=exc,
                 throttle_sec=60.0,
             )
+
+    def _combined_market_data_max_workers(self) -> int:
+        workers = 1
+        for bot in getattr(self, "bots", []) or []:
+            resolver = getattr(bot, "_market_data_max_workers", None)
+            if resolver:
+                try:
+                    workers = max(workers, int(resolver()))
+                    continue
+                except Exception:
+                    pass
+            try:
+                workers = max(workers, int(getattr(bot.profile.runtime, "market_data_max_workers", 1) or 1))
+            except Exception:
+                workers = max(workers, 1)
+        return max(1, workers)
+
+    def _update_signal_caches(self):
+        bots = list(getattr(self, "bots", []) or [])
+        if not bots:
+            return
+
+        max_workers = min(len(bots), self._combined_market_data_max_workers())
+
+        def update_bot_signal_cache(bot: HtxFuturesBot):
+            with config.use_profile(bot.profile):
+                return bot._update_signal_cache_if_needed()
+
+        if max_workers <= 1 or len(bots) <= 1:
+            for bot in bots:
+                update_bot_signal_cache(bot)
+            return
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(update_bot_signal_cache, bot) for bot in bots]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
 
     def _validate_shared_exchange_profiles(self):
         first = self.profiles[0].api_credentials

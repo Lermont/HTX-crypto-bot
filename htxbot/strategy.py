@@ -3883,7 +3883,11 @@ class StrategyMixin:
                 tickers = self._bulk_tickers_by_symbol()
                 ticker = tickers.get(symbol) if tickers else None
                 if not ticker:
-                    ticker = self.exchange.fetch_ticker(symbol)
+                    cache_lookup = getattr(self, "_ticker_from_market_data_cache", None)
+                    ticker = cache_lookup(symbol) if cache_lookup else None
+                if not ticker:
+                    fetch_uncached = getattr(self, "_fetch_ticker_uncached", None)
+                    ticker = fetch_uncached(symbol) if fetch_uncached else self.exchange.fetch_ticker(symbol)
                 market = self.market_by_symbol.get(symbol) or self.exchange.market(symbol)
                 context = self.external_price_feed.get_context(symbol, ticker, market=market)
             except Exception as exc:
