@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import config
 
 from .concurrency import instance_rlock
-from .fileio import is_transient_file_replace_error, replace_path_with_retry
+from .fileio import is_transient_file_replace_error, replace_path_with_retry, write_text_path_with_retry
 from .models import PositionLifecycle, TradeState
 
 
@@ -139,9 +139,19 @@ class StateMixin:
             tmp_path,
             target_path,
             attempts=30,
-            initial_delay_sec=0.05,
+            initial_delay_sec=0.1,
             max_delay_sec=0.5,
             replace_func=os.replace,
+        )
+
+    def _write_state_file_with_retry(self, tmp_path, payload: str):
+        write_text_path_with_retry(
+            tmp_path,
+            payload,
+            encoding="utf-8",
+            attempts=30,
+            initial_delay_sec=0.1,
+            max_delay_sec=0.5,
         )
 
     def _load_state(self) -> Dict[str, TradeState]:
@@ -218,7 +228,8 @@ class StateMixin:
                 self.state_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
                 try:
-                    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    state_json = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+                    self._write_state_file_with_retry(tmp_path, state_json)
                     self._replace_state_file_with_retry(tmp_path, self.state_path)
                 except Exception:
                     try:

@@ -683,12 +683,13 @@ class UnifiedBotTests(unittest.TestCase):
                     raise PermissionError("temporary lock")
                 return real_replace(src, dst)
 
-            with patch("htxbot.state.os.replace", side_effect=flaky_replace):
+            with patch("htxbot.state.os.replace", side_effect=flaky_replace), patch("htxbot.fileio.time.sleep") as sleep_mock:
                 bot._save_state()
 
             payload = json.loads(bot.state_path.read_text(encoding="utf-8"))
             self.assertEqual(payload[SYMBOL]["position_size"], 2.0)
             self.assertEqual(calls["count"], 3)
+            self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [0.1, 0.2])
             self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
 
     def test_state_save_retries_windows_file_lock_oserror(self):
@@ -708,12 +709,38 @@ class UnifiedBotTests(unittest.TestCase):
                     raise exc
                 return real_replace(src, dst)
 
-            with patch("htxbot.state.os.replace", side_effect=flaky_replace):
+            with patch("htxbot.state.os.replace", side_effect=flaky_replace), patch("htxbot.fileio.time.sleep") as sleep_mock:
                 bot._save_state()
 
             payload = json.loads(bot.state_path.read_text(encoding="utf-8"))
             self.assertEqual(payload[SYMBOL]["position_size"], 3.0)
             self.assertEqual(calls["count"], 2)
+            self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [0.1])
+            self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
+
+    def test_state_save_retries_transient_write_permission_error(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            state.position_size = 4.0
+            state.entry_price = 12.0
+            real_write_text = Path.write_text
+            calls = {"count": 0}
+
+            def flaky_write_text(path_self, data, *args, **kwargs):
+                if Path(path_self).suffix == ".tmp":
+                    calls["count"] += 1
+                    if calls["count"] < 3:
+                        raise PermissionError("temporary write lock")
+                return real_write_text(path_self, data, *args, **kwargs)
+
+            with patch("pathlib.Path.write_text", autospec=True, side_effect=flaky_write_text), patch("htxbot.fileio.time.sleep") as sleep_mock:
+                bot._save_state()
+
+            payload = json.loads(bot.state_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload[SYMBOL]["position_size"], 4.0)
+            self.assertEqual(calls["count"], 3)
+            self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [0.1, 0.2])
             self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
 
     def test_monitoring_replace_retries_windows_file_lock_oserror(self):
