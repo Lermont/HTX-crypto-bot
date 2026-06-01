@@ -355,6 +355,26 @@ class ExchangeMixin:
     def _expected_item_type_name(self, item_types: Tuple[type, ...]) -> str:
         return "|".join(item_type.__name__ for item_type in item_types)
 
+    def _is_ccxt_error_payload(self, payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+
+        normalized = {str(key).lower().replace("-", "_"): value for key, value in payload.items()}
+        status = str(normalized.get("status") or "").strip().lower()
+        if status in {"error", "err", "failed", "fail"}:
+            return True
+        if normalized.get("success") is False:
+            return True
+        if any(key in normalized for key in ("err_code", "err_msg", "error_code", "error_msg")):
+            return True
+
+        error = normalized.get("error")
+        if isinstance(error, dict):
+            return bool(error)
+        if isinstance(error, str):
+            return bool(error.strip())
+        return bool(error)
+
     def _expect_ccxt_list_response(
         self,
         payload: Any,
@@ -371,6 +391,12 @@ class ExchangeMixin:
         if item_types:
             for index, item in enumerate(payload):
                 if isinstance(item, item_types):
+                    if isinstance(item, dict) and self._is_ccxt_error_payload(item):
+                        expected = self._expected_item_type_name(item_types)
+                        raise UnexpectedExchangeResponse(
+                            f"{method} returned list with error dict item at index {index}; "
+                            f"expected list[{expected}]{location}; payload={self._ccxt_response_preview(payload)}"
+                        )
                     continue
                 expected = self._expected_item_type_name(item_types)
                 raise UnexpectedExchangeResponse(
