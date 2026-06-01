@@ -18,11 +18,11 @@ The default route is `ema_pullback`.
 - Signals: closed candles only, with macro EMA trend, pullback recovery, trigger EMA, relative strength to BTC, BTC 30m filter, score ranking, and entry throttling.
 - Initial entry: post-only limit ladder using `BUYING.ladder_fractions` and `BUYING.ladder_offsets`.
 - Averaging: enabled by `EMA_AVERAGING_ENABLED`; requires an open position, no active entry orders, healthy signal `add_valid`, drawdown threshold, age limit, interval limit, risk caps, and optional account-PnL context.
-- Exit: reduce-only adaptive exit ladder, optional trailing/runner logic, account profit unload, and breakeven after the configured holding time.
+- Exit: exchange-side reduce-only hard stop-loss, adaptive reduce-only exit ladder, optional trailing/runner logic, account profit unload, and breakeven after the configured holding time.
 - External reference prices: MEXC book ticker is used as a reference for entry blocks, directional 1m blocks, impulse bonus, and tighter exits.
 - Monitoring: CSV/JSONL logs for trades, cycle stats, macro context, external prices, signal analytics, diagnostics, and account PnL.
 
-The default live route does not place a classic stop-loss. Controlled-loss, hard-time-exit, and absolute-force-exit helpers exist in code but are disabled by default and are not part of the conservative launch profile unless explicitly wired and configured.
+The default live route places an exchange-side reduce-only hard stop-loss from entry (`HARD_STOP_LOSS_PCT=0.02`) and can widen it from closed-candle ATR (`HARD_STOP_LOSS_ATR_MULTIPLIER=2.0`, capped by `HARD_STOP_LOSS_ATR_MAX_PCT=0.03`). The fixed stop is the fallback when ATR is unavailable after restart.
 
 ## Strategy Snapshot
 

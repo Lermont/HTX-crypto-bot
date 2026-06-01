@@ -450,8 +450,30 @@ class StrategyMixin:
             return self._price_at_or_below(symbol, price)
         return self._price_at_or_above(symbol, price)
 
-    def _hard_stop_loss_trigger_price(self, symbol: str, state: TradeState) -> float:
-        pct = max(0.0, self._safe_float(config.STRATEGY.hard_stop_loss_pct, 0.0))
+    def _hard_stop_loss_rate(self, signal: Optional[dict] = None) -> Tuple[float, str]:
+        strategy = config.STRATEGY
+        fixed_pct = max(0.0, self._safe_float(strategy.hard_stop_loss_pct, 0.0))
+        effective_pct = fixed_pct
+        parts = [f"fixed_pct={fixed_pct:.6f}"]
+        if strategy.hard_stop_loss_atr_enabled:
+            atr_rate = max(0.0, self._safe_float((signal or {}).get("atr_rate"), 0.0))
+            atr_multiplier = max(0.0, self._safe_float(strategy.hard_stop_loss_atr_multiplier, 0.0))
+            atr_pct = atr_rate * atr_multiplier
+            atr_max_pct = max(0.0, self._safe_float(strategy.hard_stop_loss_atr_max_pct, 0.0))
+            if atr_max_pct > 0:
+                atr_pct = min(atr_pct, atr_max_pct)
+            effective_pct = max(effective_pct, atr_pct)
+            parts.append(
+                f"atr_enabled=1;atr_rate={atr_rate:.6f};"
+                f"atr_multiplier={atr_multiplier:.3f};atr_pct={atr_pct:.6f};"
+                f"atr_max_pct={atr_max_pct:.6f}"
+            )
+        else:
+            parts.append("atr_enabled=0")
+        return effective_pct, ";".join(parts)
+
+    def _hard_stop_loss_trigger_price(self, symbol: str, state: TradeState, loss_rate: float) -> float:
+        pct = max(0.0, self._safe_float(loss_rate, 0.0))
         if pct <= 0 or state.entry_price <= 0:
             return 0.0
         if config.POSITION_SIDE == "short":
@@ -462,10 +484,21 @@ class StrategyMixin:
         return (
             f"hard_stop_loss|direction={config.POSITION_SIDE}|side={config.EXIT_SIDE}|"
             f"amount={amount:.12f}|entry={state.entry_price:.12f}|"
-            f"trigger={trigger_price:.12f}|pct={config.STRATEGY.hard_stop_loss_pct:.8f}"
+            f"trigger={trigger_price:.12f}"
         )
 
-    def _ensure_hard_stop_loss(self, symbol: str) -> bool:
+    def _create_hard_stop_loss_order(self, symbol: str, amount: float, trigger_price: float) -> dict:
+        return self._create_one_way_order(
+            symbol=symbol,
+            order_type="market",
+            side=config.EXIT_SIDE,
+            amount=amount,
+            price=None,
+            reduce_only=True,
+            extra_params={"stopLossPrice": trigger_price},
+        )
+
+    def _ensure_hard_stop_loss(self, symbol: str, signal: Optional[dict] = None) -> bool:
         state = self._get_state(symbol)
         if not config.STRATEGY.hard_stop_loss_enabled:
             if state.hard_stop_order:
@@ -494,7 +527,8 @@ class StrategyMixin:
             return False
 
         amount = self._amount_to_precision(symbol, min(max(0.0, state.position_size), state.position_size))
-        trigger_price = self._hard_stop_loss_trigger_price(symbol, state)
+        loss_rate, loss_rate_reason = self._hard_stop_loss_rate(signal)
+        trigger_price = self._hard_stop_loss_trigger_price(symbol, state, loss_rate)
         if amount <= 0 or trigger_price <= 0:
             return False
 
@@ -507,18 +541,51 @@ class StrategyMixin:
             if state.hard_stop_order:
                 return True
 
+        order = {}
+        order_id = ""
+        order_exc: Optional[Exception] = None
         try:
-            order = self._create_one_way_order(
-                symbol=symbol,
-                order_type="market",
-                side=config.EXIT_SIDE,
-                amount=amount,
-                price=None,
-                reduce_only=True,
-                extra_params={"stopLossPrice": trigger_price},
-            )
+            order = self._create_hard_stop_loss_order(symbol, amount, trigger_price)
             order_id = str(order.get("id") or "")
         except Exception as exc:
+            order_exc = exc
+            if self._is_reduce_only_amount_exceeds_closeable_error(exc) and state.sell_ladder_orders:
+                self._log_event(
+                    "WARNING",
+                    f"Hard stop-loss for {symbol} is blocked by reserved closeable amount; canceling TP ladder and retrying stop first",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=config.EXIT_SIDE,
+                    amount=amount,
+                    price=trigger_price,
+                    position_size=state.position_size,
+                    entry_price=state.entry_price,
+                    reason=f"hard_stop_loss_closeable_reserved_by_exit_ladder;{loss_rate_reason}",
+                    exception=exc,
+                )
+                self._cancel_sell_orders(symbol, reason="hard_stop_loss_priority")
+                state = self._get_state(symbol)
+                if state.sell_ladder_orders:
+                    self._log_event(
+                        "WARNING",
+                        f"Hard stop-loss delayed for {symbol}: TP ladder cancel did not fully clear",
+                        event="reduce_only_violation_prevented",
+                        symbol=symbol,
+                        side=config.EXIT_SIDE,
+                        amount=amount,
+                        price=trigger_price,
+                        position_size=state.position_size,
+                        entry_price=state.entry_price,
+                        reason=f"hard_stop_loss_priority_cancel_failed;{loss_rate_reason}",
+                    )
+                    return True
+                try:
+                    order = self._create_hard_stop_loss_order(symbol, amount, trigger_price)
+                    order_id = str(order.get("id") or "")
+                except Exception as retry_exc:
+                    order_exc = retry_exc
+
+        if not order_id and order_exc is not None:
             state.frozen_no_more_buys = True
             self._refresh_active_side(state)
             self._save_state()
@@ -532,8 +599,8 @@ class StrategyMixin:
                 price=trigger_price,
                 position_size=state.position_size,
                 entry_price=state.entry_price,
-                reason="hard_stop_loss_order_rejected",
-                exception=exc,
+                reason=f"hard_stop_loss_order_rejected;{loss_rate_reason}",
+                exception=order_exc,
             )
             return False
 
@@ -561,6 +628,7 @@ class StrategyMixin:
             "created_at": time.time(),
             "hard_stop_loss": True,
             "reduce_only": True,
+            "loss_rate": loss_rate,
             "cancel_params": {"stopLossTakeProfit": True},
             "reason": "hard_stop_loss",
         }
@@ -578,7 +646,7 @@ class StrategyMixin:
             price=trigger_price,
             position_size=state.position_size,
             entry_price=state.entry_price,
-            reason=f"hard_stop_loss;pct={config.STRATEGY.hard_stop_loss_pct:.6f}",
+            reason=f"hard_stop_loss;loss_rate={loss_rate:.6f};{loss_rate_reason}",
         )
         return True
 

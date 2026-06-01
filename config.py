@@ -339,6 +339,9 @@ class StrategySettings:
     hard_time_exit_bypass_profit_bank: bool
     hard_stop_loss_enabled: bool
     hard_stop_loss_pct: float
+    hard_stop_loss_atr_enabled: bool
+    hard_stop_loss_atr_multiplier: float
+    hard_stop_loss_atr_max_pct: float
     enable_absolute_force_exit: bool
     absolute_force_exit_after_minutes: float
     enable_controlled_loss_exit: bool
@@ -709,6 +712,7 @@ def _validate_profile(profile: "BotProfile") -> None:
         "account_averaging_falling_guard_fraction",
         "account_averaging_budget_scale",
         "hard_stop_loss_pct",
+        "hard_stop_loss_atr_max_pct",
         "controlled_loss_max_position_fraction",
         "controlled_loss_min_move_fraction",
     ):
@@ -727,6 +731,8 @@ def _validate_profile(profile: "BotProfile") -> None:
         )
     if profile.strategy.hard_stop_loss_enabled and profile.strategy.hard_stop_loss_pct <= 0:
         raise ValueError(f"{profile.name}.STRATEGY.hard_stop_loss_pct must be positive when hard stop is enabled")
+    if profile.strategy.hard_stop_loss_atr_multiplier < 0:
+        raise ValueError(f"{profile.name}.STRATEGY.hard_stop_loss_atr_multiplier must be non-negative")
 
     if profile.risk.max_position_notional_fraction > 0.03 + 1e-12:
         _add_config_warning(
@@ -1054,8 +1060,11 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         hard_time_exit_fraction_step=_env_float("HARD_TIME_EXIT_FRACTION_STEP", 0.25, profile=name),
         hard_time_exit_max_loss_on_notional=_env_float("HARD_TIME_EXIT_MAX_LOSS_ON_NOTIONAL", 0.03, profile=name),
         hard_time_exit_bypass_profit_bank=_env_bool("HARD_TIME_EXIT_BYPASS_PROFIT_BANK", True, profile=name),
-        hard_stop_loss_enabled=_env_bool("HARD_STOP_LOSS_ENABLED", False, profile=name),
-        hard_stop_loss_pct=_env_float("HARD_STOP_LOSS_PCT", 0.0, profile=name),
+        hard_stop_loss_enabled=_env_bool("HARD_STOP_LOSS_ENABLED", True, profile=name),
+        hard_stop_loss_pct=_env_float("HARD_STOP_LOSS_PCT", 0.02, profile=name),
+        hard_stop_loss_atr_enabled=_env_bool("HARD_STOP_LOSS_ATR_ENABLED", True, profile=name),
+        hard_stop_loss_atr_multiplier=max(0.0, _env_float("HARD_STOP_LOSS_ATR_MULTIPLIER", 2.0, profile=name)),
+        hard_stop_loss_atr_max_pct=_env_float("HARD_STOP_LOSS_ATR_MAX_PCT", 0.03, profile=name),
         enable_absolute_force_exit=False,
         absolute_force_exit_after_minutes=0.0,
         enable_controlled_loss_exit=False,

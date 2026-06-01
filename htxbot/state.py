@@ -369,7 +369,7 @@ class StateMixin:
                 if not order_id:
                     continue
                 ref["id"] = order_id
-                for key in ("price", "amount", "filled", "remaining", "created_at", "signal_ts"):
+                for key in ("price", "trigger_price", "amount", "filled", "remaining", "created_at", "signal_ts", "loss_rate"):
                     if key in ref and ref.get(key) is not None:
                         ref[key] = self._safe_float(ref.get(key), 0.0)
                 if "stage" in ref and ref.get("stage") is not None:

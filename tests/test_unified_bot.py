@@ -983,6 +983,14 @@ class UnifiedBotTests(unittest.TestCase):
                                 "created_at": "1700000000",
                                 "stage": "1",
                             },
+                            "hard_stop_order": {
+                                "id": 67890,
+                                "side": "sell",
+                                "trigger_price": "10.8",
+                                "amount": "3",
+                                "created_at": "1700000001",
+                                "loss_rate": "0.02",
+                            },
                         }
                     }
                 ),
@@ -1004,6 +1012,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(reloaded.sell_ladder_orders[0]["id"], "12345")
             self.assertEqual(reloaded.sell_ladder_orders[0]["price"], 12.0)
             self.assertEqual(reloaded.sell_ladder_orders[0]["amount"], 1.0)
+            self.assertEqual(reloaded.hard_stop_order["id"], "67890")
+            self.assertEqual(reloaded.hard_stop_order["trigger_price"], 10.8)
+            self.assertEqual(reloaded.hard_stop_order["loss_rate"], 0.02)
             bot._save_state()
             saved_payload = json.loads(bot.state_path.read_text(encoding="utf-8"))[SYMBOL]
             self.assertNotIn("retired_strategy_counter", saved_payload)
@@ -4092,7 +4103,12 @@ class UnifiedBotTests(unittest.TestCase):
     def test_hard_stop_loss_places_reduce_only_tpsl_for_long_position(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, hard_stop_loss_enabled=True, hard_stop_loss_pct=0.05)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.05,
+                hard_stop_loss_atr_enabled=False,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -4116,10 +4132,39 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.hard_stop_order["id"], order["id"])
                 self.assertEqual(state.hard_stop_order["cancel_params"], {"stopLossTakeProfit": True})
 
+    def test_hard_stop_loss_uses_atr_cap_when_signal_volatility_is_wider(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_atr_enabled=True,
+                hard_stop_loss_atr_multiplier=2.0,
+                hard_stop_loss_atr_max_pct=0.03,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+
+                bot._ensure_hard_stop_loss(SYMBOL, signal={"atr_rate": 0.025})
+
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["params"].get("stopLossPrice"), 97.0)
+                self.assertAlmostEqual(state.hard_stop_order["loss_rate"], 0.03)
+
     def test_hard_stop_loss_mirrors_trigger_for_short_position(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, hard_stop_loss_enabled=True, hard_stop_loss_pct=0.05)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.05,
+                hard_stop_loss_atr_enabled=False,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -4132,6 +4177,45 @@ class UnifiedBotTests(unittest.TestCase):
                 order = bot.exchange.created_orders[0]
                 self.assertEqual(order["side"], "buy")
                 self.assertEqual(order["params"].get("stopLossPrice"), 105.0)
+
+    def test_hard_stop_loss_cancels_tp_ladder_and_retries_when_closeable_is_reserved(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_atr_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 101.0, "amount": 10.0}]
+                original_create_order = bot.exchange.create_order
+                calls = {"count": 0}
+
+                def reject_first_stop(symbol, type, side, amount, price, params=None):
+                    if params and params.get("stopLossPrice") and calls["count"] == 0:
+                        calls["count"] += 1
+                        raise RuntimeError(
+                            'htx {"status":"error","err_code":1492,'
+                            '"err_msg":"Amount of Reduce Only order exceeds the amount available to close."}'
+                        )
+                    return original_create_order(symbol, type, side, amount, price, params=params)
+
+                bot.exchange.create_order = reject_first_stop
+
+                placed = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(placed)
+                self.assertEqual(calls["count"], 1)
+                self.assertIn(("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                self.assertEqual(state.hard_stop_order["id"], bot.exchange.created_orders[0]["id"])
 
     def test_ema_2d_default_is_2880_minutes(self):
         with config.use_profile("long"):
@@ -4169,8 +4253,11 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.controlled_loss_reprice_minutes, 60.0)
             self.assertEqual(config.STRATEGY.controlled_loss_macro_gap_reference, 0.02)
             self.assertEqual(config.STRATEGY.controlled_loss_macro_max_speed_multiplier, 2.0)
-            self.assertFalse(config.STRATEGY.hard_stop_loss_enabled)
-            self.assertEqual(config.STRATEGY.hard_stop_loss_pct, 0.0)
+            self.assertTrue(config.STRATEGY.hard_stop_loss_enabled)
+            self.assertEqual(config.STRATEGY.hard_stop_loss_pct, 0.02)
+            self.assertTrue(config.STRATEGY.hard_stop_loss_atr_enabled)
+            self.assertEqual(config.STRATEGY.hard_stop_loss_atr_multiplier, 2.0)
+            self.assertEqual(config.STRATEGY.hard_stop_loss_atr_max_pct, 0.03)
             self.assertFalse(config.EXTERNAL_PRICE_FEED.exit_adjustment_enabled)
 
     def test_ema_large_periods_convert_to_configured_timeframes(self):

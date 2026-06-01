@@ -178,9 +178,9 @@ class RunnerMixin:
         if state.position_size > 0:
             if not signal_valid:
                 self._freeze_no_more_buys(symbol, reason="signal_invalid_or_missing")
-            self._ensure_hard_stop_loss(symbol)
             if self._maybe_apply_absolute_force_exit(symbol, reason="absolute_force_exit_elapsed"):
                 return
+            self._ensure_hard_stop_loss(symbol, signal=signal)
             if self._maybe_apply_controlled_loss_exit(symbol, signal):
                 return
             if self._maybe_apply_urgent_time_exit(symbol, signal):

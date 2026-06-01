@@ -58,7 +58,7 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 
 ## Управление Риском И Позицией
 
-В активном маршруте по умолчанию нет классического stop-loss. Риск ограничивается лимитами позиции, staged entries, ограничениями усреднения, валидацией сигнала, reduce-only выходами и breakeven/time-exit поведением.
+В активном маршруте по умолчанию есть биржевой reduce-only hard stop-loss от цены входа: `HARD_STOP_LOSS_PCT=0.02`. Если в сигнале есть ATR закрытой свечи, стоп может расширяться по `HARD_STOP_LOSS_ATR_MULTIPLIER=2.0`, но не дальше `HARD_STOP_LOSS_ATR_MAX_PCT=0.03`. Фиксированный стоп остаётся fallback после рестарта, когда ATR ещё недоступен.
 
 Ключевые дефолты:
 
@@ -66,6 +66,7 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 - Вход по умолчанию делится на два limit-ордера.
 - Новые входы проходят quality gates: score, RS60, RS30, top-N, rate-limit и crowded-market rules.
 - Усреднение ограничено числом стадий, интервалом, hard-floor drawdown, ATR/daily-volatility floors и pullback recovery.
+- Stop-loss ставится как exchange-side TPSL/reduce-only market close и не превышает текущий `position_size`.
 - Breakeven активируется после заданного времени удержания, запрещает дальнейшие доборы и переставляет reduce-only выход.
 - Combined mode не даёт long и short профилям открыть встречную экспозицию по одной монете.
 

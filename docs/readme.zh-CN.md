@@ -58,7 +58,7 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 
 ## 风险与仓位管理
 
-默认主流程不放置传统 stop-loss。风险通过仓位限制、分段入场、补仓上限、信号校验、reduce-only 出场和 breakeven/time-exit 行为管理。
+默认主流程会从入场价放置交易所侧 reduce-only hard stop-loss：`HARD_STOP_LOSS_PCT=0.02`。如果信号包含已收盘 K 线 ATR，止损可按 `HARD_STOP_LOSS_ATR_MULTIPLIER=2.0` 放宽，但不超过 `HARD_STOP_LOSS_ATR_MAX_PCT=0.03`。重启后 ATR 暂不可用时，固定止损仍作为 fallback。
 
 关键默认值：
 
@@ -66,6 +66,7 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 - 默认用两个限价订单完成初始入场。
 - 新入场需要通过 quality gates：score、RS60、RS30、top-N、rate-limit 和 crowded-market rules。
 - 补仓受阶段数、时间间隔、drawdown step 和信号健康状态限制。
+- Stop-loss 使用 exchange-side TPSL/reduce-only market close，数量不会超过当前 `position_size`。
 - Breakeven 会在配置的持仓时间后激活，停止继续补仓，并重新设置 reduce-only 出场。
 - Combined mode 会阻止 long 和 short 配置在同一币种上开出相反方向风险敞口。
 

@@ -248,7 +248,19 @@ ACCOUNT_PNL_SAMPLE_INTERVAL_SEC=30
 
 ## 11. Exit Ladder
 
-Выходы ставятся reduce-only. Активный default — adaptive exit ladder.
+Выходы ставятся reduce-only. Активный default — exchange-side hard stop-loss плюс adaptive exit ladder.
+
+Hard stop-loss ставится как HTX/ccxt TPSL `stopLossPrice` с market close и `reduceOnly=true`. Размер стопа не больше текущего `position_size`. Фиксированный fallback включён по умолчанию:
+
+```text
+HARD_STOP_LOSS_ENABLED=true
+HARD_STOP_LOSS_PCT=0.02
+HARD_STOP_LOSS_ATR_ENABLED=true
+HARD_STOP_LOSS_ATR_MULTIPLIER=2.0
+HARD_STOP_LOSS_ATR_MAX_PCT=0.03
+```
+
+Если сигнал содержит `atr_rate`, effective stop distance = max(fixed pct, ATR * multiplier), но ATR-компонент ограничивается `HARD_STOP_LOSS_ATR_MAX_PCT`. После рестарта, пока ATR недоступен, используется фиксированный stop-loss. Если HTX сообщает, что closeable amount зарезервирован TP ladder, бот отменяет tracked TP ladder и повторяет hard stop первым; TP ladder затем может быть восстановлен только если биржа даёт closeable amount.
 
 Режим выбирается по отношению текущего notional позиции к initial notional:
 
