@@ -5637,6 +5637,56 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertIn("fetch_open_orders returned list with error dict item", order_rows[-1]["message"])
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
 
+    def test_bulk_position_dict_response_falls_back_without_step_error(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.fetch_positions_response_override = {
+                "status": "error",
+                "err_code": "500",
+                "err_msg": "unexpected bulk payload",
+            }
+
+            snapshot = bot._fetch_position_snapshot(SYMBOL)
+
+            self.assertFalse(snapshot["ok"])
+            self.assertEqual(bot.exchange.fetch_positions_calls, 2)
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            bulk_rows = [row for row in rows if row["reason"] == "bulk_positions_fetch_failed"]
+            position_rows = [row for row in rows if row["reason"] == "position_fetch_failed"]
+            self.assertTrue(bulk_rows)
+            self.assertTrue(position_rows)
+            self.assertEqual(bulk_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(position_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(position_rows[-1]["error_code"], "500")
+            self.assertIn("fetch_positions returned dict", position_rows[-1]["message"])
+            self.assertFalse(any(row["reason"] == "step_error" for row in rows))
+
+    def test_bulk_open_orders_dict_response_falls_back_without_step_error(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.fetch_open_orders_response_override = {
+                "status": "error",
+                "err_code": "501",
+                "err_msg": "unexpected bulk payload",
+            }
+
+            orders = bot._fetch_open_orders(SYMBOL)
+
+            self.assertIsNone(orders)
+            self.assertEqual(bot.exchange.fetch_open_orders_calls, 2)
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            bulk_rows = [row for row in rows if row["reason"] == "bulk_open_orders_fetch_failed"]
+            order_rows = [row for row in rows if row["reason"] == "open_orders_fetch_failed"]
+            self.assertTrue(bulk_rows)
+            self.assertTrue(order_rows)
+            self.assertEqual(bulk_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(order_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(order_rows[-1]["error_code"], "501")
+            self.assertIn("fetch_open_orders returned dict", order_rows[-1]["message"])
+            self.assertFalse(any(row["reason"] == "step_error" for row in rows))
+
     def test_public_ohlcv_dict_response_raises_typed_exchange_response_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
