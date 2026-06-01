@@ -749,7 +749,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         timeout_ms=_env_int("TIMEOUT_MS", 30000, profile=name),
         default_type="swap",
         set_position_mode_on_start=_env_bool("SET_POSITION_MODE_ON_START", True, profile=name),
-        set_leverage_on_start=False,
+        set_leverage_on_start=_env_bool("SET_LEVERAGE_ON_START", False, profile=name),
         contract_hostnames=_env_csv("CONTRACT_HOSTNAMES", ("api.hbdm.com", "api.hbdm.vn"), profile=name),
         market_load_retries=_env_int("MARKET_LOAD_RETRIES", 4, profile=name),
         markets_cache_max_age_sec=_env_int("MARKETS_CACHE_MAX_AGE_SEC", 7 * 24 * 60 * 60, profile=name),

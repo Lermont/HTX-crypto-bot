@@ -135,6 +135,7 @@ class FakeExchange:
         self.create_order_calls = 0
         self.set_leverage_calls = []
         self.set_leverage_error = None
+        self.set_leverage_errors_by_symbol = {}
         self.set_position_mode_calls = []
         self.set_position_mode_error = None
         self.ticker = {"bid": 9.9, "ask": 10.1, "last": 10.0}
@@ -278,6 +279,8 @@ class FakeExchange:
 
     def set_leverage(self, leverage, symbol=None, params=None):
         self.set_leverage_calls.append((leverage, symbol, params or {}))
+        if symbol in self.set_leverage_errors_by_symbol:
+            raise self.set_leverage_errors_by_symbol[symbol]
         if self.set_leverage_error is not None:
             raise self.set_leverage_error
         self.account_leverage = leverage
@@ -2251,6 +2254,20 @@ class UnifiedBotTests(unittest.TestCase):
                     os.environ[key] = value
 
         self.assertEqual(profile.runtime.poll_interval_sec, 17)
+
+    def test_profile_reads_set_leverage_on_start_env(self):
+        env_key = "ALIAS_SET_LEVERAGE_ON_START"
+        previous = os.environ.get(env_key)
+        try:
+            os.environ[env_key] = "true"
+            profile = config._make_profile("alias", "long", ("test",))
+        finally:
+            if previous is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = previous
+
+        self.assertTrue(profile.exchange.set_leverage_on_start)
 
     def test_entry_ladder_does_not_retry_with_lower_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5207,7 +5224,7 @@ class UnifiedBotTests(unittest.TestCase):
                 )
                 self.assertEqual(bot.order_leverage_cache[SYMBOL], 7.0)
 
-    def test_setup_blocks_live_start_when_enabled_leverage_cannot_be_set(self):
+    def test_setup_continues_when_enabled_leverage_cannot_be_set_for_one_symbol(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             exchange_config = replace(
                 config.EXCHANGE,
@@ -5216,16 +5233,28 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
-                bot.symbols = [SYMBOL]
-                bot.exchange.set_leverage_error = RuntimeError("leverage rejected")
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+                bot.exchange.set_leverage_errors_by_symbol[SYMBOL] = RuntimeError("leverage rejected")
 
-                with self.assertRaisesRegex(RuntimeError, "Could not set configured HTX leverage"):
-                    bot._setup_futures_account()
+                bot._setup_futures_account()
 
+                self.assertEqual(
+                    bot.exchange.set_leverage_calls,
+                    [
+                        (config.RISK.leverage, SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                        (config.RISK.leverage, SECOND_SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    ],
+                )
+                self.assertNotIn(SYMBOL, bot.order_leverage_cache)
+                self.assertEqual(bot.order_leverage_cache[SECOND_SYMBOL], float(config.RISK.leverage))
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertEqual(rows[-1]["level"], "ERROR")
-                self.assertEqual(rows[-1]["reason"], "set_leverage_failed")
+                reasons = [row["reason"] for row in rows]
+                self.assertIn("set_leverage_failed", reasons)
+                self.assertIn("set_leverage_partial_failure", reasons)
+                failed_row = next(row for row in rows if row["reason"] == "set_leverage_failed")
+                self.assertEqual(failed_row["symbol"], SYMBOL)
+                self.assertEqual(failed_row["exception_type"], "RuntimeError")
 
     def test_funding_context_rejects_empty_payload_without_neutral_full_ttl_cache(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

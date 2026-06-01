@@ -1802,7 +1802,34 @@ class ExchangeMixin:
                 raise RuntimeError("Could not enforce HTX one-way position mode")
 
         if config.EXCHANGE.set_leverage_on_start:
-            leverage = int(config.RISK.leverage)
-            for symbol in self.symbols:
-                if not self._set_leverage_safe(symbol, leverage):
-                    raise RuntimeError(f"Could not set configured HTX leverage {leverage} for {symbol}")
+            self._apply_configured_leverage_on_start()
+
+    def _apply_configured_leverage_on_start(self) -> bool:
+        leverage = int(config.RISK.leverage)
+        failed_symbols = []
+        for symbol in self.symbols:
+            if self._set_leverage_safe(symbol, leverage):
+                continue
+            failed_symbols.append(symbol)
+
+        if failed_symbols:
+            preview = ", ".join(failed_symbols[:10])
+            suffix = "" if len(failed_symbols) <= 10 else f", +{len(failed_symbols) - 10} more"
+            self._log_event(
+                "WARNING",
+                (
+                    f"Configured HTX leverage {leverage} could not be applied to "
+                    f"{len(failed_symbols)} of {len(self.symbols)} tracked symbols "
+                    f"({preview}{suffix}); startup will continue and orders will use "
+                    "the readable/manual account leverage"
+                ),
+                event="futures_setup",
+                reason="set_leverage_partial_failure",
+                diagnostic_context={
+                    "configured_leverage": leverage,
+                    "failed_symbols": failed_symbols,
+                    "tracked_symbol_count": len(self.symbols),
+                },
+            )
+            return False
+        return True
