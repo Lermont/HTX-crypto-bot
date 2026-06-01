@@ -137,7 +137,7 @@ ENTRY_RATE_LIMIT_LADDERS=10
 
 ## Macro Gold/BTC RSI Overlay
 
-机器人包含一个 macro overlay，用 RSI 和 gold/BTC 相对变化比较黄金代理资产，通常是 XAUT，与 BTC。它不是独立入场策略，而是市场状态层：当加密资产相对防御资产走弱时，它可以降低风险、阻止 recovery 行为，或让出场更保守。
+机器人包含一个 macro overlay，用 RSI 和 gold/BTC 相对变化比较黄金代理资产，通常是 XAUT，与 BTC。它不是独立入场策略，而是市场状态层：当加密资产相对防御资产走弱时，它可以降低风险、阻止 averaging，或让出场更保守。
 
 默认 macro 配置：
 
@@ -156,13 +156,13 @@ RSI_SPREAD_THRESHOLD=15
 
 Overlay 会识别这些状态：
 
-- `crypto_underperforms_gold`：黄金强，而 BTC 弱或明显落后。Long budget 会降低，short 方向可以更宽松，averaging/recovery 可被禁用，time-exit 会更快。
+- `crypto_underperforms_gold`：黄金强，而 BTC 弱或明显落后。Long budget 会降低，short 方向可以更宽松，averaging 可被禁用，time-exit 会更快。
 - `crypto_risk_on`：BTC 强而黄金落后。机器人保持正常 long 行为，并可降低 short 激进度。
 - `broad_liquidity_risk_on`：BTC 和黄金都强。它被视为建设性状态，但不会自动提高杠杆。
-- `deleveraging`：BTC 和黄金都弱。新入场可被阻止，averaging/recovery 禁用，出场加速。
+- `deleveraging`：BTC 和黄金都弱。新入场可被阻止，averaging 禁用，出场加速。
 - `neutral` 或 `macro_unavailable`：overlay 不增加强方向过滤。
 
-Macro context 会被缓存、写入 CSV，并用于 new-entry block、averaging block、recovery block、ladder multiplier 和 time-exit multiplier 等决策。精确状态逻辑见 [strategy.md](../strategy.md)。
+Macro context 会被缓存、写入 CSV，并用于 new-entry block、averaging block、ladder multiplier 和 time-exit multiplier 等决策。精确状态逻辑见 [strategy.md](../strategy.md)。
 
 ## MEXC Reference Price Signals
 

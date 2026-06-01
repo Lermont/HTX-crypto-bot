@@ -403,7 +403,6 @@ class MacroSettings:
     risk_off_short_budget_multiplier: float
     risk_off_ladder_multiplier: float
     risk_off_disable_averaging: bool
-    risk_off_disable_recovery: bool
     risk_off_time_exit_multiplier: float
 
     panic_disable_new_entries: bool
@@ -1073,7 +1072,6 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         risk_off_short_budget_multiplier=_env_float("RISK_OFF_SHORT_BUDGET_MULTIPLIER", 0.85, profile=name),
         risk_off_ladder_multiplier=_env_float("RISK_OFF_LADDER_MULTIPLIER", 1.25, profile=name),
         risk_off_disable_averaging=_env_bool("RISK_OFF_DISABLE_AVERAGING", True, profile=name),
-        risk_off_disable_recovery=_env_bool("RISK_OFF_DISABLE_RECOVERY", True, profile=name),
         risk_off_time_exit_multiplier=_env_float("RISK_OFF_TIME_EXIT_MULTIPLIER", 0.75, profile=name),
         panic_disable_new_entries=_env_bool("PANIC_DISABLE_NEW_ENTRIES", True, profile=name),
         stale_macro_max_age_sec=_env_int("STALE_MACRO_MAX_AGE_SEC", 3600, profile=name),

@@ -137,7 +137,7 @@ ENTRY_RATE_LIMIT_LADDERS=10
 
 ## Macro Gold/BTC RSI Overlay
 
-В боте есть macro overlay, который сравнивает proxy золота, обычно XAUT, с BTC через RSI и относительное движение gold/BTC. Это не отдельная стратегия входа, а слой определения рыночного режима: он может уменьшать риск, запрещать recovery-логику или делать выходы более консервативными, когда крипта проигрывает защитному активу.
+В боте есть macro overlay, который сравнивает proxy золота, обычно XAUT, с BTC через RSI и относительное движение gold/BTC. Это не отдельная стратегия входа, а слой определения рыночного режима: он может уменьшать риск, запрещать averaging или делать выходы более консервативными, когда крипта проигрывает защитному активу.
 
 Дефолтные macro-настройки:
 
@@ -156,13 +156,13 @@ RSI_SPREAD_THRESHOLD=15
 
 Overlay классифицирует режимы:
 
-- `crypto_underperforms_gold`: золото сильное, а BTC слабый или заметно отстаёт. Long budget уменьшается, short-направление может оставаться мягче, averaging/recovery могут быть отключены, time-exit ускоряется.
+- `crypto_underperforms_gold`: золото сильное, а BTC слабый или заметно отстаёт. Long budget уменьшается, short-направление может оставаться мягче, averaging может быть отключен, time-exit ускоряется.
 - `crypto_risk_on`: BTC сильный, золото отстаёт. Бот сохраняет штатное long-поведение и может снизить агрессивность short.
 - `broad_liquidity_risk_on`: BTC и золото одновременно сильные. Это конструктивный режим, но он не повышает плечо автоматически.
-- `deleveraging`: BTC и золото одновременно слабые. Новые входы могут блокироваться, averaging/recovery отключаются, выход ускоряется.
+- `deleveraging`: BTC и золото одновременно слабые. Новые входы могут блокироваться, averaging отключается, выход ускоряется.
 - `neutral` или `macro_unavailable`: overlay не добавляет сильного directional-фильтра.
 
-Macro context кэшируется, пишется в CSV и используется в решениях по new-entry block, averaging block, recovery block, ladder multiplier и time-exit multiplier. Точная логика режимов описана в [strategy.md](../strategy.md).
+Macro context кэшируется, пишется в CSV и используется в решениях по new-entry block, averaging block, ladder multiplier и time-exit multiplier. Точная логика режимов описана в [strategy.md](../strategy.md).
 
 ## MEXC Reference Price Signals
 

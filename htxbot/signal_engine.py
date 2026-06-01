@@ -274,7 +274,6 @@ class SignalMixin:
             "ladder_multiplier": 1.0,
             "disable_new_entries": False,
             "disable_averaging": False,
-            "disable_recovery": False,
             "time_exit_multiplier": 1.0,
             "reason": reason,
         }
@@ -393,7 +392,6 @@ class SignalMixin:
                     "ladder_multiplier": 1.4,
                     "disable_new_entries": bool(macro.panic_disable_new_entries),
                     "disable_averaging": True,
-                    "disable_recovery": True,
                     "time_exit_multiplier": 0.65,
                     "reason": "btc_weak_gold_weak",
                 }
@@ -412,7 +410,6 @@ class SignalMixin:
                     "short_budget_multiplier": max(0.0, macro.risk_off_short_budget_multiplier),
                     "ladder_multiplier": max(0.0, macro.risk_off_ladder_multiplier),
                     "disable_averaging": bool(macro.risk_off_disable_averaging),
-                    "disable_recovery": bool(macro.risk_off_disable_recovery),
                     "time_exit_multiplier": max(0.0, macro.risk_off_time_exit_multiplier),
                     "reason": "gold_strong_btc_weak",
                 }
@@ -563,7 +560,6 @@ class SignalMixin:
             or abs(self._safe_float(context.get("ladder_multiplier"), 1.0) - 1.0) > 1e-12
             or context.get("disable_new_entries")
             or context.get("disable_averaging")
-            or context.get("disable_recovery")
         ):
             self._log_event(
                 "INFO",
@@ -864,7 +860,6 @@ class SignalMixin:
             "macro_regime": "neutral",
             "macro_disable_new_entries": False,
             "macro_disable_averaging": False,
-            "macro_disable_recovery": False,
             "macro_time_exit_multiplier": 1.0,
             "btc_risk_reason": "ema_filter",
             "reason": reason,
@@ -1058,13 +1053,6 @@ class SignalMixin:
             and btc_entry_valid
         )
         add_valid = bool(macro_valid and (trigger_valid or pullback_valid))
-        recovery_confirmation = self._frozen_recovery_confirmation(candles, benchmark_closes, btc_risk)
-        frozen_recovery_confirmed = bool(
-            add_valid
-            and btc_entry_valid
-            and recovery_confirmation.get("frozen_recovery_confirmed")
-            and not macro_context.get("disable_recovery", False)
-        )
         volatility = self._realized_volatility(closes, strategy.volatility_window)
         volatility_multiplier = self._volatility_multiplier(volatility)
         atr, atr_rate = self._average_true_range_rate(candles, current_close, strategy.ema_averaging_atr_period)
@@ -1174,7 +1162,6 @@ class SignalMixin:
             "macro_regime": macro_context.get("regime", "neutral"),
             "macro_disable_new_entries": bool(macro_context.get("disable_new_entries", False)),
             "macro_disable_averaging": bool(macro_context.get("disable_averaging", False)),
-            "macro_disable_recovery": bool(macro_context.get("disable_recovery", False)),
             "macro_time_exit_multiplier": self._safe_float(macro_context.get("time_exit_multiplier"), 1.0),
             "budget_multiplier": budget_multiplier,
             "ladder_multiplier": ladder_multiplier,
@@ -1182,38 +1169,8 @@ class SignalMixin:
             "valid": direction_valid,
             "entry_valid": entry_valid,
             "add_valid": add_valid,
-            "frozen_recovery_confirmed": frozen_recovery_confirmed,
-            "frozen_recovery_confirmed_candles": int(
-                recovery_confirmation.get("frozen_recovery_confirmed_candles", 0)
-            ),
             "reason": reason,
             "ts": latest_ts,
-        }
-
-    def _frozen_recovery_confirmation(self, candles: list, benchmark_closes: List[float], btc_risk: dict) -> dict:
-        closes = [self._safe_float(row[4], 0.0) for row in candles or [] if row and len(row) > 4]
-        confirmed_candles = 0
-        for index in range(len(closes) - 1, 0, -1):
-            current = closes[index]
-            previous = closes[index - 1]
-            if current <= 0 or previous <= 0:
-                break
-            if config.POSITION_SIDE == "short":
-                favorable = current < previous
-            else:
-                favorable = current > previous
-            if not favorable:
-                break
-            confirmed_candles += 1
-
-        btc_budget = self._safe_float((btc_risk or {}).get("budget_multiplier"), 1.0)
-        return {
-            "frozen_recovery_confirmed": confirmed_candles > 0 and btc_budget > 0,
-            "frozen_recovery_confirmed_candles": confirmed_candles,
-        }
-        return {
-            "frozen_recovery_confirmed": False,
-            "frozen_recovery_confirmed_candles": 0,
         }
 
     def _closed_candles(

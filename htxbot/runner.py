@@ -194,10 +194,7 @@ class RunnerMixin:
                 self._maybe_manage_exit_runner(symbol, signal)
             self._ensure_sell_ladder(symbol)
             state = self._get_state(symbol)
-            if state.frozen_no_more_buys:
-                self._maybe_place_frozen_recovery_buy(symbol, signal)
-            else:
-                self._maybe_place_average_buy(symbol, signal)
+            self._maybe_place_average_buy(symbol, signal)
             return
 
         if state.position_size <= 0:

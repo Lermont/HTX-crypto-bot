@@ -85,8 +85,6 @@ class StateMixin:
         "last_entry_ladder_signal_timestamp",
         "last_average_signal_timestamp",
         "last_average_at",
-        "last_frozen_recovery_signal_timestamp",
-        "last_frozen_recovery_at",
         "last_ema_strategy_signal_timestamp",
         "breakeven_activated_at",
         "exit_runner_activated_at",
@@ -95,7 +93,6 @@ class StateMixin:
     _STATE_INT_FIELDS = {
         "buy_stage",
         "average_stage",
-        "frozen_recovery_buys",
         "account_unload_count",
     }
     _STATE_BOOL_FIELDS = {

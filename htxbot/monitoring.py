@@ -610,7 +610,6 @@ class MonitoringMixin:
                 fmt(context.get("ladder_multiplier", 1.0)),
                 int(bool(context.get("disable_new_entries", False))),
                 int(bool(context.get("disable_averaging", False))),
-                int(bool(context.get("disable_recovery", False))),
                 context.get("reason", ""),
             ],
         )

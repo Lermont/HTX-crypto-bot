@@ -48,7 +48,7 @@ class HtxFuturesBot(
         "ts", "profile", "regime", "gold_symbol", "btc_symbol",
         "gold_rsi", "btc_rsi", "rsi_spread", "gold_btc_ratio_return",
         "long_budget_multiplier", "short_budget_multiplier", "ladder_multiplier",
-        "disable_new_entries", "disable_averaging", "disable_recovery", "reason",
+        "disable_new_entries", "disable_averaging", "reason",
     )
     EXTERNAL_PRICE_CSV_HEADER = (
         "ts", "profile", "symbol", "mexc_symbol", "valid", "stale",

@@ -163,7 +163,7 @@ EMA_ENTRY_LADDER_OFFSETS=0.0,0.01
 
 ## 9. Averaging
 
-Активный механизм добора — EMA averaging. Он управляется параметрами `EMA_AVERAGING_*`, а не legacy recovery-параметрами.
+Активный механизм добора — EMA averaging. Он управляется параметрами `EMA_AVERAGING_*`.
 
 Добор возможен только если:
 
@@ -334,7 +334,6 @@ Macro overlay сравнивает XAUT/BTC context через RSI и может
 
 - дубли EMA/ladder полей в `SignalSettings`, `SellSettings` и `StrategySettings`;
 - legacy entry-expansion thresholds и multipliers;
-- legacy frozen-recovery config;
 - неиспользуемые time-exit/reprice/dynamic-time-exit поля;
 - неиспользуемые controlled-loss ladder/reprice поля;
 - неиспользуемые external-price поля `use_existing_trading_universe`, `only_usdt_pairs`, `reconnect_on_stale_ms`, `tighten_ladder_factor`;

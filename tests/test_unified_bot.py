@@ -437,7 +437,6 @@ class UnifiedBotTests(unittest.TestCase):
                     "ladder_multiplier": 1.0,
                     "disable_new_entries": False,
                     "disable_averaging": False,
-                    "disable_recovery": False,
                     "time_exit_multiplier": 1.0,
                 },
             },
@@ -555,7 +554,6 @@ class UnifiedBotTests(unittest.TestCase):
             "ladder_multiplier": 1.0,
             "disable_new_entries": False,
             "disable_averaging": False,
-            "disable_recovery": False,
             "time_exit_multiplier": 1.0,
             "reason": "test",
         }
@@ -893,6 +891,8 @@ class UnifiedBotTests(unittest.TestCase):
                             "paid_buy_fees_quote": "0.0345",
                             "frozen_no_more_buys": "false",
                             "average_stage": "2",
+                            "retired_strategy_counter": "3",
+                            "last_retired_strategy_at": "1700000100",
                             "sell_ladder_orders": {
                                 "id": 12345,
                                 "side": "sell",
@@ -917,9 +917,15 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(reloaded.entry_price, 11.5)
             self.assertFalse(reloaded.frozen_no_more_buys)
             self.assertEqual(reloaded.average_stage, 2)
+            self.assertFalse(hasattr(reloaded, "retired_strategy_counter"))
+            self.assertFalse(hasattr(reloaded, "last_retired_strategy_at"))
             self.assertEqual(reloaded.sell_ladder_orders[0]["id"], "12345")
             self.assertEqual(reloaded.sell_ladder_orders[0]["price"], 12.0)
             self.assertEqual(reloaded.sell_ladder_orders[0]["amount"], 1.0)
+            bot._save_state()
+            saved_payload = json.loads(bot.state_path.read_text(encoding="utf-8"))[SYMBOL]
+            self.assertNotIn("retired_strategy_counter", saved_payload)
+            self.assertNotIn("last_retired_strategy_at", saved_payload)
 
     def test_trade_state_serialization_keeps_pending_exit_ladder_metadata(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -1928,39 +1934,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.entry_orders, [buy_ref])
                 self.assertEqual(state.sell_ladder_orders, [sell_ref])
 
-    def test_frozen_recovery_requires_confirmed_add_signal(self):
-        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = config.RUNTIME
-            with override_config(RUNTIME=runtime):
-                bot = self.make_bot(Path(raw_tmp))
-                state = bot._get_state(SYMBOL)
-                state.position_size = 1.0
-                state.entry_price = 10.4
-                state.frozen_no_more_buys = True
-                state.sell_ladder_orders = [{"id": "sell", "side": "sell", "price": 10.1, "amount": 1.0}]
-
-                bot._maybe_place_frozen_recovery_buy(
-                    SYMBOL,
-                    {
-                        "valid": True,
-                        "entry_valid": False,
-                        "add_valid": False,
-                        "score": 0.0,
-                        "rs_edge": 0.0,
-                        "volatility_multiplier": 1.0,
-                        "ladder_multiplier": 1.0,
-                        "budget_multiplier": 3.0,
-                        "frozen_recovery_confirmed": False,
-                        "frozen_recovery_confirmed_candles": 0,
-                        "ts": 1000,
-                    },
-                )
-
-                self.assertFalse(state.entry_orders)
-                self.assertEqual(state.frozen_recovery_buys, 0)
-                self.assertTrue(state.frozen_no_more_buys)
-
-    def test_frozen_recovery_places_controlled_entry_ladder(self):
+    def test_frozen_no_more_buys_blocks_averaging(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = replace(
                 config.STRATEGY,
@@ -1984,25 +1958,18 @@ class UnifiedBotTests(unittest.TestCase):
                 signal = self.entry_signal(ts=2000)
                 signal.update(
                     {
-                        "frozen_recovery_confirmed": True,
-                        "frozen_recovery_confirmed_candles": 2,
                         "budget_multiplier": 1.0,
                         "ladder_multiplier": 1.0,
                         "volatility_budget_multiplier": 1.0,
                     }
                 )
 
-                bot._maybe_place_frozen_recovery_buy(SYMBOL, signal)
+                bot._maybe_place_average_buy(SYMBOL, signal)
 
-                self.assertTrue(state.entry_orders)
-                self.assertEqual(state.frozen_recovery_buys, 1)
-                self.assertEqual(state.last_frozen_recovery_signal_timestamp, 2000)
-                self.assertIsNotNone(state.last_frozen_recovery_at)
-                self.assertFalse(state.frozen_no_more_buys)
-                self.assertTrue(all(order["side"] == config.ENTRY_SIDE for order in state.entry_orders))
-                self.assertTrue(
-                    all("frozen_recovery_stage_1" in order.get("reason", "") for order in state.entry_orders)
-                )
+                self.assertFalse(state.entry_orders)
+                self.assertEqual(state.average_stage, 0)
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertTrue(state.frozen_no_more_buys)
 
     def test_entry_ladder_prices_round_away_from_crossing_book(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3802,7 +3769,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(math.isclose(signal["rs60"], math.log(112.0 / 90.0), rel_tol=1e-12))
                 self.assertEqual(signal["btc_return_30m"], 0.0)
 
-    def test_signal_builder_handles_missing_macro_context_for_recovery_confirmation(self):
+    def test_signal_builder_handles_missing_macro_context(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = self.ema_test_strategy(
                 ema_use_rs_confirmation=False,
@@ -3827,7 +3794,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertIsNotNone(signal)
                 self.assertTrue(signal["add_valid"])
-                self.assertTrue(signal["frozen_recovery_confirmed"])
+                self.assertFalse(any(key.startswith("frozen_") for key in signal))
 
     def test_signal_update_fetches_higher_timeframe_ema_history(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

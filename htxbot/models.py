@@ -137,9 +137,6 @@ class TradeState:
     last_average_signal_timestamp: Optional[float] = None
     last_average_at: Optional[float] = None
     average_stage: int = 0
-    frozen_recovery_buys: int = 0
-    last_frozen_recovery_signal_timestamp: Optional[float] = None
-    last_frozen_recovery_at: Optional[float] = None
     strategy_name: str = "ema_pullback"
     last_ema_strategy_signal_timestamp: Optional[float] = None
     breakeven_activated_at: Optional[float] = None
