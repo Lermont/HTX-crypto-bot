@@ -5435,8 +5435,42 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertIn("set_leverage_failed", reasons)
                 self.assertIn("set_leverage_partial_failure", reasons)
                 failed_row = next(row for row in rows if row["reason"] == "set_leverage_failed")
+                self.assertEqual(failed_row["level"], "WARNING")
                 self.assertEqual(failed_row["symbol"], SYMBOL)
                 self.assertEqual(failed_row["exception_type"], "RuntimeError")
+                partial_row = next(row for row in rows if row["reason"] == "set_leverage_partial_failure")
+                self.assertEqual(partial_row["level"], "WARNING")
+
+    def test_setup_continues_when_startup_leverage_fails_for_all_symbols(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            exchange_config = replace(
+                config.EXCHANGE,
+                set_position_mode_on_start=False,
+                set_leverage_on_start=True,
+            )
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+                bot.exchange.set_leverage_errors_by_symbol[SYMBOL] = RuntimeError("symbol leverage rejected")
+                bot.exchange.set_leverage_errors_by_symbol[SECOND_SYMBOL] = RuntimeError("alt leverage rejected")
+
+                bot._setup_futures_account()
+
+                self.assertEqual(
+                    bot.exchange.set_leverage_calls,
+                    [
+                        (config.RISK.leverage, SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                        (config.RISK.leverage, SECOND_SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    ],
+                )
+                self.assertEqual(bot.order_leverage_cache, {})
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                failed_rows = [row for row in rows if row["reason"] == "set_leverage_failed"]
+                self.assertEqual([row["symbol"] for row in failed_rows], [SYMBOL, SECOND_SYMBOL])
+                self.assertTrue(all(row["level"] == "WARNING" for row in failed_rows))
+                partial_row = next(row for row in rows if row["reason"] == "set_leverage_partial_failure")
+                self.assertEqual(partial_row["level"], "WARNING")
 
     def test_funding_context_rejects_empty_payload_without_neutral_full_ttl_cache(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

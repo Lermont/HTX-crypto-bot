@@ -1391,7 +1391,7 @@ class ExchangeMixin:
             return True
         except Exception as exc:
             self._log_event(
-                "ERROR",
+                "WARNING",
                 f"Could not set leverage {leverage} for {symbol}: {exc}",
                 event="futures_setup",
                 symbol=symbol,
