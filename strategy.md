@@ -313,6 +313,8 @@ EMA_BREAKEVEN_EXIT_FRACTIONS=1.0
 
 Macro overlay сравнивает XAUT/BTC context через RSI и может:
 
+- считать `macro_direction_score` как directional bias между long/short профилями;
+- усиливать профиль, которому помогает macro context, через capped `long_budget_multiplier` / `short_budget_multiplier`;
 - снижать budget multiplier;
 - расширять ladder multiplier;
 - запрещать новые входы в panic/risk-off;

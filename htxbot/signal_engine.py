@@ -218,9 +218,14 @@ class SignalMixin:
             "btc_rsi": 0.0,
             "rsi_spread": 0.0,
             "gold_btc_ratio_return": 0.0,
+            "gold_return": 0.0,
+            "btc_return": 0.0,
+            "macro_direction_score": 0.0,
             "regime": regime,
             "long_budget_multiplier": 1.0,
             "short_budget_multiplier": 1.0,
+            "directional_long_multiplier": 1.0,
+            "directional_short_multiplier": 1.0,
             "ladder_multiplier": 1.0,
             "disable_new_entries": False,
             "disable_averaging": False,
@@ -273,7 +278,9 @@ class SignalMixin:
             reason=(
                 f"regime={regime};gold_rsi={self._safe_float(context.get('gold_rsi'), 0.0):.4f};"
                 f"btc_rsi={self._safe_float(context.get('btc_rsi'), 0.0):.4f};"
-                f"rsi_spread={self._safe_float(context.get('rsi_spread'), 0.0):.4f};reason={reason}"
+                f"rsi_spread={self._safe_float(context.get('rsi_spread'), 0.0):.4f};"
+                f"macro_direction_score={self._safe_float(context.get('macro_direction_score'), 0.0):.4f};"
+                f"reason={reason}"
             ),
         )
         append_macro = getattr(self, "_append_macro_csv", None)
@@ -297,6 +304,122 @@ class SignalMixin:
     ) -> float:
         return gold_btc_ratio_return(gold_closes, btc_closes, config.MACRO.gold_rsi_period, direct_closes)
 
+    def _macro_window_return(self, closes: List[float], window: int) -> float:
+        window = max(1, int(window))
+        values = []
+        for price in closes or []:
+            try:
+                value = float(price)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                values.append(value)
+        if len(values) <= window:
+            return 0.0
+        return compute_log_return(values[-1], values[-window - 1])
+
+    def _gold_directional_bias_score(
+        self,
+        gold_rsi: float,
+        btc_rsi: float,
+        ratio_return: float,
+        gold_return: float,
+        btc_return: float,
+        regime_bias: float = 0.0,
+    ) -> float:
+        macro = config.MACRO
+        if not getattr(macro, "enable_gold_directional_bias", False):
+            return 0.0
+
+        spread_ref = max(abs(self._safe_float(getattr(macro, "rsi_spread_threshold", 15.0), 15.0)), 1.0)
+        ratio_ref = max(abs(self._safe_float(getattr(macro, "gold_btc_ratio_return_reference", 0.03), 0.03)), 1e-9)
+        rsi_spread = btc_rsi - gold_rsi
+        spread_score = clamp(rsi_spread / spread_ref, -1.0, 1.0)
+        ratio_score = clamp(-ratio_return / ratio_ref, -1.0, 1.0)
+
+        trend_score = 0.0
+        if gold_return > 0 and btc_return < 0:
+            trend_score = -1.0
+        elif gold_return > 0 and btc_return >= 0:
+            trend_score = 0.5 if btc_return >= gold_return else -0.5
+        elif gold_return < 0 and btc_return > 0:
+            trend_score = 1.0
+        elif gold_return < 0 and btc_return < 0:
+            trend_score = 0.25 if btc_return >= gold_return else -0.25
+
+        continuous_score = clamp(0.45 * spread_score + 0.35 * ratio_score + 0.20 * trend_score, -1.0, 1.0)
+        regime_score = clamp(self._safe_float(regime_bias, 0.0), -1.0, 1.0)
+        if abs(regime_score) > abs(continuous_score):
+            return regime_score
+        return continuous_score
+
+    def _apply_gold_directional_bias(
+        self,
+        context: dict,
+        gold_rsi: float,
+        btc_rsi: float,
+        ratio_return: float,
+        gold_return: float,
+        btc_return: float,
+        regime_bias: float = 0.0,
+    ) -> dict:
+        macro = config.MACRO
+        context.update(
+            {
+                "gold_return": gold_return,
+                "btc_return": btc_return,
+                "macro_direction_score": 0.0,
+                "directional_long_multiplier": 1.0,
+                "directional_short_multiplier": 1.0,
+            }
+        )
+        if not getattr(macro, "enable_gold_directional_bias", False):
+            return context
+
+        score = self._gold_directional_bias_score(
+            gold_rsi,
+            btc_rsi,
+            ratio_return,
+            gold_return,
+            btc_return,
+            regime_bias=regime_bias,
+        )
+        strength = max(0.0, self._safe_float(getattr(macro, "gold_directional_bias_strength", 0.30), 0.30))
+        min_multiplier = self._clamp(
+            self._safe_float(getattr(macro, "gold_directional_bias_min_multiplier", 0.50), 0.50),
+            0.0,
+            1.0,
+        )
+        max_multiplier = max(
+            1.0,
+            self._safe_float(getattr(macro, "gold_directional_bias_max_multiplier", 1.25), 1.25),
+        )
+        directional_long = clamp(1.0 + strength * score, min_multiplier, max_multiplier)
+        directional_short = clamp(1.0 - strength * score, min_multiplier, max_multiplier)
+
+        long_budget = max(0.0, self._safe_float(context.get("long_budget_multiplier"), 1.0))
+        short_budget = max(0.0, self._safe_float(context.get("short_budget_multiplier"), 1.0))
+        if score > 1e-12:
+            long_budget = max(long_budget, directional_long)
+            short_budget = min(short_budget, directional_short)
+        elif score < -1e-12:
+            long_budget = min(long_budget, directional_long)
+            short_budget = max(short_budget, directional_short)
+
+        context.update(
+            {
+                "macro_direction_score": score,
+                "directional_long_multiplier": directional_long,
+                "directional_short_multiplier": directional_short,
+                "long_budget_multiplier": long_budget,
+                "short_budget_multiplier": short_budget,
+            }
+        )
+        if context.get("regime") == "neutral" and abs(score) > 1e-12:
+            context["regime"] = "gold_directional_bias"
+            context["reason"] = "btc_gold_relative_bias"
+        return context
+
     def _classify_gold_btc_rsi_context(
         self,
         gold_symbol: str,
@@ -304,6 +427,8 @@ class SignalMixin:
         gold_rsi: float,
         btc_rsi: float,
         ratio_return: float,
+        gold_return: float = 0.0,
+        btc_return: float = 0.0,
     ) -> dict:
         macro = config.MACRO
         rsi_spread = btc_rsi - gold_rsi
@@ -316,6 +441,8 @@ class SignalMixin:
                 "btc_rsi": btc_rsi,
                 "rsi_spread": rsi_spread,
                 "gold_btc_ratio_return": ratio_return,
+                "gold_return": gold_return,
+                "btc_return": btc_return,
             }
         )
 
@@ -330,7 +457,15 @@ class SignalMixin:
                     "reason": "btc_weak_gold_weak",
                 }
             )
-            return context
+            return self._apply_gold_directional_bias(
+                context,
+                gold_rsi,
+                btc_rsi,
+                ratio_return,
+                gold_return,
+                btc_return,
+                regime_bias=0.0,
+            )
 
         btc_defensive_rsi = macro.btc_weak_rsi + 5.0
         if (
@@ -348,7 +483,15 @@ class SignalMixin:
                     "reason": "gold_strong_btc_weak",
                 }
             )
-            return context
+            return self._apply_gold_directional_bias(
+                context,
+                gold_rsi,
+                btc_rsi,
+                ratio_return,
+                gold_return,
+                btc_return,
+                regime_bias=-1.0,
+            )
 
         if (
             btc_rsi >= macro.btc_strong_rsi
@@ -363,7 +506,15 @@ class SignalMixin:
                     "reason": "btc_strong_gold_lagging",
                 }
             )
-            return context
+            return self._apply_gold_directional_bias(
+                context,
+                gold_rsi,
+                btc_rsi,
+                ratio_return,
+                gold_return,
+                btc_return,
+                regime_bias=1.0,
+            )
 
         if btc_rsi >= macro.btc_strong_rsi and gold_rsi >= macro.gold_strong_rsi:
             context.update(
@@ -374,9 +525,25 @@ class SignalMixin:
                     "reason": "btc_strong_gold_strong",
                 }
             )
-            return context
+            return self._apply_gold_directional_bias(
+                context,
+                gold_rsi,
+                btc_rsi,
+                ratio_return,
+                gold_return,
+                btc_return,
+                regime_bias=0.5,
+            )
 
-        return context
+        return self._apply_gold_directional_bias(
+            context,
+            gold_rsi,
+            btc_rsi,
+            ratio_return,
+            gold_return,
+            btc_return,
+            regime_bias=0.0,
+        )
 
     def _macro_fetch_exchange(self, is_spot: bool):
         return self._spot_exchange() if is_spot else self.exchange
@@ -483,8 +650,19 @@ class SignalMixin:
             except Exception:
                 direct_closes = None
 
+        ratio_window = max(1, int(config.MACRO.gold_rsi_period))
+        gold_return = self._macro_window_return(gold_closes, ratio_window)
+        btc_return = self._macro_window_return(btc_closes, ratio_window)
         ratio_return = self._gold_btc_ratio_return(gold_closes, btc_closes, direct_closes=direct_closes)
-        context = self._classify_gold_btc_rsi_context(gold_symbol, btc_symbol, gold_rsi, btc_rsi, ratio_return)
+        context = self._classify_gold_btc_rsi_context(
+            gold_symbol,
+            btc_symbol,
+            gold_rsi,
+            btc_rsi,
+            ratio_return,
+            gold_return=gold_return,
+            btc_return=btc_return,
+        )
         context["timeframe"] = timeframe
         self._macro_cache_root()["gold_btc_rsi"] = context
         self._record_macro_context(context, event="macro_context_updated", level="INFO")
@@ -505,6 +683,7 @@ class SignalMixin:
                     f"long_mult={self._safe_float(context.get('long_budget_multiplier'), 1.0):.3f};"
                     f"short_mult={self._safe_float(context.get('short_budget_multiplier'), 1.0):.3f};"
                     f"ladder_mult={self._safe_float(context.get('ladder_multiplier'), 1.0):.3f};"
+                    f"direction_score={self._safe_float(context.get('macro_direction_score'), 0.0):.3f};"
                     f"reason={context.get('reason', '')}"
                 ),
             )
@@ -752,6 +931,7 @@ class SignalMixin:
             "macro_budget_multiplier": 1.0,
             "macro_ladder_multiplier": 1.0,
             "macro_regime": "neutral",
+            "macro_direction_score": 0.0,
             "macro_disable_new_entries": False,
             "macro_disable_averaging": False,
             "macro_time_exit_multiplier": 1.0,
@@ -955,10 +1135,7 @@ class SignalMixin:
         if config.POSITION_SIDE == "short":
             macro_budget_multiplier = max(0.0, self._safe_float(macro_context.get("short_budget_multiplier"), 1.0))
         else:
-            macro_budget_multiplier = min(
-                max(0.0, self._safe_float(macro_context.get("long_budget_multiplier"), 1.0)),
-                1.0,
-            )
+            macro_budget_multiplier = max(0.0, self._safe_float(macro_context.get("long_budget_multiplier"), 1.0))
         macro_ladder_multiplier = max(0.0, self._safe_float(macro_context.get("ladder_multiplier"), 1.0))
         budget_multiplier = signal_budget_multiplier * btc_budget_multiplier * macro_budget_multiplier
         ladder_multiplier = volatility_multiplier * btc_ladder_multiplier * macro_ladder_multiplier
@@ -981,6 +1158,7 @@ class SignalMixin:
             f"signal_budget_multiplier={signal_budget_multiplier:.3f};"
             f"btc_budget_multiplier={btc_budget_multiplier:.3f};"
             f"macro_budget_multiplier={macro_budget_multiplier:.3f};"
+            f"macro_direction_score={self._safe_float(macro_context.get('macro_direction_score'), 0.0):.3f};"
             f"macro_regime={macro_context.get('regime', 'neutral')}"
         )
 
@@ -1052,6 +1230,7 @@ class SignalMixin:
             "macro_budget_multiplier": macro_budget_multiplier,
             "macro_ladder_multiplier": macro_ladder_multiplier,
             "macro_regime": macro_context.get("regime", "neutral"),
+            "macro_direction_score": self._safe_float(macro_context.get("macro_direction_score"), 0.0),
             "macro_disable_new_entries": bool(macro_context.get("disable_new_entries", False)),
             "macro_disable_averaging": bool(macro_context.get("disable_averaging", False)),
             "macro_time_exit_multiplier": self._safe_float(macro_context.get("time_exit_multiplier"), 1.0),

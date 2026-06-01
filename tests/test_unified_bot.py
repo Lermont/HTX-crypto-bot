@@ -444,8 +444,13 @@ class UnifiedBotTests(unittest.TestCase):
                     "ts": int(time.time()),
                     "regime": "macro_unavailable",
                     "reason": "test_neutral",
+                    "gold_return": 0.0,
+                    "btc_return": 0.0,
+                    "macro_direction_score": 0.0,
                     "long_budget_multiplier": 1.0,
                     "short_budget_multiplier": 1.0,
+                    "directional_long_multiplier": 1.0,
+                    "directional_short_multiplier": 1.0,
                     "ladder_multiplier": 1.0,
                     "disable_new_entries": False,
                     "disable_averaging": False,
@@ -577,8 +582,13 @@ class UnifiedBotTests(unittest.TestCase):
             "btc_rsi": 50.0,
             "rsi_spread": 0.0,
             "gold_btc_ratio_return": 0.0,
+            "gold_return": 0.0,
+            "btc_return": 0.0,
+            "macro_direction_score": 0.0,
             "long_budget_multiplier": 1.0,
             "short_budget_multiplier": 1.0,
+            "directional_long_multiplier": 1.0,
+            "directional_short_multiplier": 1.0,
             "ladder_multiplier": 1.0,
             "disable_new_entries": False,
             "disable_averaging": False,
@@ -1996,6 +2006,60 @@ class UnifiedBotTests(unittest.TestCase):
                     self.assertTrue(context["ok"])
                     self.assertEqual(context["regime"], regime)
 
+    def test_gold_directional_bias_boosts_short_when_gold_outperforms_crypto(self):
+        macro = replace(
+            config.MACRO,
+            enable_gold_directional_bias=True,
+            gold_directional_bias_strength=0.30,
+            gold_directional_bias_min_multiplier=0.50,
+            gold_directional_bias_max_multiplier=1.25,
+        )
+        with tempfile.TemporaryDirectory() as raw_tmp, override_config(MACRO=macro):
+            bot = self.make_bot(Path(raw_tmp))
+
+            context = bot._classify_gold_btc_rsi_context(
+                XAUT_SYMBOL,
+                BTC_SYMBOL,
+                gold_rsi=65.0,
+                btc_rsi=42.0,
+                ratio_return=0.05,
+                gold_return=0.04,
+                btc_return=-0.02,
+            )
+
+            self.assertEqual(context["regime"], "crypto_underperforms_gold")
+            self.assertLess(context["macro_direction_score"], 0.0)
+            self.assertAlmostEqual(context["long_budget_multiplier"], macro.risk_off_long_budget_multiplier)
+            self.assertGreater(context["short_budget_multiplier"], 1.0)
+            self.assertLessEqual(context["short_budget_multiplier"], macro.gold_directional_bias_max_multiplier)
+
+    def test_gold_directional_bias_boosts_long_when_crypto_leads_gold(self):
+        macro = replace(
+            config.MACRO,
+            enable_gold_directional_bias=True,
+            gold_directional_bias_strength=0.30,
+            gold_directional_bias_min_multiplier=0.50,
+            gold_directional_bias_max_multiplier=1.25,
+        )
+        with tempfile.TemporaryDirectory() as raw_tmp, override_config(MACRO=macro):
+            bot = self.make_bot(Path(raw_tmp))
+
+            context = bot._classify_gold_btc_rsi_context(
+                XAUT_SYMBOL,
+                BTC_SYMBOL,
+                gold_rsi=50.0,
+                btc_rsi=70.0,
+                ratio_return=-0.04,
+                gold_return=0.01,
+                btc_return=0.05,
+            )
+
+            self.assertEqual(context["regime"], "crypto_risk_on")
+            self.assertGreater(context["macro_direction_score"], 0.0)
+            self.assertGreater(context["long_budget_multiplier"], 1.0)
+            self.assertLess(context["short_budget_multiplier"], 1.0)
+            self.assertLessEqual(context["long_budget_multiplier"], macro.gold_directional_bias_max_multiplier)
+
     def test_gold_btc_rsi_context_unavailable_without_xaut(self):
         macro = replace(config.MACRO, gold_cache_ttl_sec=0, gold_min_candles=20)
         with tempfile.TemporaryDirectory() as raw_tmp, override_config(MACRO=macro):
@@ -3147,6 +3211,60 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertAlmostEqual(signal["ladder_multiplier"], 1.50)
                 self.assertEqual(signal["macro_regime"], "crypto_underperforms_gold")
                 self.assertTrue(signal["macro_disable_averaging"])
+
+    def test_signal_build_allows_long_macro_budget_above_one(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy()
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                benchmark_closes = [100.0] * len(closes)
+                macro_context = self.macro_context(
+                    regime="crypto_risk_on",
+                    long_budget_multiplier=1.20,
+                    short_budget_multiplier=0.75,
+                    macro_direction_score=0.75,
+                )
+
+                signal = bot._build_signal_from_closes(
+                    closes,
+                    benchmark_closes,
+                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "neutral"},
+                    latest_ts=1000,
+                    macro_context=macro_context,
+                )
+
+                self.assertIsNotNone(signal)
+                self.assertAlmostEqual(signal["macro_budget_multiplier"], 1.20)
+                self.assertAlmostEqual(signal["budget_multiplier"], 1.20)
+                self.assertAlmostEqual(signal["macro_direction_score"], 0.75)
+
+    def test_signal_build_allows_short_macro_budget_above_one(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            strategy = self.ema_test_strategy()
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                closes = list(range(200, 99, -2)) + [102, 105, 108, 111, 114, 117, 120, 116, 112, 108, 104]
+                benchmark_closes = [100.0] * len(closes)
+                macro_context = self.macro_context(
+                    regime="crypto_underperforms_gold",
+                    long_budget_multiplier=0.55,
+                    short_budget_multiplier=1.20,
+                    macro_direction_score=-0.75,
+                )
+
+                signal = bot._build_signal_from_closes(
+                    closes,
+                    benchmark_closes,
+                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "neutral"},
+                    latest_ts=1000,
+                    macro_context=macro_context,
+                )
+
+                self.assertIsNotNone(signal)
+                self.assertAlmostEqual(signal["macro_budget_multiplier"], 1.20)
+                self.assertAlmostEqual(signal["budget_multiplier"], 1.20)
+                self.assertAlmostEqual(signal["macro_direction_score"], -0.75)
 
     def test_ema_short_entry_signal_is_valid(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):

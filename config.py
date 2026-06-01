@@ -414,6 +414,12 @@ class MacroSettings:
     risk_off_disable_averaging: bool
     risk_off_time_exit_multiplier: float
 
+    enable_gold_directional_bias: bool
+    gold_directional_bias_strength: float
+    gold_directional_bias_min_multiplier: float
+    gold_directional_bias_max_multiplier: float
+    gold_btc_ratio_return_reference: float
+
     panic_disable_new_entries: bool
     stale_macro_max_age_sec: int
 
@@ -1120,6 +1126,11 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         risk_off_ladder_multiplier=_env_float("RISK_OFF_LADDER_MULTIPLIER", 1.25, profile=name),
         risk_off_disable_averaging=_env_bool("RISK_OFF_DISABLE_AVERAGING", True, profile=name),
         risk_off_time_exit_multiplier=_env_float("RISK_OFF_TIME_EXIT_MULTIPLIER", 0.75, profile=name),
+        enable_gold_directional_bias=_env_bool("ENABLE_GOLD_DIRECTIONAL_BIAS", True, profile=name),
+        gold_directional_bias_strength=_env_float("GOLD_DIRECTIONAL_BIAS_STRENGTH", 0.30, profile=name),
+        gold_directional_bias_min_multiplier=_env_float("GOLD_DIRECTIONAL_BIAS_MIN_MULTIPLIER", 0.50, profile=name),
+        gold_directional_bias_max_multiplier=_env_float("GOLD_DIRECTIONAL_BIAS_MAX_MULTIPLIER", 1.25, profile=name),
+        gold_btc_ratio_return_reference=_env_float("GOLD_BTC_RATIO_RETURN_REFERENCE", 0.03, profile=name),
         panic_disable_new_entries=_env_bool("PANIC_DISABLE_NEW_ENTRIES", True, profile=name),
         stale_macro_max_age_sec=_env_int("STALE_MACRO_MAX_AGE_SEC", 3600, profile=name),
     )

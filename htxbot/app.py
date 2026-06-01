@@ -47,6 +47,7 @@ class HtxFuturesBot(
     MACRO_CSV_HEADER = (
         "ts", "profile", "regime", "gold_symbol", "btc_symbol",
         "gold_rsi", "btc_rsi", "rsi_spread", "gold_btc_ratio_return",
+        "gold_return", "btc_return", "macro_direction_score",
         "long_budget_multiplier", "short_budget_multiplier", "ladder_multiplier",
         "disable_new_entries", "disable_averaging", "reason",
     )
