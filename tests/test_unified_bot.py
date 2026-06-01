@@ -703,6 +703,31 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(calls["count"], 2)
             self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
 
+    def test_monitoring_replace_retries_windows_file_lock_oserror(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            src = Path(raw_tmp) / "new.csv"
+            dst = Path(raw_tmp) / "current.csv"
+            src.write_text("new\n", encoding="utf-8")
+            dst.write_text("old\n", encoding="utf-8")
+            real_replace = os.replace
+            calls = {"count": 0}
+
+            def flaky_replace(src_path, dst_path):
+                calls["count"] += 1
+                if calls["count"] < 3:
+                    exc = OSError("temporary Windows file lock")
+                    exc.winerror = 32
+                    raise exc
+                return real_replace(src_path, dst_path)
+
+            with patch("htxbot.monitoring.os.replace", side_effect=flaky_replace):
+                bot._replace_path_with_retry(src, dst, attempts=3, delay_sec=0.0)
+
+            self.assertEqual(dst.read_text(encoding="utf-8"), "new\n")
+            self.assertEqual(calls["count"], 3)
+            self.assertFalse(src.exists())
+
     def test_one_way_order_and_cancel_use_exchange_order_endpoints(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))

@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import config
 
 from .concurrency import instance_rlock
+from .fileio import is_transient_file_replace_error, replace_path_with_retry
 from .models import PositionLifecycle, TradeState
 
 
@@ -104,7 +105,7 @@ class StateMixin:
     }
 
     def _is_transient_replace_error(self, exc: OSError) -> bool:
-        return isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {5, 32}
+        return is_transient_file_replace_error(exc)
 
     def _coerce_optional_state_float(self, value):
         if value is None:
@@ -137,15 +138,14 @@ class StateMixin:
         return state
 
     def _replace_state_file_with_retry(self, tmp_path, target_path):
-        for attempt in range(30):
-            try:
-                os.replace(tmp_path, target_path)
-                return
-            except OSError as exc:
-                if self._is_transient_replace_error(exc) and attempt < 29:
-                    time.sleep(min(0.05 * (attempt + 1), 0.5))
-                    continue
-                raise
+        replace_path_with_retry(
+            tmp_path,
+            target_path,
+            attempts=30,
+            initial_delay_sec=0.05,
+            max_delay_sec=0.5,
+            replace_func=os.replace,
+        )
 
     def _load_state(self) -> Dict[str, TradeState]:
         if not self.state_path.exists():

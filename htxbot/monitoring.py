@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 import config
 
 from .concurrency import instance_rlock
+from .fileio import replace_path_with_retry
 
 
 _monitoring_global_lock = threading.RLock()
@@ -31,15 +32,15 @@ class MonitoringMixin:
                 with path.open("a", newline="", encoding="utf-8") as f:
                     csv.writer(f).writerow(row)
 
-    def _replace_path_with_retry(self, src: Path, dst: Path, attempts: int = 10, delay_sec: float = 0.1):
-        for attempt in range(max(1, attempts)):
-            try:
-                os.replace(src, dst)
-                return
-            except PermissionError:
-                if attempt + 1 >= max(1, attempts):
-                    raise
-                time.sleep(delay_sec)
+    def _replace_path_with_retry(self, src: Path, dst: Path, attempts: int = 30, delay_sec: float = 0.05):
+        replace_path_with_retry(
+            src,
+            dst,
+            attempts=attempts,
+            initial_delay_sec=delay_sec,
+            max_delay_sec=0.5,
+            replace_func=os.replace,
+        )
 
     def _build_logger(self) -> logging.Logger:
         logger = logging.getLogger(f"htx_futures_bot.{config.BOT_NAME}")
