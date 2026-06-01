@@ -228,6 +228,14 @@ class StrategySettings:
     ema_pullback_recovery_lookback_minutes: int
     ema_pullback_recovery_max_cross_age_minutes: int
     ema_pullback_recovery_gap: float
+    ema_chop_filter_enabled: bool
+    ema_chop_period: int
+    ema_chop_max: float
+    ema_volume_confirmation_enabled: bool
+    ema_volume_short_window: int
+    ema_volume_long_window: int
+    ema_volume_min_ratio: float
+    ema_volume_min_directional_fraction: float
     ema_trigger_fast_minutes: int
     ema_trigger_slow_minutes: int
     ema_use_rs_confirmation: bool
@@ -900,6 +908,17 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_pullback_recovery_lookback_minutes=_env_int("EMA_PULLBACK_RECOVERY_LOOKBACK_MINUTES", 2880, profile=name),
         ema_pullback_recovery_max_cross_age_minutes=_env_int("EMA_PULLBACK_RECOVERY_MAX_CROSS_AGE_MINUTES", 1440, profile=name),
         ema_pullback_recovery_gap=_env_float("EMA_PULLBACK_RECOVERY_GAP", 0.001, profile=name),
+        ema_chop_filter_enabled=_env_bool("EMA_CHOP_FILTER_ENABLED", True, profile=name),
+        ema_chop_period=max(2, _env_int("EMA_CHOP_PERIOD", 14, profile=name)),
+        ema_chop_max=_env_float("EMA_CHOP_MAX", 61.8, profile=name),
+        ema_volume_confirmation_enabled=_env_bool("EMA_VOLUME_CONFIRMATION_ENABLED", True, profile=name),
+        ema_volume_short_window=max(1, _env_int("EMA_VOLUME_SHORT_WINDOW", 5, profile=name)),
+        ema_volume_long_window=max(1, _env_int("EMA_VOLUME_LONG_WINDOW", 20, profile=name)),
+        ema_volume_min_ratio=max(0.0, _env_float("EMA_VOLUME_MIN_RATIO", 1.05, profile=name)),
+        ema_volume_min_directional_fraction=max(
+            0.0,
+            min(1.0, _env_float("EMA_VOLUME_MIN_DIRECTIONAL_FRACTION", 0.0, profile=name)),
+        ),
         ema_trigger_fast_minutes=_env_int("EMA_TRIGGER_FAST_MINUTES", 50, profile=name),
         ema_trigger_slow_minutes=_env_int("EMA_TRIGGER_SLOW_MINUTES", 100, profile=name),
         ema_use_rs_confirmation=_env_bool("EMA_USE_RS_CONFIRMATION", True, profile=name),

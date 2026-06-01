@@ -58,6 +58,7 @@ EMA1D восстановилась выше EMA2D после недавнего 
 EMA50 > EMA100
 rs60 >= EMA_LONG_MIN_RS60, если EMA_USE_RS_CONFIRMATION=true
 btc_return_30m >= EMA_BTC_LONG_MIN_RETURN_30M, если EMA_USE_BTC_RISK_FILTER=true
+market_structure_valid=true
 ```
 
 Pullback recovery проверяет не просто факт `EMA1D > EMA2D`, а недавнее восстановление после состояния против направления сделки. Возраст recovery-cross ограничен `EMA_PULLBACK_RECOVERY_MAX_CROSS_AGE_MINUTES`, а история поиска — `EMA_PULLBACK_RECOVERY_LOOKBACK_MINUTES`.
@@ -72,6 +73,7 @@ EMA1D восстановилась ниже EMA2D после недавнего 
 EMA50 < EMA100
 rs60 <= EMA_SHORT_MAX_RS60, если EMA_USE_RS_CONFIRMATION=true
 btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M, если EMA_USE_BTC_RISK_FILTER=true
+market_structure_valid=true
 ```
 
 Для short относительная сила и EMA-разрывы приводятся к направлению позиции через directional value, чтобы quality gates работали симметрично.
@@ -85,6 +87,8 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M, если EMA_USE_BTC_RISK_FILTER
 - `valid` — направленный сигнал собран и не противоречит базовой структуре стратегии;
 - `entry_valid` — пройдены условия именно для нового входа;
 - `add_valid` — сигнал достаточно здоров для добора уже открытой позиции, даже если полный new-entry gate сейчас не проходит.
+
+`market_structure_valid` по умолчанию требует `EMA_CHOP_FILTER_ENABLED=true` с `chop <= EMA_CHOP_MAX` на trigger-свечах и `EMA_VOLUME_CONFIRMATION_ENABLED=true` с отношением свежего объёма к базовой средней не ниже `EMA_VOLUME_MIN_RATIO`. Этот gate применяется к `entry_valid` и `add_valid`, но не сбрасывает `valid`, чтобы уже открытая позиция не теряла управление выходами из-за шумного рынка.
 
 Для нового входа дополнительно проверяются:
 

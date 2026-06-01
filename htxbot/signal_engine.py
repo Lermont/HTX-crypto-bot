@@ -19,6 +19,7 @@ from .indicators import (
 from .models import SignalContext
 from .signal_math import (
     btc_risk_context,
+    choppiness_context,
     daily_volatility_context,
     ema_pullback_recovery_context,
     ema_signal_direction_metrics,
@@ -27,6 +28,7 @@ from .signal_math import (
     relative_strength_context,
     signal_budget_multiplier,
     signal_score,
+    volume_confirmation_context,
     volatility_multiplier,
 )
 
@@ -54,6 +56,84 @@ class SignalMixin:
         if atr <= 0:
             return 0.0, 0.0
         return atr, atr / close_price
+
+    def _ema_market_structure_required_history(self) -> int:
+        strategy = config.STRATEGY
+        required = 0
+        if getattr(strategy, "ema_chop_filter_enabled", False):
+            required = max(required, max(2, int(strategy.ema_chop_period)) + 1)
+        if getattr(strategy, "ema_volume_confirmation_enabled", False):
+            required = max(
+                required,
+                max(1, int(strategy.ema_volume_short_window)),
+                max(1, int(strategy.ema_volume_long_window)),
+            )
+        return required
+
+    def _ema_market_structure_context(self, candles: Optional[List[list]]) -> dict:
+        strategy = config.STRATEGY
+        candles = candles or []
+        if getattr(strategy, "ema_chop_filter_enabled", False) and candles:
+            chop = choppiness_context(
+                candles,
+                strategy.ema_chop_period,
+                strategy.ema_chop_max,
+            )
+        else:
+            chop = {
+                "chop_valid": True,
+                "chop": 0.0,
+                "chop_max": self._safe_float(getattr(strategy, "ema_chop_max", 0.0), 0.0),
+                "chop_period": max(2, int(getattr(strategy, "ema_chop_period", 14))),
+                "chop_reason": "disabled" if not getattr(strategy, "ema_chop_filter_enabled", False) else "candles_unavailable",
+            }
+
+        if getattr(strategy, "ema_volume_confirmation_enabled", False) and candles:
+            volume = volume_confirmation_context(
+                candles,
+                strategy.ema_volume_short_window,
+                strategy.ema_volume_long_window,
+                strategy.ema_volume_min_ratio,
+                strategy.ema_volume_min_directional_fraction,
+                config.POSITION_SIDE,
+            )
+        else:
+            volume = {
+                "volume_valid": True,
+                "volume_ratio": 0.0,
+                "volume_recent": 0.0,
+                "volume_baseline": 0.0,
+                "volume_directional_fraction": 0.0,
+                "volume_required_candles": max(
+                    max(1, int(getattr(strategy, "ema_volume_short_window", 5))),
+                    max(1, int(getattr(strategy, "ema_volume_long_window", 20))),
+                ),
+                "volume_reason": (
+                    "disabled"
+                    if not getattr(strategy, "ema_volume_confirmation_enabled", False)
+                    else "candles_unavailable"
+                ),
+            }
+
+        return {
+            **volume,
+            **chop,
+            "market_structure_valid": bool(volume["volume_valid"] and chop["chop_valid"]),
+        }
+
+    def _signal_market_structure_block_reason(self, signal: Optional[dict], prefix: str = "entry_market_structure_invalid") -> str:
+        signal = signal or {}
+        return (
+            f"{prefix};"
+            f"volume_valid={int(bool(signal.get('volume_valid', True)))};"
+            f"volume_ratio={self._safe_float(signal.get('volume_ratio'), 0.0):.6f};"
+            f"volume_min_ratio={self._safe_float(getattr(config.STRATEGY, 'ema_volume_min_ratio', 0.0), 0.0):.6f};"
+            f"volume_reason={signal.get('volume_reason', '')};"
+            f"chop_valid={int(bool(signal.get('chop_valid', True)))};"
+            f"chop={self._safe_float(signal.get('chop'), 0.0):.6f};"
+            f"chop_max={self._safe_float(signal.get('chop_max'), 0.0):.6f};"
+            f"chop_reason={signal.get('chop_reason', '')}"
+        )
 
     def _signal_score(self, rs30: float, rs60: float, ema50: float, ema100: float, price: float) -> float:
         return signal_score(
@@ -124,6 +204,8 @@ class SignalMixin:
         return thresholds
 
     def _entry_signal_quality_block_reason(self, signal: Optional[dict], crowded: bool = False) -> str:
+        if signal and self._signal_direction_valid(signal) and not bool(signal.get("market_structure_valid", True)):
+            return self._signal_market_structure_block_reason(signal)
         if not self._is_raw_entry_signal_valid(signal):
             return "entry_signal_invalid"
 
@@ -779,6 +861,7 @@ class SignalMixin:
                 periods["ema_trigger_slow"],
                 rs_slow_window + 1,
                 btc_fast_window + 1,
+                self._ema_market_structure_required_history(),
             )
         return max(
             max(periods.values()),
@@ -909,6 +992,17 @@ class SignalMixin:
             "trigger_valid": False,
             "rs_confirm_valid": False,
             "btc_entry_valid": False,
+            "market_structure_valid": False,
+            "volume_valid": False,
+            "volume_ratio": 0.0,
+            "volume_recent": 0.0,
+            "volume_baseline": 0.0,
+            "volume_directional_fraction": 0.0,
+            "volume_reason": "empty_signal",
+            "chop_valid": False,
+            "chop": 0.0,
+            "chop_max": self._safe_float(getattr(config.STRATEGY, "ema_chop_max", 0.0), 0.0),
+            "chop_reason": "empty_signal",
             "btc_entry_return": 0.0,
             "btc_return_30m": 0.0,
             "score": 0.0,
@@ -1121,10 +1215,14 @@ class SignalMixin:
         score = direction["score"]
 
         macro_context = self._macro_context_for_trading(macro_context)
+        market_structure = self._ema_market_structure_context(candles)
         data_valid = True
         direction_valid = bool(macro_valid)
-        entry_valid = direction["entry_valid"]
-        add_valid = direction["add_valid"]
+        market_structure_valid = bool(market_structure["market_structure_valid"])
+        raw_entry_valid = bool(direction["entry_valid"])
+        raw_add_valid = bool(direction["add_valid"])
+        entry_valid = bool(raw_entry_valid and market_structure_valid)
+        add_valid = bool(raw_add_valid and market_structure_valid)
         volatility = self._realized_volatility(closes, strategy.volatility_window)
         volatility_multiplier = self._volatility_multiplier(volatility)
         atr, atr_rate = self._average_true_range_rate(candles, current_close, strategy.ema_averaging_atr_period)
@@ -1152,7 +1250,15 @@ class SignalMixin:
             f"pullback_min_gap={pullback_context['pullback_recovery_min_gap']:.6f};"
             f"macro_valid={int(macro_valid)};pullback_valid={int(pullback_valid)};"
             f"trigger_valid={int(trigger_valid)};rs_confirm_valid={int(rs_confirm_valid)};"
-            f"btc_entry_valid={int(btc_entry_valid)};entry_valid={int(entry_valid)};"
+            f"btc_entry_valid={int(btc_entry_valid)};"
+            f"market_structure_valid={int(market_structure_valid)};"
+            f"volume_valid={int(bool(market_structure['volume_valid']))};"
+            f"volume_ratio={market_structure['volume_ratio']:.6f};"
+            f"volume_reason={market_structure['volume_reason']};"
+            f"chop_valid={int(bool(market_structure['chop_valid']))};"
+            f"chop={market_structure['chop']:.6f};"
+            f"chop_reason={market_structure['chop_reason']};"
+            f"entry_valid={int(entry_valid)};"
             f"add_valid={int(add_valid)};score={score:.6f};"
             f"atr_rate={atr_rate:.6f};"
             f"signal_budget_multiplier={signal_budget_multiplier:.3f};"
@@ -1218,6 +1324,17 @@ class SignalMixin:
             "trend_valid": macro_valid,
             "recent_valid": pullback_valid,
             "btc_entry_valid": btc_entry_valid,
+            "market_structure_valid": market_structure_valid,
+            "volume_valid": bool(market_structure["volume_valid"]),
+            "volume_ratio": market_structure["volume_ratio"],
+            "volume_recent": market_structure["volume_recent"],
+            "volume_baseline": market_structure["volume_baseline"],
+            "volume_directional_fraction": market_structure["volume_directional_fraction"],
+            "volume_reason": market_structure["volume_reason"],
+            "chop_valid": bool(market_structure["chop_valid"]),
+            "chop": market_structure["chop"],
+            "chop_max": market_structure["chop_max"],
+            "chop_reason": market_structure["chop_reason"],
             "volatility": volatility,
             "volatility_multiplier": volatility_multiplier,
             "atr": atr,

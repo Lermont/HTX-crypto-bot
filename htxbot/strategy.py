@@ -4972,6 +4972,11 @@ class StrategyMixin:
             return "signal_invalid"
         if not signal.get("macro_valid", False):
             return "ema_macro_broken_no_average"
+        if not bool(signal.get("market_structure_valid", True)):
+            reason = getattr(self, "_signal_market_structure_block_reason", None)
+            if reason:
+                return reason(signal, prefix="ema_market_structure_invalid")
+            return "ema_market_structure_invalid"
         if not signal.get("add_valid", False):
             return "ema_add_signal_invalid"
         if config.STRATEGY.ema_averaging_require_pullback_recovery and not signal.get("pullback_valid", False):

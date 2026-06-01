@@ -64,9 +64,17 @@ XAUT_MARKET = {
 }
 
 
-def ohlcv_series(closes, timeframe_sec=60, start_ts=1_700_000_000_000):
+def ohlcv_series(closes, timeframe_sec=60, start_ts=1_700_000_000_000, volumes=None, range_width=0.0):
+    volumes = list(volumes) if volumes is not None else None
     return [
-        [start_ts + index * timeframe_sec * 1000, close, close, close, close, 1.0]
+        [
+            start_ts + index * timeframe_sec * 1000,
+            close,
+            close + range_width,
+            max(0.00000001, close - range_width),
+            close,
+            float(volumes[index]) if volumes is not None else 1.0,
+        ]
         for index, close in enumerate(closes)
     ]
 
@@ -3251,6 +3259,77 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(signal["entry_valid"])
                 self.assertEqual(strategy.ema_pullback_slow_minutes, 8)
 
+    def test_ema_entry_signal_requires_recent_volume_confirmation(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy(
+                ema_chop_filter_enabled=False,
+                ema_volume_confirmation_enabled=True,
+                ema_volume_short_window=5,
+                ema_volume_long_window=20,
+                ema_volume_min_ratio=1.05,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                benchmark_closes = [100.0] * len(closes)
+                ctx = SignalContext(
+                    closes=closes,
+                    benchmark_closes=benchmark_closes,
+                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    latest_ts=1000,
+                    candles=ohlcv_series(closes),
+                    cache_key=SYMBOL,
+                )
+
+                signal = bot._build_signal_from_closes(ctx)
+
+                self.assertIsNotNone(signal)
+                self.assertTrue(signal["macro_valid"])
+                self.assertTrue(signal["pullback_valid"])
+                self.assertTrue(signal["trigger_valid"])
+                self.assertTrue(signal["valid"])
+                self.assertFalse(signal["volume_valid"])
+                self.assertFalse(signal["market_structure_valid"])
+                self.assertFalse(signal["entry_valid"])
+                self.assertIn("volume_reason=volume_ratio_below_min", signal["reason"])
+
+    def test_ema_entry_signal_blocks_choppy_trigger_noise(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy(
+                ema_chop_filter_enabled=True,
+                ema_chop_period=14,
+                ema_chop_max=61.8,
+                ema_volume_confirmation_enabled=True,
+                ema_volume_short_window=5,
+                ema_volume_long_window=20,
+                ema_volume_min_ratio=1.05,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                benchmark_closes = [100.0] * len(closes)
+                volumes = [1.0] * (len(closes) - 5) + [3.0] * 5
+                ctx = SignalContext(
+                    closes=closes,
+                    benchmark_closes=benchmark_closes,
+                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    latest_ts=1000,
+                    candles=ohlcv_series(closes, volumes=volumes, range_width=8.0),
+                    cache_key=SYMBOL,
+                )
+
+                signal = bot._build_signal_from_closes(ctx)
+                block_reason = bot._entry_signal_quality_block_reason(signal)
+
+                self.assertIsNotNone(signal)
+                self.assertTrue(signal["volume_valid"])
+                self.assertFalse(signal["chop_valid"])
+                self.assertFalse(signal["market_structure_valid"])
+                self.assertFalse(signal["entry_valid"])
+                self.assertGreater(signal["chop"], strategy.ema_chop_max)
+                self.assertIn("entry_market_structure_invalid", block_reason)
+                self.assertIn("chop_reason=chop_above_max", block_reason)
+
     def test_ema_pullback_recovery_requires_fresh_cross(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = self.ema_test_strategy(ema_pullback_recovery_max_cross_age_minutes=2)
@@ -4243,6 +4322,13 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertFalse(config.STRATEGY.account_averaging_enabled)
             self.assertTrue(config.STRATEGY.entry_spread_filter_enabled)
             self.assertEqual(config.STRATEGY.entry_spread_filter_max_bps, 30.0)
+            self.assertTrue(config.STRATEGY.ema_chop_filter_enabled)
+            self.assertEqual(config.STRATEGY.ema_chop_period, 14)
+            self.assertEqual(config.STRATEGY.ema_chop_max, 61.8)
+            self.assertTrue(config.STRATEGY.ema_volume_confirmation_enabled)
+            self.assertEqual(config.STRATEGY.ema_volume_short_window, 5)
+            self.assertEqual(config.STRATEGY.ema_volume_long_window, 20)
+            self.assertEqual(config.STRATEGY.ema_volume_min_ratio, 1.05)
             self.assertEqual(config.STRATEGY.hard_time_exit_after_minutes, 96.0 * 60.0)
             self.assertEqual(config.STRATEGY.hard_time_exit_close_fraction, 0.25)
             self.assertEqual(config.STRATEGY.hard_time_exit_fraction_step, 0.25)
@@ -4333,7 +4419,7 @@ class UnifiedBotTests(unittest.TestCase):
                     benchmark_closes=benchmark,
                     btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "neutral"},
                     latest_ts=1000,
-                    candles=ohlcv_series(closes),
+                    candles=ohlcv_series(closes, volumes=[1.0] * (len(closes) - 5) + [3.0] * 5),
                     cache_key=SYMBOL,
                     macro_context=None,
                 )
@@ -4356,7 +4442,13 @@ class UnifiedBotTests(unittest.TestCase):
             macro_start = trigger_latest - (len(macro_closes) - 1) * 24 * 60 * 60 * 1000
             pullback_start = trigger_latest - (len(pullback_closes) - 1) * 4 * 60 * 60 * 1000
 
-            bot.exchange.ohlcv[(SYMBOL, "1m")] = ohlcv_series(trigger_closes, 60, trigger_start)
+            trigger_volumes = [1.0] * (len(trigger_closes) - 5) + [3.0] * 5
+            bot.exchange.ohlcv[(SYMBOL, "1m")] = ohlcv_series(
+                trigger_closes,
+                60,
+                trigger_start,
+                volumes=trigger_volumes,
+            )
             bot.exchange.ohlcv[(SYMBOL, "1d")] = ohlcv_series(macro_closes, 24 * 60 * 60, macro_start)
             bot.exchange.ohlcv[(SYMBOL, "4h")] = ohlcv_series(pullback_closes, 4 * 60 * 60, pullback_start)
 

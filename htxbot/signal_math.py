@@ -3,7 +3,7 @@
 import math
 from typing import Optional, Sequence
 
-from .indicators import calculate_ema_series, clamp, compute_log_return, realized_volatility
+from .indicators import calculate_ema_series, choppiness_index, clamp, compute_log_return, realized_volatility
 
 
 def signal_score(
@@ -357,8 +357,104 @@ def ema_signal_direction_metrics(
     }
 
 
+def volume_confirmation_context(
+    candles: Sequence[Sequence[float]],
+    short_window: int,
+    long_window: int,
+    min_ratio: float,
+    min_directional_fraction: float,
+    position_side: str,
+) -> dict:
+    short_window = max(1, int(short_window))
+    long_window = max(short_window, int(long_window))
+    min_ratio = max(0.0, float(min_ratio))
+    min_directional_fraction = clamp(float(min_directional_fraction), 0.0, 1.0)
+
+    rows = []
+    for row in candles or []:
+        if len(row) < 6:
+            continue
+        try:
+            open_price = float(row[1])
+            close_price = float(row[4])
+            volume = float(row[5])
+        except (TypeError, ValueError):
+            continue
+        if open_price <= 0 or close_price <= 0 or volume <= 0:
+            continue
+        rows.append((open_price, close_price, volume))
+
+    required = max(short_window, long_window)
+    if len(rows) < required:
+        return {
+            "volume_valid": False,
+            "volume_ratio": 0.0,
+            "volume_recent": 0.0,
+            "volume_baseline": 0.0,
+            "volume_directional_fraction": 0.0,
+            "volume_required_candles": required,
+            "volume_reason": f"volume_history_short;candles={len(rows)};required={required}",
+        }
+
+    recent = rows[-short_window:]
+    baseline = rows[-long_window:]
+    recent_average = sum(row[2] for row in recent) / short_window
+    baseline_average = sum(row[2] for row in baseline) / long_window
+    ratio = recent_average / baseline_average if baseline_average > 0 else 0.0
+
+    total_recent_volume = sum(row[2] for row in recent)
+    if str(position_side).lower() == "short":
+        directional_volume = sum(volume for open_price, close_price, volume in recent if close_price < open_price)
+    else:
+        directional_volume = sum(volume for open_price, close_price, volume in recent if close_price > open_price)
+    directional_fraction = directional_volume / total_recent_volume if total_recent_volume > 0 else 0.0
+
+    ratio_valid = ratio + 1e-12 >= min_ratio
+    directional_valid = directional_fraction + 1e-12 >= min_directional_fraction
+    if ratio_valid and directional_valid:
+        reason = "volume_confirmed"
+    elif not ratio_valid:
+        reason = "volume_ratio_below_min"
+    else:
+        reason = "volume_directional_fraction_below_min"
+
+    return {
+        "volume_valid": bool(ratio_valid and directional_valid),
+        "volume_ratio": ratio,
+        "volume_recent": recent_average,
+        "volume_baseline": baseline_average,
+        "volume_directional_fraction": directional_fraction,
+        "volume_required_candles": required,
+        "volume_reason": reason,
+    }
+
+
+def choppiness_context(candles: Sequence[Sequence[float]], period: int, max_chop: float) -> dict:
+    period = max(2, int(period))
+    max_chop = max(0.0, float(max_chop))
+    if len(candles or []) < period + 1:
+        return {
+            "chop_valid": False,
+            "chop": 0.0,
+            "chop_max": max_chop,
+            "chop_period": period,
+            "chop_reason": f"chop_history_short;candles={len(candles or [])};required={period + 1}",
+        }
+
+    value = choppiness_index(candles, period)
+    valid = value <= max_chop + 1e-12
+    return {
+        "chop_valid": bool(valid),
+        "chop": value,
+        "chop_max": max_chop,
+        "chop_period": period,
+        "chop_reason": "chop_ok" if valid else "chop_above_max",
+    }
+
+
 __all__ = [
     "btc_risk_context",
+    "choppiness_context",
     "daily_volatility_context",
     "ema_pullback_recovery_context",
     "ema_signal_direction_metrics",
@@ -367,5 +463,6 @@ __all__ = [
     "relative_strength_context",
     "signal_budget_multiplier",
     "signal_score",
+    "volume_confirmation_context",
     "volatility_multiplier",
 ]

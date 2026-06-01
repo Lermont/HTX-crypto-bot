@@ -7,6 +7,7 @@ from htxbot.indicators import (
     average_true_range,
     calculate_ema,
     calculate_ema_series,
+    choppiness_index,
     calculate_rsi,
     clamp,
     compute_log_return,
@@ -14,6 +15,7 @@ from htxbot.indicators import (
 )
 from htxbot.signal_math import (
     btc_risk_context,
+    choppiness_context,
     daily_volatility_context,
     ema_pullback_recovery_context,
     ema_signal_direction_metrics,
@@ -22,6 +24,7 @@ from htxbot.signal_math import (
     relative_strength_context,
     signal_budget_multiplier,
     signal_score,
+    volume_confirmation_context,
     volatility_multiplier,
 )
 
@@ -77,6 +80,19 @@ class IndicatorMathTests(unittest.TestCase):
 
         self.assertAlmostEqual(average_true_range(candles, 3), (2.0 + 1.0 + 2.75) / 3.0)
         self.assertEqual(average_true_range(candles[:2], 3), 0.0)
+
+    def test_choppiness_index_separates_trend_from_noise(self):
+        trend = [
+            [index, close, close + 0.1, close - 0.1, close, 1.0]
+            for index, close in enumerate(range(100, 121))
+        ]
+        chop = [
+            [index, close, close + 0.2, close - 0.2, close, 1.0]
+            for index, close in enumerate([100.0, 102.0] * 11)
+        ]
+
+        self.assertLess(choppiness_index(trend, 14), 30.0)
+        self.assertGreater(choppiness_index(chop, 14), 60.0)
 
 
 class SignalMathTests(unittest.TestCase):
@@ -283,6 +299,50 @@ class SignalMathTests(unittest.TestCase):
 
         self.assertAlmostEqual(long_context["local_reversion"], (110.0 - 105.0) / 110.0)
         self.assertAlmostEqual(short_context["local_reversion"], (105.0 - 100.0) / 100.0)
+
+    def test_volume_confirmation_context_requires_recent_volume_expansion(self):
+        quiet = [[index, 100.0, 101.0, 99.0, 101.0, 1.0] for index in range(20)]
+        confirmed = [
+            [index, 100.0, 101.0, 99.0, 101.0, 1.0 if index < 15 else 3.0]
+            for index in range(20)
+        ]
+
+        quiet_context = volume_confirmation_context(
+            quiet,
+            short_window=5,
+            long_window=20,
+            min_ratio=1.05,
+            min_directional_fraction=0.0,
+            position_side="long",
+        )
+        confirmed_context = volume_confirmation_context(
+            confirmed,
+            short_window=5,
+            long_window=20,
+            min_ratio=1.05,
+            min_directional_fraction=0.0,
+            position_side="long",
+        )
+
+        self.assertFalse(quiet_context["volume_valid"])
+        self.assertEqual(quiet_context["volume_reason"], "volume_ratio_below_min")
+        self.assertTrue(confirmed_context["volume_valid"])
+        self.assertGreater(confirmed_context["volume_ratio"], 1.05)
+
+    def test_market_structure_math_is_direction_symmetric(self):
+        long_candles = [[index, 100.0, 101.0, 99.0, 101.0, 2.0] for index in range(20)]
+        short_candles = [[index, 101.0, 102.0, 100.0, 100.0, 2.0] for index in range(20)]
+
+        long_volume = volume_confirmation_context(long_candles, 5, 20, 1.0, 0.60, "long")
+        short_volume = volume_confirmation_context(short_candles, 5, 20, 1.0, 0.60, "short")
+        long_chop = choppiness_context(long_candles, 14, 61.8)
+        short_chop = choppiness_context(short_candles, 14, 61.8)
+
+        self.assertTrue(long_volume["volume_valid"])
+        self.assertTrue(short_volume["volume_valid"])
+        self.assertEqual(long_volume["volume_directional_fraction"], 1.0)
+        self.assertEqual(short_volume["volume_directional_fraction"], 1.0)
+        self.assertEqual(long_chop["chop_valid"], short_chop["chop_valid"])
 
 
 if __name__ == "__main__":

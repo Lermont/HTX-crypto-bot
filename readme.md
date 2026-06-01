@@ -41,7 +41,7 @@ Long entry requires the macro and trigger EMAs to point up, the pullback layer t
 
 Short entry mirrors the same logic downward: macro and trigger EMAs point down, pullback layer recovers downward after a recent bounce, optional RS confirmation, and BTC 30m is not too positive.
 
-Signal flags are split by use: `valid` means the symbol has a coherent directional signal, `entry_valid` means a full new-entry gate passed, and `add_valid` is the stricter health gate used for averaging an already open position.
+Signal flags are split by use: `valid` means the symbol has a coherent directional signal, `entry_valid` means a full new-entry gate passed, and `add_valid` is the stricter health gate used for averaging an already open position. The default EMA entry gate also requires non-choppy trigger candles and recent volume confirmation, so a late EMA cross alone no longer opens or averages a position.
 
 If HTX rejects a reduce-only exit because the whole position is reported as closeable-reserved/frozen, the bot keeps a pending exit-ladder state and waits for available closeable amount, a position-size change, or visible close orders to adopt/cancel. It does not keep duplicating exit ladders on timeout alone.
 
@@ -145,6 +145,14 @@ EMA_ENTRY_LADDER_OFFSETS=0.0,0.01
 Entry quality gates:
 
 ```dotenv
+EMA_CHOP_FILTER_ENABLED=true
+EMA_CHOP_PERIOD=14
+EMA_CHOP_MAX=61.8
+EMA_VOLUME_CONFIRMATION_ENABLED=true
+EMA_VOLUME_SHORT_WINDOW=5
+EMA_VOLUME_LONG_WINDOW=20
+EMA_VOLUME_MIN_RATIO=1.05
+EMA_VOLUME_MIN_DIRECTIONAL_FRACTION=0.0
 ENTRY_MIN_SCORE=0.03
 ENTRY_MIN_RS60_ABS=0.002
 ENTRY_MIN_RS30_ABS=0.001
