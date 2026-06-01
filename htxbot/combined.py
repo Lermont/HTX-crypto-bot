@@ -388,31 +388,6 @@ class CombinedHtxFuturesBot:
                     symbol=symbol,
                     item_types=(dict,),
                 )
-            except TypeError:
-                try:
-                    orders = bot._private_fetch_with_retry(
-                        symbol,
-                        "btc_hedge_open_orders_fetch_failed",
-                        f"BTC hedge open orders for {symbol}",
-                        lambda: bot.exchange.fetch_open_orders(symbol),
-                    )
-                    return bot._expect_ccxt_list_response(
-                        orders,
-                        "fetch_open_orders",
-                        symbol=symbol,
-                        item_types=(dict,),
-                    )
-                except Exception as exc:
-                    level = "WARNING" if bot._is_transient_exchange_error(exc) else "ERROR"
-                    self._log_btc_hedge(
-                        level,
-                        f"BTC hedge skipped: could not fetch open orders for {symbol}: {exc}",
-                        reason="open_orders_fetch_failed",
-                        symbol=symbol,
-                        exception=exc,
-                        throttle_sec=60.0,
-                    )
-                    return None
             except Exception as exc:
                 level = "WARNING" if bot._is_transient_exchange_error(exc) else "ERROR"
                 self._log_btc_hedge(

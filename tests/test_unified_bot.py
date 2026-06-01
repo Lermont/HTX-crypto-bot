@@ -117,6 +117,7 @@ class FakeExchange:
         self.fetch_open_orders_response_override = None
         self.fetch_positions_response_override = None
         self.fetch_ohlcv_response_override = None
+        self.fetch_open_orders_type_error_on_params = False
         self.fetch_open_orders_failures = []
         self.fetch_positions_failures = []
         self.fetch_ohlcv_failures = []
@@ -203,6 +204,8 @@ class FakeExchange:
 
     def fetch_open_orders(self, symbol=None, params=None):
         self.fetch_open_orders_calls += 1
+        if params is not None and self.fetch_open_orders_type_error_on_params:
+            raise TypeError("fetch_open_orders() got an unexpected keyword argument 'params'")
         if self.fetch_open_orders_failures:
             raise self.fetch_open_orders_failures.pop(0)
         if self.fetch_open_orders_response_override is not None:
@@ -5687,6 +5690,26 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertIn("fetch_open_orders returned dict", order_rows[-1]["message"])
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
 
+    def test_open_orders_params_type_error_is_not_retried_without_params(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.open_orders = [
+                {"id": "visible_exit", "symbol": SYMBOL, "side": config.EXIT_SIDE, "amount": 1.0}
+            ]
+            bot.exchange.fetch_open_orders_type_error_on_params = True
+
+            orders = bot._fetch_open_orders(SYMBOL)
+
+            self.assertIsNone(orders)
+            self.assertEqual(bot.exchange.fetch_open_orders_calls, 2)
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            order_rows = [row for row in rows if row["reason"] == "open_orders_fetch_failed"]
+            self.assertTrue(order_rows)
+            self.assertEqual(order_rows[-1]["level"], "ERROR")
+            self.assertEqual(order_rows[-1]["exception_type"], "TypeError")
+            self.assertIn("unexpected keyword argument 'params'", order_rows[-1]["message"])
+
     def test_public_ohlcv_dict_response_raises_typed_exchange_response_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -6381,6 +6404,37 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(order["side"], "sell")
             self.assertEqual(order["amount"], 5.0)
             self.assertFalse(order["params"].get("reduceOnly", False))
+
+    def test_btc_hedge_open_orders_params_type_error_blocks_rebalance(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            positions = [
+                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 5.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+            ]
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(
+                    Path(raw_tmp),
+                    positions=positions,
+                    ticker={"bid": 99.9, "ask": 100.1, "last": 100.0},
+                )
+                exchange.fetch_open_orders_type_error_on_params = True
+
+                CombinedHtxFuturesBot._rebalance_btc_hedge(combined)
+
+            self.assertEqual(exchange.created_orders, [])
+            self.assertEqual(exchange.fetch_open_orders_calls, 1)
+            with combined.bots[0].csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            order_rows = [row for row in rows if row["reason"] == "open_orders_fetch_failed"]
+            self.assertTrue(order_rows)
+            self.assertEqual(order_rows[-1]["event"], "btc_hedge")
+            self.assertEqual(order_rows[-1]["exception_type"], "TypeError")
 
     def test_btc_hedge_reduces_existing_same_side_with_reduce_only(self):
         with tempfile.TemporaryDirectory() as raw_tmp:

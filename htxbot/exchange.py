@@ -1012,10 +1012,7 @@ class ExchangeMixin:
                 return None
 
             def fetch_bulk_open_orders():
-                try:
-                    return self.exchange.fetch_open_orders(None, params=self._position_params())
-                except TypeError:
-                    return self.exchange.fetch_open_orders()
+                return self.exchange.fetch_open_orders(None, params=self._position_params())
 
             try:
                 orders = self._private_fetch_with_retry(
@@ -1585,10 +1582,7 @@ class ExchangeMixin:
             orders = bulk_orders.get(symbol, [])
         else:
             def fetch_symbol_open_orders():
-                try:
-                    return self.exchange.fetch_open_orders(symbol, params=self._position_params())
-                except TypeError:
-                    return self.exchange.fetch_open_orders(symbol)
+                return self.exchange.fetch_open_orders(symbol, params=self._position_params())
 
             try:
                 orders = self._private_fetch_with_retry(
