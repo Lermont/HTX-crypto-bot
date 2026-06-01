@@ -6,13 +6,17 @@ import math
 import re
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import ccxt
 
 import config
 
 from .concurrency import instance_rlock
+
+
+class UnexpectedExchangeResponse(RuntimeError):
+    """Raised when CCXT returns a payload shape that cannot be trusted."""
 
 
 class ExchangeMixin:
@@ -238,12 +242,18 @@ class ExchangeMixin:
                 with instance_rlock(self, "_exchange_host_lock"):
                     if hostname:
                         self._set_contract_hostname(self.exchange, hostname)
-                    return self.exchange.fetch_ohlcv(
+                    ohlcv = self.exchange.fetch_ohlcv(
                         symbol,
                         timeframe=timeframe,
                         since=since,
                         limit=limit,
                         params=params or {},
+                    )
+                    return self._expect_ccxt_list_response(
+                        ohlcv,
+                        "fetch_ohlcv",
+                        symbol=symbol,
+                        item_types=(list, tuple),
                     )
             except Exception as exc:
                 if not self._is_transient_exchange_error(exc):
@@ -303,6 +313,52 @@ class ExchangeMixin:
                 )
                 time.sleep(min(0.5 * attempt, 2.0))
         raise last_exc
+
+    def _ccxt_response_preview(self, payload: Any) -> str:
+        try:
+            sanitizer = getattr(self, "_sanitize_for_log", None)
+            clean = sanitizer(payload) if sanitizer else payload
+            if isinstance(clean, dict):
+                keys = list(clean.keys())[:8]
+                clean = {key: clean.get(key) for key in keys}
+            elif isinstance(clean, list):
+                clean = clean[:3]
+            text = json.dumps(clean, ensure_ascii=True, default=str, sort_keys=True)
+        except Exception:
+            text = repr(payload)
+        redactor = getattr(self, "_redact_sensitive_text", None)
+        if redactor:
+            text = redactor(text)
+        if len(text) > 500:
+            text = f"{text[:500]}...<truncated>"
+        return text
+
+    def _expected_item_type_name(self, item_types: Tuple[type, ...]) -> str:
+        return "|".join(item_type.__name__ for item_type in item_types)
+
+    def _expect_ccxt_list_response(
+        self,
+        payload: Any,
+        method: str,
+        symbol: str = "",
+        item_types: Optional[Tuple[type, ...]] = None,
+    ) -> List[Any]:
+        location = f" for {symbol}" if symbol else ""
+        if not isinstance(payload, list):
+            raise UnexpectedExchangeResponse(
+                f"{method} returned {type(payload).__name__}; expected list{location}; "
+                f"payload={self._ccxt_response_preview(payload)}"
+            )
+        if item_types:
+            for index, item in enumerate(payload):
+                if isinstance(item, item_types):
+                    continue
+                expected = self._expected_item_type_name(item_types)
+                raise UnexpectedExchangeResponse(
+                    f"{method} returned list with {type(item).__name__} item at index {index}; "
+                    f"expected list[{expected}]{location}; payload={self._ccxt_response_preview(payload)}"
+                )
+        return payload
 
     def _price_to_precision(self, symbol: str, price: float) -> float:
         return float(self.exchange.price_to_precision(symbol, price))
@@ -739,6 +795,11 @@ class ExchangeMixin:
                     "bulk positions",
                     lambda: self.exchange.fetch_positions(list(self.symbols), self._position_params()),
                 )
+                positions = self._expect_ccxt_list_response(
+                    positions,
+                    "fetch_positions",
+                    item_types=(dict,),
+                )
             except Exception as exc:
                 self._private_positions_bulk_failed = True
                 self._log_event(
@@ -786,6 +847,11 @@ class ExchangeMixin:
                     "bulk_open_orders_fetch_failed",
                     "bulk open orders",
                     fetch_bulk_open_orders,
+                )
+                orders = self._expect_ccxt_list_response(
+                    orders,
+                    "fetch_open_orders",
+                    item_types=(dict,),
                 )
             except Exception as exc:
                 self._private_open_orders_bulk_failed = True
@@ -1238,6 +1304,12 @@ class ExchangeMixin:
                     f"position for {symbol}",
                     lambda: self.exchange.fetch_positions([symbol], self._position_params()),
                 )
+                positions = self._expect_ccxt_list_response(
+                    positions,
+                    "fetch_positions",
+                    symbol=symbol,
+                    item_types=(dict,),
+                )
             except Exception as exc:
                 level = "WARNING" if self._is_transient_exchange_error(exc) else "ERROR"
                 self._log_event(
@@ -1348,6 +1420,12 @@ class ExchangeMixin:
                     "open_orders_fetch_failed",
                     f"open orders for {symbol}",
                     fetch_symbol_open_orders,
+                )
+                orders = self._expect_ccxt_list_response(
+                    orders,
+                    "fetch_open_orders",
+                    symbol=symbol,
+                    item_types=(dict,),
                 )
             except Exception as exc:
                 level = "WARNING" if self._is_transient_exchange_error(exc) else "ERROR"

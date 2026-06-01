@@ -82,7 +82,8 @@ class CachedMarketDataExchange:
                 limit=limit,
                 params=params or {},
             )
-            cache[key] = value
+            if isinstance(value, list):
+                cache[key] = value
             return value
 
     def fetch_ticker(self, symbol: str, params=None):

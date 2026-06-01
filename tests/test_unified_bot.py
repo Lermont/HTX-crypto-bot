@@ -20,6 +20,7 @@ import config
 import ccxt
 from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
+from htxbot.exchange import UnexpectedExchangeResponse
 from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
 from htxbot.indicators import average_true_range, calculate_rsi, compute_log_return, realized_volatility
@@ -113,6 +114,9 @@ class FakeExchange:
         self.cancel_fail_ids = set()
         self.open_orders = []
         self.positions = []
+        self.fetch_open_orders_response_override = None
+        self.fetch_positions_response_override = None
+        self.fetch_ohlcv_response_override = None
         self.fetch_open_orders_failures = []
         self.fetch_positions_failures = []
         self.fetch_ohlcv_failures = []
@@ -188,6 +192,8 @@ class FakeExchange:
         self.fetch_open_orders_calls += 1
         if self.fetch_open_orders_failures:
             raise self.fetch_open_orders_failures.pop(0)
+        if self.fetch_open_orders_response_override is not None:
+            return self.fetch_open_orders_response_override
         if symbol is None:
             return list(self.open_orders)
         return [order for order in self.open_orders if order.get("symbol", SYMBOL) == symbol]
@@ -198,6 +204,8 @@ class FakeExchange:
             time.sleep(self.fetch_positions_delay)
         if self.fetch_positions_failures:
             raise self.fetch_positions_failures.pop(0)
+        if self.fetch_positions_response_override is not None:
+            return self.fetch_positions_response_override
         wanted = set(symbols or [])
         if not wanted:
             return list(self.positions)
@@ -221,6 +229,8 @@ class FakeExchange:
         )
         if self.fetch_ohlcv_failures:
             raise self.fetch_ohlcv_failures.pop(0)
+        if self.fetch_ohlcv_response_override is not None:
+            return self.fetch_ohlcv_response_override
         rows = list(self.ohlcv.get((symbol, timeframe), []))
         if limit:
             return rows[-int(limit):]
@@ -4857,6 +4867,62 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(rows[-1]["event"], "state_exchange_mismatch")
                 self.assertEqual(rows[-1]["reason"], "open_orders_fetch_failed")
 
+    def test_private_position_dict_response_is_logged_without_step_error(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.has["fetchPositions"] = False
+            bot.exchange.fetch_positions_response_override = {
+                "status": "error",
+                "err_code": "500",
+                "err_msg": "unexpected payload",
+            }
+
+            bot._run_step_symbol_safe(SYMBOL)
+
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            position_rows = [row for row in rows if row["reason"] == "position_fetch_failed"]
+            self.assertTrue(position_rows)
+            self.assertEqual(position_rows[-1]["level"], "ERROR")
+            self.assertEqual(position_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(position_rows[-1]["error_code"], "500")
+            self.assertIn("fetch_positions returned dict", position_rows[-1]["message"])
+            self.assertFalse(any(row["reason"] == "step_error" for row in rows))
+
+    def test_open_orders_dict_response_is_logged_without_step_error(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.has["fetchOpenOrders"] = False
+            bot.exchange.fetch_open_orders_response_override = {
+                "status": "error",
+                "err_code": "501",
+                "err_msg": "unexpected payload",
+            }
+
+            bot._run_step_symbol_safe(SYMBOL)
+
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            order_rows = [row for row in rows if row["reason"] == "open_orders_fetch_failed"]
+            self.assertTrue(order_rows)
+            self.assertEqual(order_rows[-1]["level"], "ERROR")
+            self.assertEqual(order_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(order_rows[-1]["error_code"], "501")
+            self.assertIn("fetch_open_orders returned dict", order_rows[-1]["message"])
+            self.assertFalse(any(row["reason"] == "step_error" for row in rows))
+
+    def test_public_ohlcv_dict_response_raises_typed_exchange_response_error(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.fetch_ohlcv_response_override = {
+                "status": "error",
+                "err_code": "502",
+                "err_msg": "unexpected payload",
+            }
+
+            with self.assertRaisesRegex(UnexpectedExchangeResponse, "fetch_ohlcv returned dict"):
+                bot._closed_candles(SYMBOL, 2, timeframe="1m")
+
     def test_position_mode_locked_by_existing_positions_logs_info(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             with override_config(RUNTIME=config.RUNTIME):
@@ -5029,6 +5095,18 @@ class UnifiedBotTests(unittest.TestCase):
         exchange.funding_rate_response = {"fundingRate": "0.0002"}
         self.assertEqual(cached.fetch_funding_rate(SYMBOL), {"fundingRate": "0.0002"})
         self.assertEqual(exchange.fetch_funding_rate_calls, 2)
+
+    def test_shared_exchange_does_not_cache_invalid_ohlcv_payload(self):
+        exchange = FakeExchange()
+        cached = CachedMarketDataExchange(exchange)
+        exchange.fetch_ohlcv_response_override = {"status": "error", "err_code": "502"}
+
+        self.assertEqual(cached.fetch_ohlcv(SYMBOL, timeframe="1m", limit=1), {"status": "error", "err_code": "502"})
+
+        exchange.fetch_ohlcv_response_override = None
+        exchange.ohlcv[(SYMBOL, "1m")] = [[1, 100.0, 101.0, 99.0, 100.5, 10.0]]
+        self.assertEqual(cached.fetch_ohlcv(SYMBOL, timeframe="1m", limit=1), exchange.ohlcv[(SYMBOL, "1m")])
+        self.assertEqual(len(exchange.ohlcv_calls), 2)
 
     def test_shared_exchange_ticker_cache_is_singleflight_across_threads(self):
         class SlowTickerExchange:

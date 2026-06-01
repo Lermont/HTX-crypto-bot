@@ -1230,6 +1230,12 @@ class SignalMixin:
             ohlcv = self._fetch_ohlcv_with_retry(symbol, timeframe=timeframe, limit=limit)
         else:
             ohlcv = client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            ohlcv = self._expect_ccxt_list_response(
+                ohlcv,
+                "fetch_ohlcv",
+                symbol=symbol,
+                item_types=(list, tuple),
+            )
         now_ms = int(time.time() * 1000)
         timeframe_ms = self._signal_timeframe_seconds(timeframe) * 1000
         current_bucket = (now_ms // timeframe_ms) * timeframe_ms

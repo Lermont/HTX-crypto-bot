@@ -711,6 +711,12 @@ class StateMixin:
                 since = int(max(0.0, created_at - config.RUNTIME.fill_detail_lookback_sec) * 1000)
             try:
                 trades = self.exchange.fetch_my_trades(symbol, since=since, limit=100, params=self._position_params())
+                trades = self._expect_ccxt_list_response(
+                    trades,
+                    "fetch_my_trades",
+                    symbol=symbol,
+                    item_types=(dict,),
+                )
                 trade_snapshot = self._fill_snapshot_from_trades(symbol, order_id, trades)
                 if trade_snapshot:
                     snapshot = trade_snapshot

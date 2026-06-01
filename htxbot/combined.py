@@ -344,11 +344,16 @@ class CombinedHtxFuturesBot:
         ordered_symbols = sorted(symbols)
         with config.use_profile(bot.profile):
             try:
-                return bot._private_fetch_with_retry(
+                positions = bot._private_fetch_with_retry(
                     "",
                     "btc_hedge_positions_fetch_failed",
                     "BTC hedge positions",
                     lambda: bot.exchange.fetch_positions(ordered_symbols, bot._position_params()),
+                )
+                return bot._expect_ccxt_list_response(
+                    positions,
+                    "fetch_positions",
+                    item_types=(dict,),
                 )
             except Exception as exc:
                 level = "WARNING" if bot._is_transient_exchange_error(exc) else "ERROR"
@@ -365,19 +370,31 @@ class CombinedHtxFuturesBot:
     def _fetch_btc_hedge_open_orders(self, bot: HtxFuturesBot, symbol: str) -> Optional[List[dict]]:
         with config.use_profile(bot.profile):
             try:
-                return bot._private_fetch_with_retry(
+                orders = bot._private_fetch_with_retry(
                     symbol,
                     "btc_hedge_open_orders_fetch_failed",
                     f"BTC hedge open orders for {symbol}",
                     lambda: bot.exchange.fetch_open_orders(symbol, params=bot._position_params()),
                 )
+                return bot._expect_ccxt_list_response(
+                    orders,
+                    "fetch_open_orders",
+                    symbol=symbol,
+                    item_types=(dict,),
+                )
             except TypeError:
                 try:
-                    return bot._private_fetch_with_retry(
+                    orders = bot._private_fetch_with_retry(
                         symbol,
                         "btc_hedge_open_orders_fetch_failed",
                         f"BTC hedge open orders for {symbol}",
                         lambda: bot.exchange.fetch_open_orders(symbol),
+                    )
+                    return bot._expect_ccxt_list_response(
+                        orders,
+                        "fetch_open_orders",
+                        symbol=symbol,
+                        item_types=(dict,),
                     )
                 except Exception as exc:
                     level = "WARNING" if bot._is_transient_exchange_error(exc) else "ERROR"
