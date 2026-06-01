@@ -3148,12 +3148,19 @@ class StrategyMixin:
             amount = self._order_remaining_amount(order)
             if amount <= 0:
                 continue
+            raw_created_at = self._safe_float(order.get("timestamp"), 0.0)
+            if raw_created_at > 1_000_000_000_000:
+                created_ref_at = raw_created_at / 1000.0
+            elif raw_created_at > 0:
+                created_ref_at = raw_created_at
+            else:
+                created_ref_at = created_at
             ref = {
                 "id": str(order.get("id")),
                 "side": config.EXIT_SIDE,
                 "price": self._order_effective_exit_price(order),
                 "amount": amount,
-                "created_at": self._safe_float(order.get("timestamp"), created_at * 1000) / 1000.0,
+                "created_at": created_ref_at,
                 "stage": index,
                 "mode": state.sell_ladder_mode or "normal",
                 "adopted": True,
@@ -3176,10 +3183,21 @@ class StrategyMixin:
 
         state.sell_ladder_orders = adopted
         state.sell_ladder_mode = state.sell_ladder_mode or "normal"
-        state.sell_ladder_signature = self._exit_ladder_signature(state.sell_ladder_mode, symbol, state)
+        full_coverage = remaining + eps >= state.position_size
+        state.sell_ladder_signature = (
+            self._exit_ladder_signature(state.sell_ladder_mode, symbol, state)
+            if full_coverage
+            else ""
+        )
         self._clear_pending_exit_ladder(state)
         self._reset_exit_runner_state(state)
         self._refresh_active_side(state)
+        log_reason = reason
+        if not full_coverage:
+            log_reason = (
+                f"{reason};partial_external_exit_coverage;"
+                f"covered={remaining:.12f};position={state.position_size:.12f}"
+            )
         self._log_event(
             "INFO",
             f"Adopted existing {config.EXIT_SIDE} exit ladder for {symbol}: orders={len(adopted)} amount={remaining}",
@@ -3187,7 +3205,8 @@ class StrategyMixin:
             symbol=symbol,
             side=config.EXIT_SIDE,
             amount=remaining,
-            reason=reason,
+            position_size=state.position_size,
+            reason=log_reason,
         )
         self._save_state()
         return True

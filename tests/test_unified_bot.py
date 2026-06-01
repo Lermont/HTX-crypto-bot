@@ -5017,6 +5017,57 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._ensure_sell_ladder(SYMBOL)
                 self.assertEqual(bot.exchange.created_orders, [])
 
+    def test_partial_unknown_reduce_only_exit_is_rebuilt_to_cover_position(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_config(RUNTIME=config.RUNTIME):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 5.0
+                state.entry_price = 100.0
+                created_at = time.time() - 10.0
+
+                valid = bot._validate_sell_orders(
+                    SYMBOL,
+                    [
+                        {
+                            "id": "partial_manual_sell",
+                            "symbol": SYMBOL,
+                            "side": "sell",
+                            "price": 101.0,
+                            "amount": 2.0,
+                            "remaining": 2.0,
+                            "reduceOnly": True,
+                            "timestamp": created_at,
+                        }
+                    ],
+                )
+
+                self.assertTrue(valid)
+                self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["partial_manual_sell"])
+                self.assertEqual(state.sell_ladder_signature, "")
+                self.assertAlmostEqual(state.sell_ladder_orders[0]["created_at"], created_at)
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertTrue(
+                    any(
+                        row["event"] == "state_exchange_mismatch"
+                        and "partial_external_exit_coverage" in row["reason"]
+                        for row in rows
+                    )
+                )
+
+                bot._ensure_sell_ladder(SYMBOL)
+
+                self.assertIn(
+                    ("partial_manual_sell", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
+                self.assertTrue(bot.exchange.created_orders)
+                self.assertTrue(all(order["params"].get("reduceOnly") for order in bot.exchange.created_orders))
+                self.assertAlmostEqual(sum(order["amount"] for order in bot.exchange.created_orders), 5.0)
+                self.assertAlmostEqual(sum(ref["amount"] for ref in state.sell_ladder_orders), 5.0)
+
     def test_offset_close_exit_orders_are_adopted_as_reduce_only(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             with override_config(RUNTIME=config.RUNTIME):
