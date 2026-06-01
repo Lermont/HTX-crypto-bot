@@ -55,6 +55,7 @@ class MonitoringMixin:
 
     def _ensure_headered_csv_file(self, path: Path, header: Sequence[str]):
         path.parent.mkdir(parents=True, exist_ok=True)
+        header = list(header)
         if not path.exists() or path.stat().st_size == 0:
             with path.open("w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(header)
@@ -67,10 +68,8 @@ class MonitoringMixin:
             self.log.warning("Could not verify CSV header for %s: %s", path, exc)
             return
 
-        normalized_first_row = list(first_row)
-        if normalized_first_row:
-            normalized_first_row[0] = normalized_first_row[0].lstrip("\ufeff")
-        if normalized_first_row == list(header):
+        normalized_first_row = self._normalize_csv_header_row(first_row)
+        if normalized_first_row == header:
             return
 
         if normalized_first_row and normalized_first_row[0] == header[0]:
@@ -82,18 +81,36 @@ class MonitoringMixin:
     def _csv_tmp_path(self, path: Path) -> Path:
         return path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
 
+    def _normalize_csv_header_row(self, row: Sequence[str]) -> list:
+        normalized = list(row or [])
+        if normalized:
+            normalized[0] = normalized[0].lstrip("\ufeff")
+        return normalized
+
+    def _legacy_csv_row_dict(self, source_header: Sequence[str], values: Sequence[Any]) -> Dict[str, Any]:
+        row = {}
+        for index, name in enumerate(source_header):
+            if not name:
+                continue
+            row[str(name)] = values[index] if index < len(values) else ""
+        return row
+
     def _rewrite_headered_csv_file(self, path: Path, header: Sequence[str], normalized_first_row: Sequence[str]):
         tmp_path = self._csv_tmp_path(path)
+        header = list(header)
+        source_header = list(normalized_first_row)
         try:
             with path.open("r", newline="", encoding="utf-8") as src, tmp_path.open("w", newline="", encoding="utf-8") as dst:
-                reader = csv.DictReader(src)
-                if reader.fieldnames:
-                    reader.fieldnames = list(normalized_first_row)
-                writer = csv.DictWriter(dst, fieldnames=header, extrasaction="ignore")
-                writer.writeheader()
-                for row in reader:
+                reader = csv.reader(src)
+                first_row = next(reader, [])
+                if first_row:
+                    source_header = self._normalize_csv_header_row(first_row)
+                writer = csv.writer(dst)
+                writer.writerow(header)
+                for values in reader:
+                    row = self._legacy_csv_row_dict(source_header, values)
                     self._apply_legacy_csv_aliases(row)
-                    writer.writerow({name: row.get(name, "") for name in header})
+                    writer.writerow([row.get(name, "") for name in header])
             self._replace_path_with_retry(tmp_path, path)
         except Exception as exc:
             try:

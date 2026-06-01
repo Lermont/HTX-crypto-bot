@@ -477,6 +477,14 @@ class UnifiedBotTests(unittest.TestCase):
             def __init__(self, handle):
                 self._handle = handle
 
+            def _record_bounded_read(self, text):
+                size = len(text or "")
+                if size <= 0:
+                    return
+                if size > max_read_size:
+                    raise AssertionError("CSV migration read chunk is too large")
+                read_sizes.append(size)
+
             def __enter__(self):
                 self._handle.__enter__()
                 return self
@@ -488,15 +496,23 @@ class UnifiedBotTests(unittest.TestCase):
                 return self
 
             def __next__(self):
-                return next(self._handle)
+                line = next(self._handle)
+                self._record_bounded_read(line)
+                return line
 
             def read(self, size=-1):
                 if size is None or int(size) < 0:
                     raise AssertionError("CSV migration attempted an unbounded read")
                 if int(size) > max_read_size:
                     raise AssertionError("CSV migration read chunk is too large")
-                read_sizes.append(int(size))
-                return self._handle.read(size)
+                chunk = self._handle.read(size)
+                self._record_bounded_read(chunk)
+                return chunk
+
+            def readline(self, size=-1):
+                line = self._handle.readline(size)
+                self._record_bounded_read(line)
+                return line
 
             def readlines(self, hint=-1):
                 raise AssertionError("CSV migration attempted to materialize all lines")
@@ -1266,6 +1282,45 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(rows[0]["ema100"], "100.0")
             self.assertEqual(rows[-1]["ema50"], "1049.0")
             self.assertEqual(rows[-1]["ema100"], "1099.0")
+
+    def test_all_runtime_csv_header_migrations_stream_without_unbounded_reads(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            cases = [
+                (bot.csv_path, list(bot.CSV_HEADER)),
+                (bot.cycle_stats_path, list(bot.CYCLE_STATS_HEADER)),
+                (bot.macro_csv_path, list(bot.MACRO_CSV_HEADER)),
+                (bot.external_price_csv_path, list(bot.EXTERNAL_PRICE_CSV_HEADER)),
+                (bot.account_pnl_csv_path, list(bot.ACCOUNT_PNL_CSV_HEADER)),
+                (bot.signal_analytics_csv_path, list(bot.SIGNAL_ANALYTICS_CSV_HEADER)),
+                (bot.diagnostics_csv_path, list(bot.DIAGNOSTICS_CSV_HEADER)),
+            ]
+
+            for path, header in cases:
+                with self.subTest(path=path.name):
+                    legacy_header = header[:-1]
+                    legacy_header[0] = "\ufeff" + legacy_header[0]
+                    with path.open("w", newline="", encoding="utf-8") as handle:
+                        writer = csv.writer(handle)
+                        writer.writerow(legacy_header)
+                        for index in range(250):
+                            writer.writerow([f"{name.lstrip(chr(0xfeff))}_{index}" for name in legacy_header])
+
+                    with patch("pathlib.Path.read_text", side_effect=AssertionError("read_text should not be used")):
+                        with patch("pathlib.Path.read_bytes", side_effect=AssertionError("read_bytes should not be used")):
+                            with self.guard_path_against_unbounded_reads(path) as read_sizes:
+                                bot._ensure_headered_csv_file(path, header)
+
+                    self.assertTrue(read_sizes)
+                    self.assertTrue(all(0 < size <= 1024 * 1024 for size in read_sizes))
+                    with path.open(newline="", encoding="utf-8") as handle:
+                        rows = list(csv.DictReader(handle))
+                        handle.seek(0)
+                        migrated_header = next(csv.reader(handle))
+                    self.assertEqual(migrated_header, header)
+                    self.assertEqual(len(rows), 250)
+                    self.assertEqual(rows[0][header[0]], f"{header[0]}_0")
+                    self.assertEqual(rows[-1][header[-1]], "")
 
     def test_external_price_htx_symbol_to_mexc_returns_empty_on_invalid_inputs(self):
         settings = replace(config.EXTERNAL_PRICE_FEED)
