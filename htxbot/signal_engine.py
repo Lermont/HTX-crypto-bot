@@ -7,8 +7,28 @@ from typing import List, Optional, Tuple
 
 import config
 
-from .indicators import average_true_range, calculate_ema, calculate_rsi, clamp, compute_log_return, realized_volatility
+from .indicators import (
+    average_true_range,
+    calculate_ema,
+    calculate_ema_series,
+    calculate_rsi,
+    clamp,
+    compute_log_return,
+    realized_volatility,
+)
 from .models import SignalContext
+from .signal_math import (
+    btc_risk_context,
+    daily_volatility_context,
+    ema_pullback_recovery_context,
+    ema_signal_direction_metrics,
+    gold_btc_ratio_return,
+    local_reversion_context,
+    relative_strength_context,
+    signal_budget_multiplier,
+    signal_score,
+    volatility_multiplier,
+)
 
 
 class SignalMixin:
@@ -36,48 +56,28 @@ class SignalMixin:
         return atr, atr / close_price
 
     def _signal_score(self, rs30: float, rs60: float, ema50: float, ema100: float, price: float) -> float:
-        if config.POSITION_SIDE == "short":
-            rs_edge = max(0.0, rs30 - rs60)
-        else:
-            rs_edge = max(0.0, rs60 - rs30)
-        ema_edge = 0.0
-        if price > 0:
-            if config.POSITION_SIDE == "short":
-                ema_gap = (ema50 - ema100) / price
-            else:
-                ema_gap = (ema100 - ema50) / price
-            ema_edge = max(0.0, ema_gap) * config.STRATEGY.signal_ema_gap_weight
-        return rs_edge + ema_edge
+        return signal_score(
+            rs30,
+            rs60,
+            ema50,
+            ema100,
+            price,
+            config.POSITION_SIDE,
+            config.STRATEGY.signal_ema_gap_weight,
+        )
 
     def _local_reversion_context(self, closes: List[float], current_close: float) -> dict:
-        window = 15
-        recent = [price for price in closes[-window - 1:] if price > 0]
-        if not recent or current_close <= 0:
-            return {
-                "pullback_from_high": 0.0,
-                "bounce_from_low": 0.0,
-                "local_reversion": 0.0,
-            }
-
-        recent_high = max(recent)
-        recent_low = min(recent)
-        pullback_from_high = (recent_high - current_close) / recent_high if recent_high > 0 else 0.0
-        bounce_from_low = (current_close - recent_low) / recent_low if recent_low > 0 else 0.0
-        return {
-            "pullback_from_high": max(0.0, pullback_from_high),
-            "bounce_from_low": max(0.0, bounce_from_low),
-            "local_reversion": max(0.0, bounce_from_low if config.POSITION_SIDE == "short" else pullback_from_high),
-        }
+        return local_reversion_context(closes, current_close, config.POSITION_SIDE)
 
     def _signal_budget_multiplier(self, score: float) -> float:
         strategy = config.STRATEGY
-        if not strategy.enable_signal_size_scaling:
-            return 1.0
-        reference = max(strategy.signal_score_reference, 1e-12)
-        ratio = self._clamp(score / reference, 0.0, 1.0)
-        return strategy.signal_budget_min_multiplier + (
-            strategy.signal_budget_max_multiplier - strategy.signal_budget_min_multiplier
-        ) * ratio
+        return signal_budget_multiplier(
+            score,
+            strategy.enable_signal_size_scaling,
+            strategy.signal_score_reference,
+            strategy.signal_budget_min_multiplier,
+            strategy.signal_budget_max_multiplier,
+        )
 
     def _is_raw_entry_signal_valid(self, signal: Optional[dict]) -> bool:
         if not signal or not self._signal_direction_valid(signal) or not self.signal_cache.get("benchmark_ok"):
@@ -168,11 +168,10 @@ class SignalMixin:
 
     def _volatility_multiplier(self, volatility: float) -> float:
         strategy = config.STRATEGY
-        if not strategy.enable_volatility_adjusted_ladders:
-            return 1.0
-        reference = max(strategy.volatility_reference, 1e-12)
-        return self._clamp(
-            volatility / reference,
+        return volatility_multiplier(
+            volatility,
+            strategy.enable_volatility_adjusted_ladders,
+            strategy.volatility_reference,
             strategy.min_ladder_volatility_multiplier,
             strategy.max_ladder_volatility_multiplier,
         )
@@ -180,79 +179,30 @@ class SignalMixin:
     def _daily_volatility_context(self, closes: List[float]) -> dict:
         strategy = config.STRATEGY
         window = max(0, int(strategy.daily_volatility_window))
-        if window <= 1 or len(closes) < window + 1:
-            return {
-                "daily_volatility": 0.0,
-                "daily_volatility_multiplier": 1.0,
-                "volatility_budget_multiplier": 1.0,
-            }
-
-        daily_volatility = self._realized_volatility(closes, window) * math.sqrt(window)
-        reference = max(strategy.daily_volatility_reference, 1e-12)
-        daily_volatility_multiplier = daily_volatility / reference
-        volatility_budget_multiplier = 1.0
-        if strategy.enable_volatility_targeted_sizing:
-            if daily_volatility_multiplier > 0:
-                raw_budget_multiplier = 1.0 / daily_volatility_multiplier
-            else:
-                raw_budget_multiplier = strategy.max_volatility_budget_multiplier
-            volatility_budget_multiplier = self._clamp(
-                raw_budget_multiplier,
-                strategy.min_volatility_budget_multiplier,
-                strategy.max_volatility_budget_multiplier,
-            )
-        return {
-            "daily_volatility": daily_volatility,
-            "daily_volatility_multiplier": daily_volatility_multiplier,
-            "volatility_budget_multiplier": volatility_budget_multiplier,
-        }
+        return daily_volatility_context(
+            closes,
+            window,
+            strategy.daily_volatility_reference,
+            strategy.enable_volatility_targeted_sizing,
+            strategy.min_volatility_budget_multiplier,
+            strategy.max_volatility_budget_multiplier,
+        )
 
     def _btc_risk_context(self, benchmark_closes: List[float]) -> dict:
         strategy = config.STRATEGY
-        if not strategy.enable_btc_risk_multiplier:
-            return {
-                "return": 0.0,
-                "volatility": 0.0,
-                "budget_multiplier": 1.0,
-                "ladder_multiplier": 1.0,
-                "reason": "disabled",
-            }
-
-        window = strategy.btc_risk_return_window
-        btc_return = 0.0
-        if window > 0 and len(benchmark_closes) > window:
-            btc_return = self._compute_log_return(benchmark_closes[-1], benchmark_closes[-window - 1])
-        btc_volatility = self._realized_volatility(benchmark_closes, strategy.volatility_window)
-
-        budget_multiplier = 1.0
-        reasons = []
-        if config.POSITION_SIDE == "short":
-            btc_risk_move = btc_return >= -strategy.btc_risk_drop_threshold
-            btc_risk_reason = "btc_rise"
-        else:
-            btc_risk_move = btc_return <= strategy.btc_risk_drop_threshold
-            btc_risk_reason = "btc_drop"
-
-        if btc_risk_move:
-            budget_multiplier *= strategy.btc_risk_drop_budget_multiplier
-            reasons.append(btc_risk_reason)
-        if btc_volatility >= strategy.btc_risk_high_vol_threshold:
-            budget_multiplier *= strategy.btc_risk_vol_budget_multiplier
-            reasons.append("btc_high_vol")
-
-        budget_multiplier = self._clamp(budget_multiplier, strategy.btc_risk_min_budget_multiplier, 1.0)
-        ladder_multiplier = self._clamp(
-            1.0 + (1.0 - budget_multiplier),
-            1.0,
+        return btc_risk_context(
+            benchmark_closes,
+            config.POSITION_SIDE,
+            strategy.enable_btc_risk_multiplier,
+            strategy.btc_risk_return_window,
+            strategy.volatility_window,
+            strategy.btc_risk_drop_threshold,
+            strategy.btc_risk_drop_budget_multiplier,
+            strategy.btc_risk_high_vol_threshold,
+            strategy.btc_risk_vol_budget_multiplier,
+            strategy.btc_risk_min_budget_multiplier,
             strategy.btc_risk_max_ladder_multiplier,
         )
-        return {
-            "return": btc_return,
-            "volatility": btc_volatility,
-            "budget_multiplier": budget_multiplier,
-            "ladder_multiplier": ladder_multiplier,
-            "reason": "+".join(reasons) if reasons else "neutral",
-        }
 
     def _calculate_rsi(self, closes: List[float], period: int) -> float:
         return calculate_rsi(closes, period)
@@ -345,23 +295,7 @@ class SignalMixin:
         btc_closes: List[float],
         direct_closes: Optional[List[float]] = None,
     ) -> float:
-        window = max(1, int(config.MACRO.gold_rsi_period))
-        if direct_closes:
-            values = [price for price in direct_closes if price > 0]
-            if len(values) > window:
-                return self._compute_log_return(values[-1], values[-window - 1])
-            return 0.0
-
-        count = min(len(gold_closes), len(btc_closes))
-        if count <= window:
-            return 0.0
-        ratios = []
-        for gold, btc in zip(gold_closes[-count:], btc_closes[-count:]):
-            if gold > 0 and btc > 0:
-                ratios.append(gold / btc)
-        if len(ratios) <= window:
-            return 0.0
-        return self._compute_log_return(ratios[-1], ratios[-window - 1])
+        return gold_btc_ratio_return(gold_closes, btc_closes, config.MACRO.gold_rsi_period, direct_closes)
 
     def _classify_gold_btc_rsi_context(
         self,
@@ -674,15 +608,7 @@ class SignalMixin:
         )
 
     def _ema_series_from_closes(self, closes: List[float], period: int) -> List[float]:
-        if not closes:
-            return []
-        alpha = 2.0 / (max(1, int(period)) + 1.0)
-        ema = float(closes[0])
-        values = [ema]
-        for price in closes[1:]:
-            ema = float(price) * alpha + ema * (1.0 - alpha)
-            values.append(ema)
-        return values
+        return calculate_ema_series(closes, period)
 
     def _ema_values_from_closes(
         self,
@@ -757,47 +683,15 @@ class SignalMixin:
     ) -> dict:
         lookback, max_cross_age = self._ema_pullback_recovery_windows(converted=converted)
         gap_threshold = max(0.0, self._safe_float(config.STRATEGY.ema_pullback_recovery_gap, 0.0))
-        fast_series = self._ema_series_from_closes(closes, fast_period)
-        slow_series = self._ema_series_from_closes(closes, slow_period)
-        signed_gaps: List[float] = []
-        for fast, slow in zip(fast_series, slow_series):
-            if slow <= 0:
-                signed_gaps.append(0.0)
-                continue
-            if config.POSITION_SIDE == "short":
-                signed_gaps.append((slow - fast) / slow)
-            else:
-                signed_gaps.append((fast - slow) / slow)
-
-        current_gap = signed_gaps[-1] if signed_gaps else 0.0
-        if gap_threshold > 0:
-            recovered = current_gap + 1e-12 >= gap_threshold
-        else:
-            recovered = current_gap > 0
-
-        history_start = max(0, len(signed_gaps) - lookback - 1)
-        recent_gaps = signed_gaps[history_start:]
-        had_pullback = any(gap <= 0 for gap in recent_gaps)
-
-        last_cross_index = None
-        for index in range(max(1, history_start), len(signed_gaps)):
-            if signed_gaps[index] > 0 and signed_gaps[index - 1] <= 0:
-                last_cross_index = index
-
-        cross_age = len(signed_gaps) - 1 - last_cross_index if last_cross_index is not None else -1
-        fresh_cross = cross_age >= 0 and cross_age <= max_cross_age
-        valid = bool(recovered and had_pullback and fresh_cross)
-
-        return {
-            "pullback_valid": valid,
-            "pullback_recovered": recovered,
-            "pullback_had_pullback": had_pullback,
-            "pullback_cross_age_candles": cross_age,
-            "pullback_recovery_lookback_candles": lookback,
-            "pullback_recovery_max_cross_age_candles": max_cross_age,
-            "pullback_recovery_gap": current_gap,
-            "pullback_recovery_min_gap": gap_threshold,
-        }
+        return ema_pullback_recovery_context(
+            closes,
+            fast_period,
+            slow_period,
+            lookback,
+            max_cross_age,
+            gap_threshold,
+            config.POSITION_SIDE,
+        )
 
     def _empty_ema_signal(self, latest_ts: int, reason: str, price: float = 0.0) -> dict:
         return {
@@ -951,13 +845,10 @@ class SignalMixin:
                 price=current_close,
             )
 
-        price_30_ago = closes[-rs_fast_window - 1]
-        btc_30_ago = benchmark_closes[-rs_fast_window - 1]
-        price_60_ago = closes[-rs_slow_window - 1]
-        btc_60_ago = benchmark_closes[-rs_slow_window - 1]
-        rs30 = self._compute_log_return(current_close, price_30_ago) - self._compute_log_return(current_btc, btc_30_ago)
-        rs60 = self._compute_log_return(current_close, price_60_ago) - self._compute_log_return(current_btc, btc_60_ago)
-        btc_return_30m = self._compute_log_return(current_btc, benchmark_closes[-btc_return_window - 1])
+        rs_context = relative_strength_context(closes, benchmark_closes, rs_fast_window, rs_slow_window)
+        rs30 = rs_context["rs30"]
+        rs60 = rs_context["rs60"]
+        btc_return_30m = rs_context["btc_return_30m"]
 
         trigger_periods = {
             "ema_trigger_fast": periods["ema_trigger_fast"],
@@ -1019,40 +910,41 @@ class SignalMixin:
             converted=use_timeframe_ema,
         )
 
-        if config.POSITION_SIDE == "short":
-            macro_valid = ema_macro_fast < ema_macro_slow
-            pullback_valid = bool(pullback_context["pullback_valid"])
-            trigger_valid = ema_trigger_fast < ema_trigger_slow
-            rs_confirm_valid = (not strategy.ema_use_rs_confirmation) or rs60 <= strategy.ema_short_max_rs60
-            btc_entry_valid = (not strategy.ema_use_btc_risk_filter) or btc_return_30m <= strategy.ema_btc_short_max_return_30m
-            macro_gap = (ema_macro_slow - ema_macro_fast) / current_close
-            trigger_gap = (ema_trigger_slow - ema_trigger_fast) / current_close
-            pullback_depth = (ema_pullback_slow - ema_pullback_fast) / current_close
-            rs_edge = max(0.0, -rs60)
-            score = macro_gap + trigger_gap + pullback_depth + rs_edge
-        else:
-            macro_valid = ema_macro_fast > ema_macro_slow
-            pullback_valid = bool(pullback_context["pullback_valid"])
-            trigger_valid = ema_trigger_fast > ema_trigger_slow
-            rs_confirm_valid = (not strategy.ema_use_rs_confirmation) or rs60 >= strategy.ema_long_min_rs60
-            btc_entry_valid = (not strategy.ema_use_btc_risk_filter) or btc_return_30m >= strategy.ema_btc_long_min_return_30m
-            macro_gap = (ema_macro_fast - ema_macro_slow) / current_close
-            trigger_gap = (ema_trigger_fast - ema_trigger_slow) / current_close
-            pullback_depth = (ema_pullback_fast - ema_pullback_slow) / current_close
-            rs_edge = max(0.0, rs60)
-            score = macro_gap + trigger_gap + pullback_depth + rs_edge
+        direction = ema_signal_direction_metrics(
+            config.POSITION_SIDE,
+            current_close,
+            ema_macro_fast,
+            ema_macro_slow,
+            ema_pullback_fast,
+            ema_pullback_slow,
+            ema_trigger_fast,
+            ema_trigger_slow,
+            bool(pullback_context["pullback_valid"]),
+            rs60,
+            btc_return_30m,
+            strategy.ema_use_rs_confirmation,
+            strategy.ema_long_min_rs60,
+            strategy.ema_short_max_rs60,
+            strategy.ema_use_btc_risk_filter,
+            strategy.ema_btc_long_min_return_30m,
+            strategy.ema_btc_short_max_return_30m,
+        )
+        macro_valid = direction["macro_valid"]
+        pullback_valid = direction["pullback_valid"]
+        trigger_valid = direction["trigger_valid"]
+        rs_confirm_valid = direction["rs_confirm_valid"]
+        btc_entry_valid = direction["btc_entry_valid"]
+        macro_gap = direction["macro_gap"]
+        trigger_gap = direction["trigger_gap"]
+        pullback_depth = direction["pullback_depth"]
+        rs_edge = direction["rs_edge"]
+        score = direction["score"]
 
         macro_context = self._macro_context_for_trading(macro_context)
         data_valid = True
         direction_valid = bool(macro_valid)
-        entry_valid = bool(
-            macro_valid
-            and pullback_valid
-            and trigger_valid
-            and rs_confirm_valid
-            and btc_entry_valid
-        )
-        add_valid = bool(macro_valid and (trigger_valid or pullback_valid))
+        entry_valid = direction["entry_valid"]
+        add_valid = direction["add_valid"]
         volatility = self._realized_volatility(closes, strategy.volatility_window)
         volatility_multiplier = self._volatility_multiplier(volatility)
         atr, atr_rate = self._average_true_range_rate(candles, current_close, strategy.ema_averaging_atr_period)

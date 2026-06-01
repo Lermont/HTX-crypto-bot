@@ -23,6 +23,19 @@ def calculate_ema(prices: Sequence[float], period: int) -> float:
     return ema
 
 
+def calculate_ema_series(prices: Sequence[float], period: int) -> list:
+    if len(prices) == 0:
+        return []
+
+    alpha = 2.0 / (max(1, int(period)) + 1.0)
+    ema = float(prices[0])
+    values = [ema]
+    for price in prices[1:]:
+        ema = float(price) * alpha + ema * (1.0 - alpha)
+        values.append(ema)
+    return values
+
+
 def calculate_rsi(closes: Sequence[float], period: int) -> float:
     period = int(period)
     if period <= 0 or len(closes) <= period:
@@ -135,6 +148,7 @@ __all__ = [
     "HAS_NUMPY",
     "average_true_range",
     "calculate_ema",
+    "calculate_ema_series",
     "calculate_rsi",
     "clamp",
     "compute_log_return",
