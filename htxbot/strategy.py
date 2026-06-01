@@ -1262,24 +1262,98 @@ class StrategyMixin:
                 merged.append(dict(step))
         return merged
 
-    def _controlled_loss_move_fraction(self, state: Optional[TradeState]) -> float:
+    def _controlled_loss_cached_signal(self, symbol: str, signal: Optional[dict] = None) -> dict:
+        if isinstance(signal, dict):
+            return signal
+        cache = getattr(self, "signal_cache", {}) or {}
+        symbols = cache.get("symbols") if isinstance(cache, dict) else {}
+        cached = symbols.get(symbol) if isinstance(symbols, dict) and symbol else None
+        return cached if isinstance(cached, dict) else {}
+
+    def _controlled_loss_macro_pressure_context(self, symbol: str = "", signal: Optional[dict] = None) -> dict:
+        strategy = config.STRATEGY
+        signal = self._controlled_loss_cached_signal(symbol, signal)
+        signal_intensity = 0.0
+        directional_gap = 0.0
+        signal_reason = "signal_unavailable"
+        if signal and bool(signal.get("data_valid", True)):
+            for key in ("trend_ema_gap", "macro_gap"):
+                if key in signal:
+                    directional_gap = self._safe_float(signal.get(key), 0.0)
+                    adverse_gap = max(0.0, -directional_gap)
+                    reference = max(1e-12, self._safe_float(strategy.controlled_loss_macro_gap_reference, 0.0))
+                    signal_intensity = self._clamp(adverse_gap / reference, 0.0, 1.0)
+                    signal_reason = key
+                    break
+
+        macro_context = self._macro_guard_context()
+        overlay_intensity = 0.0
+        time_exit_multiplier = self._safe_float(macro_context.get("time_exit_multiplier"), 1.0)
+        if time_exit_multiplier < 1.0:
+            overlay_intensity = max(overlay_intensity, self._clamp(1.0 - time_exit_multiplier, 0.0, 1.0))
+        budget_key = "short_budget_multiplier" if config.POSITION_SIDE == "short" else "long_budget_multiplier"
+        budget_multiplier = self._safe_float(macro_context.get(budget_key), 1.0)
+        if budget_multiplier < 1.0:
+            overlay_intensity = max(overlay_intensity, self._clamp(1.0 - budget_multiplier, 0.0, 1.0))
+
+        intensity = max(signal_intensity, overlay_intensity)
+        max_speed = max(1.0, self._safe_float(strategy.controlled_loss_macro_max_speed_multiplier, 1.0))
+        speed_multiplier = 1.0 + intensity * (max_speed - 1.0)
+        return {
+            "macro_intensity": intensity,
+            "signal_intensity": signal_intensity,
+            "overlay_intensity": overlay_intensity,
+            "speed_multiplier": speed_multiplier,
+            "directional_gap": directional_gap,
+            "macro_regime": str(macro_context.get("regime") or "neutral"),
+            "macro_reason": str(macro_context.get("reason") or signal_reason),
+            "signal_reason": signal_reason,
+            "time_exit_multiplier": time_exit_multiplier,
+            "budget_multiplier": budget_multiplier,
+        }
+
+    def _controlled_loss_ramp_context(
+        self,
+        state: Optional[TradeState],
+        symbol: str = "",
+        signal: Optional[dict] = None,
+    ) -> dict:
         if state is None:
-            return 0.0
+            return {
+                "move_fraction": 0.0,
+                "elapsed_minutes": 0.0,
+                "ramp_minutes": 0.0,
+                "min_move_fraction": 0.0,
+                "macro_intensity": 0.0,
+                "signal_intensity": 0.0,
+                "overlay_intensity": 0.0,
+                "speed_multiplier": 1.0,
+                "directional_gap": 0.0,
+                "hard_move_fraction": 0.0,
+                "macro_regime": "unavailable",
+                "macro_reason": "state_unavailable",
+                "signal_reason": "state_unavailable",
+            }
 
-        # Base move for controlled loss exit
-        base_move = 0.1
+        strategy = config.STRATEGY
+        min_move = self._clamp(
+            self._safe_float(getattr(strategy, "controlled_loss_min_move_fraction", 0.1), 0.1),
+            0.0,
+            1.0,
+        )
+        ramp_minutes = max(0.0, self._safe_float(getattr(strategy, "controlled_loss_ramp_minutes", 24.0 * 60.0), 0.0))
+        pressure = self._controlled_loss_macro_pressure_context(symbol, signal)
+        move_fraction = min_move
+        elapsed_minutes = 0.0
 
-        # If in controlled loss mode, we want to reach 1.0 (market price) within 24 hours
-        # from the moment it was activated.
         if state.sell_ladder_mode == "controlled_loss_exit" and state.time_exit_activated_at:
-            elapsed_minutes = (time.time() - state.time_exit_activated_at) / 60.0
-            # Linear ramp from 0.1 to 1.0 over 1440 minutes (24 hours)
-            time_move = base_move + (1.0 - base_move) * (elapsed_minutes / 1440.0)
-            base_move = max(base_move, time_move)
+            elapsed_minutes = max(0.0, (time.time() - state.time_exit_activated_at) / 60.0)
+            progress = 1.0 if ramp_minutes <= 0 else (elapsed_minutes * pressure["speed_multiplier"]) / ramp_minutes
+            time_move = min_move + (1.0 - min_move) * progress
+            move_fraction = max(move_fraction, time_move)
 
-        # Existing hard time exit logic as a secondary ramp
+        hard_move = 0.0
         if self._hard_time_exit_elapsed(state):
-            strategy = config.STRATEGY
             step_minutes = max(0.0, strategy.hard_time_exit_step_minutes)
             step_increase = max(0.0, strategy.hard_time_exit_fraction_step)
             if step_minutes > 0 and step_increase > 0:
@@ -1287,10 +1361,31 @@ class StrategyMixin:
                     0.0,
                     self._position_held_minutes(state) - max(0.0, strategy.hard_time_exit_after_minutes),
                 )
-                hard_move = 0.1 + (overdue_minutes // step_minutes) * step_increase
-                base_move = max(base_move, hard_move)
+                hard_move = min_move + (overdue_minutes // step_minutes) * step_increase
+                move_fraction = max(move_fraction, hard_move)
 
-        return self._clamp(base_move, 0.0, 1.0)
+        context = dict(pressure)
+        context.update(
+            {
+                "move_fraction": self._clamp(move_fraction, 0.0, 1.0),
+                "elapsed_minutes": elapsed_minutes,
+                "ramp_minutes": ramp_minutes,
+                "min_move_fraction": min_move,
+                "hard_move_fraction": self._clamp(hard_move, 0.0, 1.0),
+            }
+        )
+        return context
+
+    def _controlled_loss_move_fraction(
+        self,
+        state: Optional[TradeState],
+        symbol: str = "",
+        signal: Optional[dict] = None,
+    ) -> float:
+        return self._safe_float(
+            self._controlled_loss_ramp_context(state, symbol=symbol, signal=signal).get("move_fraction"),
+            0.0,
+        )
 
     def _sell_ladder_plan(
         self,
@@ -1327,12 +1422,27 @@ class StrategyMixin:
 
         if mode == "controlled_loss_exit":
             fractions = tuple(strategy.ema_exit_ladder_fractions)
-            move_fraction = self._controlled_loss_move_fraction(state)
+            ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol)
+            move_fraction = self._safe_float(ramp_context.get("move_fraction"), 0.0)
             steps = [
                 {"fraction": fraction, "markup": move_fraction, "runner": False}
                 for fraction in fractions
             ]
             context["ladder_name"] = "controlled_loss"
+            context.update(
+                {
+                    "controlled_loss_move_fraction": move_fraction,
+                    "controlled_loss_macro_intensity": self._safe_float(ramp_context.get("macro_intensity"), 0.0),
+                    "controlled_loss_signal_intensity": self._safe_float(ramp_context.get("signal_intensity"), 0.0),
+                    "controlled_loss_overlay_intensity": self._safe_float(ramp_context.get("overlay_intensity"), 0.0),
+                    "controlled_loss_speed_multiplier": self._safe_float(ramp_context.get("speed_multiplier"), 1.0),
+                    "controlled_loss_directional_gap": self._safe_float(ramp_context.get("directional_gap"), 0.0),
+                    "controlled_loss_elapsed_minutes": self._safe_float(ramp_context.get("elapsed_minutes"), 0.0),
+                    "controlled_loss_ramp_minutes": self._safe_float(ramp_context.get("ramp_minutes"), 0.0),
+                    "controlled_loss_macro_regime": str(ramp_context.get("macro_regime") or "neutral"),
+                    "controlled_loss_macro_reason": str(ramp_context.get("macro_reason") or "neutral"),
+                }
+            )
             return steps, context
 
         if mode != "normal" or not strategy.ema_adaptive_exit_enabled:
@@ -1537,6 +1647,15 @@ class StrategyMixin:
         )
         strategy = config.STRATEGY
         trailing_enabled = bool(strategy.ema_exit_trailing_enabled and use_trailing_exit)
+        controlled_loss_signature = ""
+        if mode == "controlled_loss_exit":
+            controlled_loss_signature = (
+                f"|controlled_loss_ramp={strategy.controlled_loss_min_move_fraction:.8f}:"
+                f"{strategy.controlled_loss_ramp_minutes:.4f}:"
+                f"{strategy.controlled_loss_reprice_minutes:.4f}:"
+                f"{strategy.controlled_loss_macro_gap_reference:.8f}:"
+                f"{strategy.controlled_loss_macro_max_speed_multiplier:.4f}"
+            )
         return (
             f"{mode}|strategy=ema_pullback|direction={config.POSITION_SIDE}|exit_side={config.EXIT_SIDE}|"
             f"plan={plan}|ladder={plan_context.get('ladder_name', mode)}|"
@@ -1557,6 +1676,7 @@ class StrategyMixin:
             f"{strategy.ema_exit_decay_first_markup_cap:.8f}|"
             f"decay_max={strategy.ema_exit_decay_max_markup_after_hours:.4f}:"
             f"{strategy.ema_exit_decay_max_markup:.8f}"
+            f"{controlled_loss_signature}"
         )
 
     def _should_use_split_exit_ladder(self, symbol: str, state: Optional[TradeState], mode: str) -> bool:
@@ -1754,6 +1874,15 @@ class StrategyMixin:
             "funding_reason": "disabled",
             "controlled_reference_price": 0.0,
             "controlled_loss_budget": 0.0,
+            "controlled_loss_macro_intensity": 0.0,
+            "controlled_loss_signal_intensity": 0.0,
+            "controlled_loss_overlay_intensity": 0.0,
+            "controlled_loss_speed_multiplier": 1.0,
+            "controlled_loss_directional_gap": 0.0,
+            "controlled_loss_elapsed_minutes": 0.0,
+            "controlled_loss_ramp_minutes": 0.0,
+            "controlled_loss_macro_regime": "neutral",
+            "controlled_loss_macro_reason": "neutral",
             "external_spread_bps": 0.0,
             "external_reason": "unavailable",
         }
@@ -2050,6 +2179,23 @@ class StrategyMixin:
         sell_context = self._sell_ladder_context(symbol, mode=mode)
         sell_context["external_spread_bps"] = self._safe_float(plan_context.get("external_spread_bps"), 0.0)
         sell_context["external_reason"] = str(plan_context.get("external_reason") or sell_context.get("external_reason") or "unavailable")
+        if mode == "controlled_loss_exit":
+            for key in (
+                "controlled_loss_macro_intensity",
+                "controlled_loss_signal_intensity",
+                "controlled_loss_overlay_intensity",
+                "controlled_loss_speed_multiplier",
+                "controlled_loss_directional_gap",
+                "controlled_loss_elapsed_minutes",
+                "controlled_loss_ramp_minutes",
+            ):
+                sell_context[key] = self._safe_float(plan_context.get(key), self._safe_float(sell_context.get(key), 0.0))
+            sell_context["controlled_loss_macro_regime"] = str(
+                plan_context.get("controlled_loss_macro_regime") or sell_context.get("controlled_loss_macro_regime") or "neutral"
+            )
+            sell_context["controlled_loss_macro_reason"] = str(
+                plan_context.get("controlled_loss_macro_reason") or sell_context.get("controlled_loss_macro_reason") or "neutral"
+            )
         for index, step, contracts in allocations:
             markup = self._safe_float(step.get("markup"), 0.0)
 
@@ -2184,6 +2330,10 @@ class StrategyMixin:
                 ref["loss_move_fraction"] = markup
                 ref["loss_budget_at_placement"] = self._safe_float(sell_context.get("controlled_loss_budget"), 0.0)
                 ref["reference_price_at_placement"] = self._safe_float(sell_context.get("controlled_reference_price"), 0.0)
+                ref["loss_macro_intensity"] = self._safe_float(sell_context.get("controlled_loss_macro_intensity"), 0.0)
+                ref["loss_speed_multiplier"] = self._safe_float(sell_context.get("controlled_loss_speed_multiplier"), 1.0)
+                ref["loss_directional_macro_gap"] = self._safe_float(sell_context.get("controlled_loss_directional_gap"), 0.0)
+                ref["loss_macro_regime"] = str(sell_context.get("controlled_loss_macro_regime") or "neutral")
             state.sell_ladder_orders.append(ref)
             event = "exit_ladder_rebuilt" if rebuild else "exit_ladder_placed"
             action = "rebuilt" if rebuild else "placed"
@@ -2239,6 +2389,11 @@ class StrategyMixin:
                     f"position_ratio={plan_context.get('position_ratio', 1.0):.4f};"
                     f"position_age_hours={plan_context.get('position_age_hours', 0.0):.2f};"
                     f"runner_contracts={runner_contracts:.12f};"
+                    f"controlled_loss_move={plan_context.get('controlled_loss_move_fraction', 0.0):.4f};"
+                    f"controlled_loss_macro_intensity={sell_context.get('controlled_loss_macro_intensity', 0.0):.3f};"
+                    f"controlled_loss_speed={sell_context.get('controlled_loss_speed_multiplier', 1.0):.3f};"
+                    f"controlled_loss_gap={sell_context.get('controlled_loss_directional_gap', 0.0):.6f};"
+                    f"controlled_loss_macro_regime={sell_context.get('controlled_loss_macro_regime', 'neutral')};"
                     f"external_spread_bps={sell_context.get('external_spread_bps', 0.0):.4f};"
                     f"external_reason={sell_context.get('external_reason', 'unavailable')};"
                     f"{sell_context.get('funding_reason', 'neutral')}"
@@ -4159,6 +4314,7 @@ class StrategyMixin:
         state = self._get_state(symbol)
         if not state.sell_ladder_orders:
             return True
+        ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol)
         self._log_event(
             "WARNING",
             f"Controlled loss exit ladder activated for {symbol}: contracts={close_contracts}",
@@ -4172,7 +4328,11 @@ class StrategyMixin:
                 f"{reason};drawdown={self._position_drawdown(state, reference_price):.5f};"
                 f"hard_close_fraction={self._hard_time_exit_close_fraction(state):.3f};"
                 f"loss_budget={self._controlled_loss_available_budget():.8f};"
-                f"max_loss={self._controlled_loss_max_loss_on_notional(state):.5f}"
+                f"max_loss={self._controlled_loss_max_loss_on_notional(state):.5f};"
+                f"loss_move={self._safe_float(ramp_context.get('move_fraction'), 0.0):.4f};"
+                f"macro_intensity={self._safe_float(ramp_context.get('macro_intensity'), 0.0):.3f};"
+                f"speed={self._safe_float(ramp_context.get('speed_multiplier'), 1.0):.3f};"
+                f"macro_gap={self._safe_float(ramp_context.get('directional_gap'), 0.0):.6f}"
             ),
         )
         return True
@@ -4280,6 +4440,8 @@ class StrategyMixin:
     def _time_exit_reprice_after_minutes(self, mode: str) -> float:
         if mode in {"breakeven", "urgent_time_exit"}:
             return max(0.0, config.STRATEGY.ema_breakeven_reprice_minutes)
+        if mode == "controlled_loss_exit":
+            return max(0.0, config.STRATEGY.controlled_loss_reprice_minutes)
         return 0.0
 
     def _maybe_reprice_time_exit_ladder(self, symbol: str) -> bool:

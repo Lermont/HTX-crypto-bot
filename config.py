@@ -345,6 +345,11 @@ class StrategySettings:
     controlled_loss_profit_bank_today_fraction: float
     controlled_loss_profit_bank_7d_fraction: float
     controlled_loss_min_bank_usdt: float
+    controlled_loss_min_move_fraction: float
+    controlled_loss_ramp_minutes: float
+    controlled_loss_reprice_minutes: float
+    controlled_loss_macro_gap_reference: float
+    controlled_loss_macro_max_speed_multiplier: float
     max_unhealthy_positions_for_new_entries: int
     cancel_unsafe_hidden_close_orders: bool
     enable_volatility_adjusted_ladders: bool
@@ -694,6 +699,8 @@ def _validate_profile(profile: "BotProfile") -> None:
         "account_averaging_falling_guard_fraction",
         "account_averaging_budget_scale",
         "hard_stop_loss_pct",
+        "controlled_loss_max_position_fraction",
+        "controlled_loss_min_move_fraction",
     ):
         value = getattr(profile.strategy, setting_name)
         if value < 0.0 or value > 1.0:
@@ -1018,6 +1025,11 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         controlled_loss_profit_bank_today_fraction=0.0,
         controlled_loss_profit_bank_7d_fraction=0.0,
         controlled_loss_min_bank_usdt=0.0,
+        controlled_loss_min_move_fraction=_env_float("CONTROLLED_LOSS_MIN_MOVE_FRACTION", 0.10, profile=name),
+        controlled_loss_ramp_minutes=_env_float("CONTROLLED_LOSS_RAMP_MINUTES", 24.0 * 60.0, profile=name),
+        controlled_loss_reprice_minutes=_env_float("CONTROLLED_LOSS_REPRICE_MINUTES", 60.0, profile=name),
+        controlled_loss_macro_gap_reference=_env_float("CONTROLLED_LOSS_MACRO_GAP_REFERENCE", 0.02, profile=name),
+        controlled_loss_macro_max_speed_multiplier=_env_float("CONTROLLED_LOSS_MACRO_MAX_SPEED_MULTIPLIER", 2.0, profile=name),
         max_unhealthy_positions_for_new_entries=_env_int("MAX_UNHEALTHY_POSITIONS_FOR_NEW_ENTRIES", 2, profile=name),
         cancel_unsafe_hidden_close_orders=_env_bool("CANCEL_UNSAFE_HIDDEN_CLOSE_ORDERS", True, profile=name),
         enable_volatility_adjusted_ladders=False,

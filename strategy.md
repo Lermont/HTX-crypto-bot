@@ -335,11 +335,12 @@ Macro overlay сравнивает XAUT/BTC context через RSI и может
 - дубли EMA/ladder полей в `SignalSettings`, `SellSettings` и `StrategySettings`;
 - legacy entry-expansion thresholds и multipliers;
 - неиспользуемые time-exit/reprice/dynamic-time-exit поля;
-- неиспользуемые controlled-loss ladder/reprice поля;
+- старые неиспользуемые controlled-loss ladder поля;
 - неиспользуемые external-price поля `use_existing_trading_universe`, `only_usdt_pairs`, `reconnect_on_stale_ms`, `tighten_ladder_factor`;
 - неиспользуемый monitoring TTL.
 
 Оставлены выключенные по умолчанию, но реально подключенные механики: volatility sizing/recovery, BTC risk multiplier, funding-aware exit, dynamic profit floor, hard/controlled/absolute force exit helpers.
+Controlled-loss exit при активации двигает цену закрытия от `CONTROLLED_LOSS_MIN_MOVE_FRACTION` к reference price за `CONTROLLED_LOSS_RAMP_MINUTES`; скорость ramp ускоряется при отрицательном directional `trend_ema_gap`/`macro_gap` и неблагоприятном macro overlay, а stale ladder перестраивается через `CONTROLLED_LOSS_REPRICE_MINUTES`.
 
 ## 17. Live-Готовность
 
