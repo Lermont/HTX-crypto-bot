@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import threading
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -19,6 +18,7 @@ from .concurrency import instance_rlock
 
 
 _monitoring_global_lock = threading.RLock()
+_CSV_STREAM_COPY_CHUNK_SIZE = 1024 * 1024
 
 
 class MonitoringMixin:
@@ -73,37 +73,51 @@ class MonitoringMixin:
             return
 
         if normalized_first_row and normalized_first_row[0] == header[0]:
-            tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-            try:
-                with path.open("r", newline="", encoding="utf-8") as src, tmp_path.open("w", newline="", encoding="utf-8") as dst:
-                    reader = csv.DictReader(src)
-                    if reader.fieldnames:
-                        reader.fieldnames = normalized_first_row
-                    writer = csv.DictWriter(dst, fieldnames=header, extrasaction="ignore")
-                    writer.writeheader()
-                    for row in reader:
-                        # Migration for legacy ema names
-                        if "ema30" in row and "ema50" not in row:
-                            row["ema50"] = row["ema30"]
-                        if "ema60" in row and "ema100" not in row:
-                            row["ema100"] = row["ema60"]
-                        writer.writerow({name: row.get(name, "") for name in header})
-                self._replace_path_with_retry(tmp_path, path)
-                return
-            except Exception as exc:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                self.log.warning("Could not replace CSV header for %s: %s", path, exc)
-                return
+            self._rewrite_headered_csv_file(path, header, normalized_first_row)
+            return
 
-        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        self._prepend_csv_header(path, header)
+
+    def _csv_tmp_path(self, path: Path) -> Path:
+        return path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+
+    def _rewrite_headered_csv_file(self, path: Path, header: Sequence[str], normalized_first_row: Sequence[str]):
+        tmp_path = self._csv_tmp_path(path)
+        try:
+            with path.open("r", newline="", encoding="utf-8") as src, tmp_path.open("w", newline="", encoding="utf-8") as dst:
+                reader = csv.DictReader(src)
+                if reader.fieldnames:
+                    reader.fieldnames = list(normalized_first_row)
+                writer = csv.DictWriter(dst, fieldnames=header, extrasaction="ignore")
+                writer.writeheader()
+                for row in reader:
+                    self._apply_legacy_csv_aliases(row)
+                    writer.writerow({name: row.get(name, "") for name in header})
+            self._replace_path_with_retry(tmp_path, path)
+        except Exception as exc:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.log.warning("Could not replace CSV header for %s: %s", path, exc)
+
+    def _apply_legacy_csv_aliases(self, row: Dict[str, Any]):
+        legacy_aliases = {"ema50": "ema30", "ema100": "ema60"}
+        for current_name, legacy_name in legacy_aliases.items():
+            if legacy_name in row and current_name not in row:
+                row[current_name] = row[legacy_name]
+
+    def _prepend_csv_header(self, path: Path, header: Sequence[str]):
+        tmp_path = self._csv_tmp_path(path)
         try:
             with tmp_path.open("w", newline="", encoding="utf-8") as dst:
                 csv.writer(dst).writerow(header)
                 with path.open("r", newline="", encoding="utf-8") as src:
-                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+                    while True:
+                        chunk = src.read(_CSV_STREAM_COPY_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
             self._replace_path_with_retry(tmp_path, path)
         except Exception as exc:
             try:

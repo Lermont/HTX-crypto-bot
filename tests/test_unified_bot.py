@@ -453,6 +453,53 @@ class UnifiedBotTests(unittest.TestCase):
         instance._ensure_diagnostics_files()
         return instance
 
+    @contextmanager
+    def guard_path_against_unbounded_reads(self, target_path: Path, max_read_size: int = 1024 * 1024):
+        target_path = target_path.resolve()
+        real_open = Path.open
+        read_sizes = []
+
+        class GuardedReader:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def __enter__(self):
+                self._handle.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return self._handle.__exit__(exc_type, exc, tb)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._handle)
+
+            def read(self, size=-1):
+                if size is None or int(size) < 0:
+                    raise AssertionError("CSV migration attempted an unbounded read")
+                if int(size) > max_read_size:
+                    raise AssertionError("CSV migration read chunk is too large")
+                read_sizes.append(int(size))
+                return self._handle.read(size)
+
+            def readlines(self, hint=-1):
+                raise AssertionError("CSV migration attempted to materialize all lines")
+
+            def __getattr__(self, name):
+                return getattr(self._handle, name)
+
+        def guarded_open(path_self, *args, **kwargs):
+            mode = str(args[0] if args else kwargs.get("mode", "r"))
+            handle = real_open(path_self, *args, **kwargs)
+            if "r" in mode and Path(path_self).resolve() == target_path:
+                return GuardedReader(handle)
+            return handle
+
+        with patch("pathlib.Path.open", new=guarded_open):
+            yield read_sizes
+
     def ema_test_strategy(self, **overrides):
         defaults = {
             "ema_macro_fast_minutes": 10,
@@ -1112,6 +1159,41 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertNotIn("ema30", rows[-1])
             self.assertNotIn("ema60", rows[-1])
 
+    def test_trade_csv_header_migration_streams_legacy_ema_columns_without_unbounded_reads(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            legacy_header = [
+                "ema30" if name == "ema50" else "ema60" if name == "ema100" else name
+                for name in bot.CSV_HEADER
+            ]
+            with bot.csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(legacy_header)
+                for index in range(1000):
+                    row = {name: "" for name in legacy_header}
+                    row.update(
+                        {
+                            "ts": str(1000 + index),
+                            "level": "INFO",
+                            "event": "ema_signal_valid",
+                            "ema30": f"{50.0 + index:.1f}",
+                            "ema60": f"{100.0 + index:.1f}",
+                        }
+                    )
+                    writer.writerow([row[name] for name in legacy_header])
+
+            with self.guard_path_against_unbounded_reads(bot.csv_path) as read_sizes:
+                bot._ensure_csv_file()
+
+            self.assertTrue(all(0 < size <= 1024 * 1024 for size in read_sizes))
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1000)
+            self.assertEqual(rows[0]["ema50"], "50.0")
+            self.assertEqual(rows[0]["ema100"], "100.0")
+            self.assertEqual(rows[-1]["ema50"], "1049.0")
+            self.assertEqual(rows[-1]["ema100"], "1099.0")
+
     def test_external_price_htx_symbol_to_mexc_returns_empty_on_invalid_inputs(self):
         settings = replace(config.EXTERNAL_PRICE_FEED)
         feed = ExternalPriceFeed(settings, clock=lambda: 1000.0)
@@ -1184,7 +1266,11 @@ class UnifiedBotTests(unittest.TestCase):
             path.write_text("legacy,row\n" + ("1,2\n" * 1000), encoding="utf-8")
 
             with patch("pathlib.Path.read_text", side_effect=AssertionError("read_text should not be used")):
-                bot._ensure_headered_csv_file(path, bot.CSV_HEADER)
+                with self.guard_path_against_unbounded_reads(path) as read_sizes:
+                    bot._ensure_headered_csv_file(path, bot.CSV_HEADER)
+
+            self.assertTrue(read_sizes)
+            self.assertTrue(all(0 < size <= 1024 * 1024 for size in read_sizes))
 
             with path.open(newline="", encoding="utf-8") as handle:
                 first_row = next(csv.reader(handle))
