@@ -158,13 +158,17 @@ Averaging:
 ```dotenv
 EMA_AVERAGING_ENABLED=true
 EMA_AVERAGING_DRAWDOWN_STEP=0.01
+EMA_AVERAGING_MIN_DRAWDOWN_STEP=0.01
 EMA_AVERAGING_BASE_FRACTION=0.50
 EMA_AVERAGING_POWER=1.0
 EMA_AVERAGING_INTERVAL_HOURS=8
+EMA_AVERAGING_MIN_ATR_MULTIPLIER=1.0
+EMA_AVERAGING_MIN_DAILY_VOLATILITY_FRACTION=0.18
+EMA_AVERAGING_REQUIRE_PULLBACK_RECOVERY=true
 EMA_MAX_AVERAGING_STAGES=2
 ```
 
-`EMA_AVERAGING_BASE_FRACTION` is the fraction of the current open position used for each averaging stage. `EMA_MAX_AVERAGING_STAGES` is capped at 2.
+`EMA_AVERAGING_BASE_FRACTION` is the fraction of the current open position used for each averaging stage. `EMA_MAX_AVERAGING_STAGES` is capped at 2. The effective averaging drawdown threshold is never below `EMA_AVERAGING_MIN_DRAWDOWN_STEP * stage`, and live signals can widen it with ATR and daily-volatility floors. Averaging also requires pullback recovery by default, so a valid trigger alone cannot average into a no-rebound trend.
 
 Breakeven:
 

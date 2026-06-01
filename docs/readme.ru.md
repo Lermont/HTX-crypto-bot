@@ -65,7 +65,7 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 - `BOT_PROFILES=long,short`.
 - Вход по умолчанию делится на два limit-ордера.
 - Новые входы проходят quality gates: score, RS60, RS30, top-N, rate-limit и crowded-market rules.
-- Усреднение ограничено числом стадий, интервалом, drawdown step и здоровьем сигнала.
+- Усреднение ограничено числом стадий, интервалом, hard-floor drawdown, ATR/daily-volatility floors и pullback recovery.
 - Breakeven активируется после заданного времени удержания, запрещает дальнейшие доборы и переставляет reduce-only выход.
 - Combined mode не даёт long и short профилям открыть встречную экспозицию по одной монете.
 

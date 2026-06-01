@@ -179,19 +179,32 @@ EMA_ENTRY_LADDER_OFFSETS=0.0,0.01
 - BTC/external directional gates не блокируют добор;
 - выдержан `EMA_AVERAGING_INTERVAL_HOURS`;
 - не превышен `EMA_MAX_AVERAGING_STAGES`.
+- `pullback_valid=true`, если `EMA_AVERAGING_REQUIRE_PULLBACK_RECOVERY=true`.
 
 Порог drawdown:
 
 ```text
-stage_1 = EMA_AVERAGING_DRAWDOWN_STEP
-stage_2 = EMA_AVERAGING_DRAWDOWN_STEP * 2
+stage_1 = max(AVERAGING_DRAWDOWN_STEP_1, EMA_AVERAGING_MIN_DRAWDOWN_STEP)
+stage_2 = max(AVERAGING_DRAWDOWN_STEP_2, EMA_AVERAGING_MIN_DRAWDOWN_STEP * 2)
 ...
+```
+
+Effective threshold дополнительно расширяется, если сигнал содержит ATR или daily volatility:
+
+```text
+atr_floor = atr_rate * EMA_AVERAGING_MIN_ATR_MULTIPLIER * stage
+daily_vol_floor = daily_volatility * EMA_AVERAGING_MIN_DAILY_VOLATILITY_FRACTION * stage
+effective_threshold = max(configured_stage, min_stage_floor, atr_floor, daily_vol_floor)
 ```
 
 По умолчанию:
 
 ```text
 EMA_AVERAGING_DRAWDOWN_STEP=0.01
+EMA_AVERAGING_MIN_DRAWDOWN_STEP=0.01
+EMA_AVERAGING_MIN_ATR_MULTIPLIER=1.0
+EMA_AVERAGING_MIN_DAILY_VOLATILITY_FRACTION=0.18
+EMA_AVERAGING_REQUIRE_PULLBACK_RECOVERY=true
 EMA_MAX_AVERAGING_STAGES=2
 ```
 

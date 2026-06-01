@@ -262,12 +262,16 @@ class StrategySettings:
     ema_exit_trailing_take_profit_markup: float
     ema_averaging_enabled: bool
     ema_averaging_drawdown_step: float
+    ema_averaging_min_drawdown_step: float
     ema_averaging_base_fraction: float
     ema_averaging_power: float
     ema_averaging_interval_hours: float
     ema_averaging_atr_enabled: bool
     ema_averaging_atr_period: int
     ema_averaging_atr_multiplier: float
+    ema_averaging_min_atr_multiplier: float
+    ema_averaging_min_daily_volatility_fraction: float
+    ema_averaging_require_pullback_recovery: bool
     ema_max_averaging_stages: int
     account_pnl_enabled: bool
     account_pnl_window_minutes: float
@@ -853,6 +857,10 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
             profile=name,
         ),
     )
+    ema_averaging_min_drawdown_step = max(
+        0.001,
+        _env_float("EMA_AVERAGING_MIN_DRAWDOWN_STEP", 0.01, profile=name),
+    )
     ema_averaging_drawdown_step = _env_float("EMA_AVERAGING_DRAWDOWN_STEP", 0.01, profile=name)
     ema_averaging_base_fraction = _env_float(
         "EMA_AVERAGING_BASE_FRACTION",
@@ -860,7 +868,13 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         profile=name,
     )
     ema_averaging_power = _env_float("EMA_AVERAGING_POWER", 1.0, profile=name)
-    ema_max_averaging_stages = _env_int("EMA_MAX_AVERAGING_STAGES", 2, profile=name)
+    configured_ema_max_averaging_stages = _env_int("EMA_MAX_AVERAGING_STAGES", 2, profile=name)
+    if configured_ema_max_averaging_stages > 2:
+        _add_config_warning(
+            f"{name}: live ema_max_averaging_stages={configured_ema_max_averaging_stages} "
+            "is capped at the conservative launch maximum of 2"
+        )
+    ema_max_averaging_stages = min(max(0, configured_ema_max_averaging_stages), 2)
     averaging_stage_count = max(0, ema_max_averaging_stages)
     strategy = StrategySettings(
         ema_strategy_enabled=_env_bool("EMA_STRATEGY_ENABLED", True, profile=name),
@@ -920,12 +934,30 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ),
         ema_averaging_enabled=_env_bool("EMA_AVERAGING_ENABLED", True, profile=name),
         ema_averaging_drawdown_step=ema_averaging_drawdown_step,
+        ema_averaging_min_drawdown_step=ema_averaging_min_drawdown_step,
         ema_averaging_base_fraction=ema_averaging_base_fraction,
         ema_averaging_power=ema_averaging_power,
         ema_averaging_interval_hours=_env_float("EMA_AVERAGING_INTERVAL_HOURS", 8.0, profile=name),
         ema_averaging_atr_enabled=_env_bool("EMA_AVERAGING_ATR_ENABLED", False, profile=name),
         ema_averaging_atr_period=max(1, _env_int("EMA_AVERAGING_ATR_PERIOD", 14, profile=name)),
         ema_averaging_atr_multiplier=max(0.0, _env_float("EMA_AVERAGING_ATR_MULTIPLIER", 1.0, profile=name)),
+        ema_averaging_min_atr_multiplier=max(
+            0.0,
+            _env_float("EMA_AVERAGING_MIN_ATR_MULTIPLIER", 1.0, profile=name),
+        ),
+        ema_averaging_min_daily_volatility_fraction=max(
+            0.0,
+            _env_float(
+                "EMA_AVERAGING_MIN_DAILY_VOLATILITY_FRACTION",
+                _env_float("AVERAGING_DRAWDOWN_DAILY_VOLATILITY_FRACTION", 0.18, profile=name),
+                profile=name,
+            ),
+        ),
+        ema_averaging_require_pullback_recovery=_env_bool(
+            "EMA_AVERAGING_REQUIRE_PULLBACK_RECOVERY",
+            True,
+            profile=name,
+        ),
         ema_max_averaging_stages=ema_max_averaging_stages,
         account_pnl_enabled=_env_bool("ACCOUNT_PNL_ENABLED", True, profile=name),
         account_pnl_window_minutes=_env_float("ACCOUNT_PNL_WINDOW_MINUTES", 360.0, profile=name),
@@ -985,10 +1017,13 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         entry_spread_filter_block_if_unavailable=_env_bool("ENTRY_SPREAD_FILTER_BLOCK_IF_UNAVAILABLE", False, profile=name),
         max_buy_stages=_env_int("MAX_BUY_STAGES", ema_max_averaging_stages + 1, profile=name),
         averaging_drawdown_steps=tuple(
-            _env_float(
-                f"AVERAGING_DRAWDOWN_STEP_{index}",
-                ema_averaging_drawdown_step * index,
-                profile=name,
+            max(
+                ema_averaging_min_drawdown_step * index,
+                _env_float(
+                    f"AVERAGING_DRAWDOWN_STEP_{index}",
+                    ema_averaging_drawdown_step * index,
+                    profile=name,
+                ),
             )
             for index in range(1, averaging_stage_count + 1)
         ),

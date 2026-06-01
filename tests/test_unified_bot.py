@@ -3324,6 +3324,89 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 0)
 
+    def test_ema_averaging_hard_floor_blocks_zero_configured_drawdown(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(
+                config.STRATEGY,
+                ema_averaging_interval_hours=0.0,
+                ema_averaging_drawdown_step=0.0,
+                ema_averaging_min_drawdown_step=0.01,
+                averaging_drawdown_steps=(0.0, 0.0),
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 20.0
+                state.position_available = 20.0
+                state.entry_price = 10.0
+                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}]
+
+                bot.exchange.ticker = {"bid": 9.95, "ask": 9.97, "last": 9.96}
+                bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
+                self.assertFalse(state.entry_orders)
+                self.assertEqual(state.average_stage, 0)
+
+                bot.exchange.ticker = {"bid": 9.88, "ask": 9.90, "last": 9.89}
+                bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1001))
+                self.assertTrue(state.entry_orders)
+                self.assertEqual(state.average_stage, 1)
+
+    def test_ema_averaging_hard_atr_floor_applies_when_optional_atr_disabled(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(
+                config.STRATEGY,
+                ema_averaging_interval_hours=0.0,
+                averaging_drawdown_steps=(0.01, 0.02),
+                ema_averaging_atr_enabled=False,
+                ema_averaging_min_atr_multiplier=1.0,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 20.0
+                state.position_available = 20.0
+                state.entry_price = 10.0
+                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}]
+                bot.exchange.ticker = {"bid": 9.80, "ask": 9.82, "last": 9.81}
+                signal = self.entry_signal(ts=1000)
+                signal["atr_rate"] = 0.03
+
+                bot._maybe_place_average_buy(SYMBOL, signal)
+
+                self.assertFalse(state.entry_orders)
+                self.assertEqual(state.average_stage, 0)
+
+    def test_ema_averaging_requires_pullback_recovery_not_trigger_only(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(
+                config.STRATEGY,
+                ema_averaging_interval_hours=0.0,
+                ema_averaging_require_pullback_recovery=True,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 20.0
+                state.position_available = 20.0
+                state.entry_price = 10.2
+                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                bot.exchange.ticker = {"bid": 9.75, "ask": 9.77, "last": 9.76}
+                signal = self.entry_signal(ts=1000)
+                signal["entry_valid"] = False
+                signal["add_valid"] = True
+                signal["trigger_valid"] = True
+                signal["pullback_valid"] = False
+                signal["pullback_recovery_gap"] = -0.002
+                signal["pullback_recovery_min_gap"] = 0.001
+
+                bot._maybe_place_average_buy(SYMBOL, signal)
+
+                self.assertFalse(state.entry_orders)
+                self.assertEqual(state.average_stage, 0)
+                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertIn("ema_averaging_pullback_recovery_required", rows[-1]["block_reason"])
+
     def test_ema_averaging_places_power_sized_entry_after_drawdown(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = config.RUNTIME
@@ -3855,12 +3938,16 @@ class UnifiedBotTests(unittest.TestCase):
     def test_ema_live_launch_averaging_defaults_are_conservative(self):
         with config.use_profile("long"):
             self.assertEqual(config.STRATEGY.ema_averaging_drawdown_step, 0.01)
+            self.assertEqual(config.STRATEGY.ema_averaging_min_drawdown_step, 0.01)
             self.assertEqual(config.STRATEGY.averaging_drawdown_steps, (0.01, 0.02))
             self.assertEqual(config.STRATEGY.ema_averaging_base_fraction, 0.50)
             self.assertEqual(config.STRATEGY.ema_averaging_power, 1.0)
             self.assertFalse(config.STRATEGY.ema_averaging_atr_enabled)
             self.assertEqual(config.STRATEGY.ema_averaging_atr_period, 14)
             self.assertEqual(config.STRATEGY.ema_averaging_atr_multiplier, 1.0)
+            self.assertEqual(config.STRATEGY.ema_averaging_min_atr_multiplier, 1.0)
+            self.assertEqual(config.STRATEGY.ema_averaging_min_daily_volatility_fraction, 0.18)
+            self.assertTrue(config.STRATEGY.ema_averaging_require_pullback_recovery)
             self.assertEqual(config.STRATEGY.ema_max_averaging_stages, 2)
             self.assertEqual(config.STRATEGY.max_buy_stages, 3)
             self.assertFalse(config.STRATEGY.ema_exit_runner_enabled)

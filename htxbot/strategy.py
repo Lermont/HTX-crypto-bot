@@ -4902,28 +4902,68 @@ class StrategyMixin:
             return "ema_macro_broken_no_average"
         if not signal.get("add_valid", False):
             return "ema_add_signal_invalid"
+        if config.STRATEGY.ema_averaging_require_pullback_recovery and not signal.get("pullback_valid", False):
+            return (
+                "ema_averaging_pullback_recovery_required;"
+                f"pullback_gap={self._safe_float(signal.get('pullback_recovery_gap'), 0.0):.6f};"
+                f"min_gap={self._safe_float(signal.get('pullback_recovery_min_gap'), 0.0):.6f};"
+                f"trigger_valid={int(bool(signal.get('trigger_valid', False)))}"
+            )
         return ""
 
-    def _ema_averaging_drawdown_threshold(self, stage_index: int, signal: Optional[dict] = None) -> float:
+    def _ema_averaging_drawdown_threshold_context(self, stage_index: int, signal: Optional[dict] = None) -> dict:
+        strategy = config.STRATEGY
+        stage_number = max(1, int(stage_index) + 1)
         steps = tuple(config.STRATEGY.averaging_drawdown_steps or ())
         if steps:
             index = min(max(0, stage_index), len(steps) - 1)
-            base_threshold = max(0.0, self._safe_float(steps[index], 0.0))
+            configured_threshold = max(0.0, self._safe_float(steps[index], 0.0))
         else:
-            base_threshold = max(0.0, self._safe_float(config.STRATEGY.ema_averaging_drawdown_step, 0.0))
+            configured_threshold = max(0.0, self._safe_float(config.STRATEGY.ema_averaging_drawdown_step, 0.0)) * stage_number
 
-        strategy = config.STRATEGY
-        if not strategy.ema_averaging_atr_enabled:
-            return base_threshold
+        floor_threshold = max(0.0, self._safe_float(strategy.ema_averaging_min_drawdown_step, 0.0)) * stage_number
         atr_rate = max(0.0, self._safe_float((signal or {}).get("atr_rate"), 0.0))
-        if atr_rate <= 0:
-            return base_threshold
-        atr_threshold = (
+        hard_atr_threshold = (
             atr_rate
-            * max(0.0, self._safe_float(strategy.ema_averaging_atr_multiplier, 0.0))
-            * (max(0, stage_index) + 1)
+            * max(0.0, self._safe_float(strategy.ema_averaging_min_atr_multiplier, 0.0))
+            * stage_number
         )
-        return max(base_threshold, atr_threshold)
+        daily_volatility = max(0.0, self._safe_float((signal or {}).get("daily_volatility"), 0.0))
+        daily_volatility_threshold = (
+            daily_volatility
+            * max(0.0, self._safe_float(strategy.ema_averaging_min_daily_volatility_fraction, 0.0))
+            * stage_number
+        )
+
+        configured_atr_threshold = 0.0
+        if strategy.ema_averaging_atr_enabled and atr_rate > 0:
+            configured_atr_threshold = (
+                atr_rate
+                * max(0.0, self._safe_float(strategy.ema_averaging_atr_multiplier, 0.0))
+                * stage_number
+            )
+
+        threshold = max(
+            configured_threshold,
+            floor_threshold,
+            hard_atr_threshold,
+            daily_volatility_threshold,
+            configured_atr_threshold,
+        )
+        return {
+            "threshold": threshold,
+            "configured": configured_threshold,
+            "floor": floor_threshold,
+            "atr_floor": hard_atr_threshold,
+            "daily_volatility_floor": daily_volatility_threshold,
+            "configured_atr": configured_atr_threshold,
+            "atr_rate": atr_rate,
+            "daily_volatility": daily_volatility,
+            "stage": stage_number,
+        }
+
+    def _ema_averaging_drawdown_threshold(self, stage_index: int, signal: Optional[dict] = None) -> float:
+        return self._ema_averaging_drawdown_threshold_context(stage_index, signal).get("threshold", 0.0)
 
     def _maybe_place_average_buy(self, symbol: str, signal: Optional[dict]):
         if symbol not in self.entry_symbols:
@@ -5048,8 +5088,17 @@ class StrategyMixin:
             return
 
         drawdown = self._position_drawdown(state, reference_price)
-        drawdown_threshold = self._ema_averaging_drawdown_threshold(state.average_stage, signal)
-        atr_rate = self._safe_float((signal or {}).get("atr_rate"), 0.0)
+        threshold_context = self._ema_averaging_drawdown_threshold_context(state.average_stage, signal)
+        drawdown_threshold = self._safe_float(threshold_context.get("threshold"), 0.0)
+        atr_rate = self._safe_float(threshold_context.get("atr_rate"), 0.0)
+        daily_volatility = self._safe_float(threshold_context.get("daily_volatility"), 0.0)
+        threshold_reason = (
+            f"configured={self._safe_float(threshold_context.get('configured'), 0.0):.5f};"
+            f"floor={self._safe_float(threshold_context.get('floor'), 0.0):.5f};"
+            f"atr_floor={self._safe_float(threshold_context.get('atr_floor'), 0.0):.5f};"
+            f"daily_volatility_floor={self._safe_float(threshold_context.get('daily_volatility_floor'), 0.0):.5f};"
+            f"configured_atr={self._safe_float(threshold_context.get('configured_atr'), 0.0):.5f}"
+        )
 
         external_directional_reason = self._external_directional_1m_block_reason(symbol, scope="averaging")
         if external_directional_reason:
@@ -5063,6 +5112,7 @@ class StrategyMixin:
                     "drawdown": drawdown,
                     "threshold": drawdown_threshold,
                     "atr_rate": atr_rate,
+                    "daily_volatility": daily_volatility,
                     "stage": state.average_stage + 1,
                 },
             )
@@ -5099,6 +5149,7 @@ class StrategyMixin:
                     "drawdown": drawdown,
                     "threshold": drawdown_threshold,
                     "atr_rate": atr_rate,
+                    "daily_volatility": daily_volatility,
                     "stage": state.average_stage + 1,
                 },
             )
@@ -5111,7 +5162,9 @@ class StrategyMixin:
                 entry_price=state.entry_price,
                 reason=(
                     f"ema_averaging_drawdown_below_threshold;"
-                    f"drawdown={drawdown:.5f};threshold={drawdown_threshold:.5f};atr_rate={atr_rate:.6f}"
+                    f"drawdown={drawdown:.5f};threshold={drawdown_threshold:.5f};"
+                    f"atr_rate={atr_rate:.6f};daily_volatility={daily_volatility:.6f};"
+                    f"{threshold_reason}"
                 ),
             )
             return
@@ -5126,8 +5179,10 @@ class StrategyMixin:
                 "drawdown": drawdown,
                 "threshold": drawdown_threshold,
                 "atr_rate": atr_rate,
+                "daily_volatility": daily_volatility,
                 "stage": state.average_stage + 1,
                 "budget_reason": budget_reason,
+                "threshold_reason": threshold_reason,
             },
         )
         if budget <= 0:
@@ -5155,7 +5210,11 @@ class StrategyMixin:
             price=reference_price,
             position_size=state.position_size,
             entry_price=state.entry_price,
-            reason=f"ema_averaging_stage_{next_stage};drawdown={drawdown:.5f};threshold={drawdown_threshold:.5f};atr_rate={atr_rate:.6f};{budget_reason}",
+            reason=(
+                f"ema_averaging_stage_{next_stage};drawdown={drawdown:.5f};"
+                f"threshold={drawdown_threshold:.5f};atr_rate={atr_rate:.6f};"
+                f"daily_volatility={daily_volatility:.6f};{threshold_reason};{budget_reason}"
+            ),
         )
         orders_placed = self._place_buy_ladder(
             symbol,

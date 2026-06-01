@@ -60,6 +60,22 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(profile.runtime.market_data_max_workers, 3)
 
+    def test_ema_max_averaging_stages_is_capped(self):
+        initial_warnings = list(config.CONFIG_WARNINGS)
+        with temporary_env(
+            EMA_MAX_AVERAGING_STAGES="4",
+            HTXBOT_EMA_MAX_AVERAGING_STAGES=None,
+            LONG_EMA_MAX_AVERAGING_STAGES=None,
+            HTXBOT_LONG_EMA_MAX_AVERAGING_STAGES=None,
+        ):
+            try:
+                profile = config._make_profile("long", "long", config.LONG_COINS)
+            finally:
+                config.CONFIG_WARNINGS[:] = initial_warnings
+
+        self.assertEqual(profile.strategy.ema_max_averaging_stages, 2)
+        self.assertEqual(len(profile.strategy.averaging_drawdown_steps), 2)
+
     def test_add_config_warning(self):
         # Record initial length to avoid side effects from other tests
         initial_len = len(CONFIG_WARNINGS)
