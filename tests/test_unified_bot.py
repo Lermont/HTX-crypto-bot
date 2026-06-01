@@ -3734,6 +3734,104 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertLess(limits["4h"], 30)
             self.assertLess(limits["1m"], 2000)
 
+    def test_signal_update_fetches_symbol_candles_in_parallel(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, market_data_max_workers=4)
+            strategy = self.ema_test_strategy(
+                ema_macro_timeframe="1m",
+                ema_pullback_timeframe="1m",
+                ema_trigger_timeframe="1m",
+                ema_use_rs_confirmation=False,
+                ema_use_btc_risk_filter=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                symbols = [
+                    SYMBOL,
+                    SECOND_SYMBOL,
+                    "ALT3/USDT:USDT",
+                    "ALT4/USDT:USDT",
+                    "ALT5/USDT:USDT",
+                    "ALT6/USDT:USDT",
+                ]
+                bot.benchmark_symbol = BTC_SYMBOL
+                bot.symbols = list(symbols)
+                bot.entry_symbols = set(symbols)
+
+                closes = [100.0 + index * 0.1 for index in range(90)]
+                bot.exchange.ohlcv[(BTC_SYMBOL, "1m")] = ohlcv_series([100.0] * 90)
+                for index, symbol in enumerate(symbols):
+                    bot.exchange.ohlcv[(symbol, "1m")] = ohlcv_series(
+                        [price + index for price in closes]
+                    )
+
+                original_fetch_ohlcv = bot.exchange.fetch_ohlcv
+                active = {"count": 0, "max": 0}
+                lock = threading.Lock()
+
+                def slow_fetch_ohlcv(symbol, timeframe="1m", since=None, limit=None, params=None):
+                    with lock:
+                        active["count"] += 1
+                        active["max"] = max(active["max"], active["count"])
+                    try:
+                        time.sleep(0.03)
+                        return original_fetch_ohlcv(
+                            symbol,
+                            timeframe=timeframe,
+                            since=since,
+                            limit=limit,
+                            params=params,
+                        )
+                    finally:
+                        with lock:
+                            active["count"] -= 1
+
+                bot.exchange.fetch_ohlcv = slow_fetch_ohlcv
+
+                updated = bot._update_signal_cache_if_needed()
+
+                self.assertTrue(updated)
+                self.assertGreater(active["max"], 1)
+                self.assertEqual(set(bot.signal_cache["symbols"]), set(symbols))
+
+    def test_parallel_signal_fetch_preserves_profile_context(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, market_data_max_workers=2)
+            strategy = self.ema_test_strategy(
+                ema_macro_timeframe="1m",
+                ema_pullback_timeframe="1m",
+                ema_trigger_timeframe="1m",
+                ema_use_rs_confirmation=False,
+                ema_use_btc_risk_filter=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.benchmark_symbol = BTC_SYMBOL
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+                bot.entry_symbols = set(bot.symbols)
+                candles_by_symbol = {
+                    BTC_SYMBOL: ohlcv_series([100.0] * 90),
+                    SYMBOL: ohlcv_series([100.0 + index * 0.1 for index in range(90)]),
+                    SECOND_SYMBOL: ohlcv_series([120.0 + index * 0.1 for index in range(90)]),
+                }
+                seen_sides = []
+                lock = threading.Lock()
+
+                def fake_closed_candles(symbol, limit, max_ts=None, timeframe=None, exchange=None):
+                    with lock:
+                        seen_sides.append(config.POSITION_SIDE)
+                    rows = candles_by_symbol[symbol]
+                    if max_ts is not None:
+                        rows = [row for row in rows if int(row[0]) <= max_ts]
+                    return rows[-int(limit):]
+
+                bot._closed_candles = fake_closed_candles
+
+                bot._update_signal_cache_if_needed()
+
+                self.assertTrue(seen_sides)
+                self.assertEqual(set(seen_sides), {"short"})
+
     def test_hard_time_exit_close_fraction_ramps_by_age(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = replace(
@@ -5107,6 +5205,37 @@ class UnifiedBotTests(unittest.TestCase):
         exchange.ohlcv[(SYMBOL, "1m")] = [[1, 100.0, 101.0, 99.0, 100.5, 10.0]]
         self.assertEqual(cached.fetch_ohlcv(SYMBOL, timeframe="1m", limit=1), exchange.ohlcv[(SYMBOL, "1m")])
         self.assertEqual(len(exchange.ohlcv_calls), 2)
+
+    def test_shared_exchange_ohlcv_cache_allows_different_symbols_concurrent_fetches(self):
+        class SlowOhlcvExchange:
+            def __init__(self):
+                self.calls = []
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+
+            def fetch_ohlcv(self, symbol, timeframe="1m", since=None, limit=None, params=None):
+                with self.lock:
+                    self.calls.append(symbol)
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    time.sleep(0.03)
+                    return [[1, 100.0, 101.0, 99.0, 100.5, 10.0]]
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        exchange = SlowOhlcvExchange()
+        cached = CachedMarketDataExchange(exchange)
+        symbols = [SYMBOL, SECOND_SYMBOL, BTC_SYMBOL, XAUT_SYMBOL]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(lambda item: cached.fetch_ohlcv(item, timeframe="1m", limit=1), symbols))
+
+        self.assertEqual(len(results), len(symbols))
+        self.assertGreater(exchange.max_active, 1)
+        self.assertEqual(set(exchange.calls), set(symbols))
 
     def test_shared_exchange_ticker_cache_is_singleflight_across_threads(self):
         class SlowTickerExchange:

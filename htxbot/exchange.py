@@ -239,7 +239,20 @@ class ExchangeMixin:
         for attempt in range(1, attempts + 1):
             hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
             try:
-                with instance_rlock(self, "_exchange_host_lock"):
+                if hostname:
+                    with instance_rlock(self, "_exchange_host_lock"):
+                        current_hostname = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
+                        if current_hostname != hostname:
+                            self._set_contract_hostname(self.exchange, hostname)
+
+                if attempt > 1:
+                    fetch_lock = instance_rlock(self, "_exchange_host_lock")
+                else:
+                    fetch_lock = None
+
+                if fetch_lock:
+                    fetch_lock.acquire()
+                try:
                     if hostname:
                         self._set_contract_hostname(self.exchange, hostname)
                     ohlcv = self.exchange.fetch_ohlcv(
@@ -255,6 +268,9 @@ class ExchangeMixin:
                         symbol=symbol,
                         item_types=(list, tuple),
                     )
+                finally:
+                    if fetch_lock:
+                        fetch_lock.release()
             except Exception as exc:
                 if not self._is_transient_exchange_error(exc):
                     raise

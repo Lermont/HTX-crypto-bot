@@ -45,6 +45,7 @@ class CachedMarketDataExchange:
         object.__setattr__(self, "_funding_ttl_sec", max(0.0, funding_ttl_sec))
         object.__setattr__(self, "_ohlcv_cache", {})
         object.__setattr__(self, "_ohlcv_bucket_by_timeframe", {})
+        object.__setattr__(self, "_ohlcv_inflight", {})
         object.__setattr__(self, "_ticker_cache", {})
         object.__setattr__(self, "_funding_cache", {})
         object.__setattr__(self, "_cache_lock", threading.RLock())
@@ -64,17 +65,34 @@ class CachedMarketDataExchange:
         key = (symbol, timeframe, since, limit, _cache_key(params), bucket)
         cache: Dict[Tuple[Any, ...], Any] = self._ohlcv_cache
         bucket_by_timeframe = self._ohlcv_bucket_by_timeframe
+        inflight: Dict[Tuple[Any, ...], dict] = self._ohlcv_inflight
+        entry = None
+        owner = False
         with self._cache_lock:
             previous_bucket = bucket_by_timeframe.get(timeframe)
             if previous_bucket is not None and previous_bucket != bucket:
                 stale_keys = [item for item in cache if item[1] == timeframe and item[-1] != bucket]
                 for item in stale_keys:
                     cache.pop(item, None)
+                    inflight.pop(item, None)
             bucket_by_timeframe[timeframe] = bucket
             cached = cache.get(key)
             if cached is not None:
                 return cached
 
+            entry = inflight.get(key)
+            if entry is None:
+                entry = {"event": threading.Event(), "value": None, "exception": None}
+                inflight[key] = entry
+                owner = True
+
+        if not owner:
+            entry["event"].wait()
+            if entry.get("exception") is not None:
+                raise entry["exception"]
+            return entry.get("value")
+
+        try:
             value = self._exchange.fetch_ohlcv(
                 symbol,
                 timeframe=timeframe,
@@ -83,8 +101,18 @@ class CachedMarketDataExchange:
                 params=params or {},
             )
             if isinstance(value, list):
-                cache[key] = value
+                with self._cache_lock:
+                    cache[key] = value
             return value
+        except Exception as exc:
+            entry["exception"] = exc
+            raise
+        finally:
+            if entry.get("exception") is None:
+                entry["value"] = value
+            with self._cache_lock:
+                inflight.pop(key, None)
+                entry["event"].set()
 
     def fetch_ticker(self, symbol: str, params=None):
         ttl = self._ticker_ttl_sec

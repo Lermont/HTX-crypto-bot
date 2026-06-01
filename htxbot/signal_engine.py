@@ -1244,6 +1244,13 @@ class SignalMixin:
             closed = [row for row in closed if int(row[0]) <= max_ts]
         return closed
 
+    def _market_data_max_workers(self) -> int:
+        try:
+            workers = int(getattr(config.RUNTIME, "market_data_max_workers", 1) or 1)
+        except (TypeError, ValueError):
+            workers = 1
+        return max(1, workers)
+
     def _update_signal_cache_if_needed(self) -> bool:
         if not getattr(config.STRATEGY, "ema_strategy_enabled", True):
             self.signal_cache["benchmark_ok"] = False
@@ -1389,12 +1396,28 @@ class SignalMixin:
 
             return symbol, (candles, macro_candles, pullback_candles), None
 
-        results = []
-        for symbol in self.symbols:
+        profile = getattr(self, "profile", None) or config.current_profile()
+
+        def fetch_symbol_candles_safe(symbol):
             try:
-                results.append(fetch_symbol_candles(symbol))
+                with config.use_profile(profile):
+                    return fetch_symbol_candles(symbol)
             except Exception as exc:
-                self._log_event("WARNING", f"Unhandled exception fetching candles for {symbol}: {exc}", event="signal_invalid", symbol=symbol, reason="unhandled_fetch_exception")
+                return symbol, None, (
+                    "WARNING",
+                    f"Unhandled exception fetching candles for {symbol}: {exc}",
+                    "signal_invalid",
+                    "unhandled_fetch_exception",
+                    exc,
+                )
+
+        symbols = list(self.symbols)
+        max_workers = min(self._market_data_max_workers(), max(1, len(symbols)))
+        if max_workers <= 1 or len(symbols) <= 1:
+            results = [fetch_symbol_candles_safe(symbol) for symbol in symbols]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = list(executor.map(fetch_symbol_candles_safe, symbols))
 
         for symbol, data, log_info in results:
             if log_info:

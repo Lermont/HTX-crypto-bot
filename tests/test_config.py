@@ -49,6 +49,17 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(cache_path.endswith("/short/bot_futures_short_markets_cache.json"))
         self.assertNotIn("short_state_markets_cache", cache_path)
 
+    def test_market_data_max_workers_is_profile_runtime_setting(self):
+        with temporary_env(
+            MARKET_DATA_MAX_WORKERS="3",
+            HTXBOT_MARKET_DATA_MAX_WORKERS=None,
+            LONG_MARKET_DATA_MAX_WORKERS=None,
+            HTXBOT_LONG_MARKET_DATA_MAX_WORKERS=None,
+        ):
+            profile = config._make_profile("long", "long", config.LONG_COINS)
+
+        self.assertEqual(profile.runtime.market_data_max_workers, 3)
+
     def test_add_config_warning(self):
         # Record initial length to avoid side effects from other tests
         initial_len = len(CONFIG_WARNINGS)
