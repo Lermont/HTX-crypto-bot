@@ -370,12 +370,32 @@ class UnifiedBotTests(unittest.TestCase):
             "htxbot.signal_engine",
             "htxbot.state",
             "htxbot.strategy",
+            "htxbot.strategy_entry",
+            "htxbot.strategy_exit",
+            "htxbot.strategy_filters",
+            "htxbot.strategy_risk",
             "htxbot.models",
         )
 
         for module in modules:
             with self.subTest(module=module):
                 importlib.import_module(module)
+
+    def test_strategy_components_are_separately_testable_mixins(self):
+        from htxbot.strategy import StrategyMixin
+        from htxbot.strategy_entry import EntryStrategy
+        from htxbot.strategy_exit import ExitStrategy
+        from htxbot.strategy_filters import SignalFilters
+        from htxbot.strategy_risk import RiskManager
+
+        self.assertTrue(issubclass(StrategyMixin, EntryStrategy))
+        self.assertTrue(issubclass(StrategyMixin, ExitStrategy))
+        self.assertTrue(issubclass(StrategyMixin, RiskManager))
+        self.assertTrue(issubclass(StrategyMixin, SignalFilters))
+        self.assertIn("_maybe_place_initial_buy", EntryStrategy.__dict__)
+        self.assertIn("_ensure_sell_ladder", ExitStrategy.__dict__)
+        self.assertIn("_risk_budget", RiskManager.__dict__)
+        self.assertIn("_entry_gate_block_reason", SignalFilters.__dict__)
 
     def test_compute_log_return_cases(self):
         # price_now <= 0
