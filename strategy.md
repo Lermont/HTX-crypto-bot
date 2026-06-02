@@ -371,7 +371,7 @@ Macro overlay сравнивает XAUT/BTC context через RSI и может
 - неиспользуемый monitoring TTL.
 
 Оставлены выключенные по умолчанию, но реально подключенные механики: volatility sizing/recovery, BTC risk multiplier, funding-aware exit, dynamic profit floor, hard/controlled/absolute force exit helpers.
-Controlled-loss exit при активации двигает цену закрытия от `CONTROLLED_LOSS_MIN_MOVE_FRACTION` к reference price за `CONTROLLED_LOSS_RAMP_MINUTES`; скорость ramp ускоряется при отрицательном directional `trend_ema_gap`/`macro_gap` и неблагоприятном macro overlay, а stale ladder перестраивается через `CONTROLLED_LOSS_REPRICE_MINUTES`.
+Controlled-loss exit при активации двигает цену закрытия от `CONTROLLED_LOSS_MIN_MOVE_FRACTION` к reference price за `CONTROLLED_LOSS_RAMP_MINUTES`; скорость ramp ускоряется при отрицательном directional `trend_ema_gap`/`macro_gap`, неблагоприятном macro overlay и adverse local volatility spike (`atr_rate`/realized volatility против `CONTROLLED_LOSS_VOLATILITY_REFERENCE` или `VOLATILITY_REFERENCE`). При volatility spike progress становится `exponential_volatility`, а ladder может перестроиться до обычного stale reprice, если новый `loss_move_fraction` вырос минимум на `CONTROLLED_LOSS_VOLATILITY_REPRICE_MIN_MOVE_DELTA`; обычный stale ladder всё ещё перестраивается через `CONTROLLED_LOSS_REPRICE_MINUTES`.
 
 ## 17. Live-Готовность
 

@@ -44,6 +44,7 @@ class ExitLadderConfig:
     exit_scope: Optional[str] = None
     signature_override: str = ""
     use_trailing_exit: bool = True
+    signal: Optional[dict] = None
 
 
 @dataclass
@@ -68,6 +69,7 @@ class SellLadderParams:
     exit_scope: Optional[str] = None
     signature_override: str = ""
     use_trailing_exit: bool = True
+    signal: Optional[dict] = None
 
 
 @dataclass

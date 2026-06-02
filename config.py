@@ -373,6 +373,12 @@ class StrategySettings:
     controlled_loss_reprice_minutes: float
     controlled_loss_macro_gap_reference: float
     controlled_loss_macro_max_speed_multiplier: float
+    controlled_loss_volatility_speed_enabled: bool
+    controlled_loss_volatility_reference: float
+    controlled_loss_volatility_trigger_multiplier: float
+    controlled_loss_volatility_max_speed_multiplier: float
+    controlled_loss_volatility_exponent: float
+    controlled_loss_volatility_reprice_min_move_delta: float
     max_unhealthy_positions_for_new_entries: int
     cancel_unsafe_hidden_close_orders: bool
     enable_volatility_adjusted_ladders: bool
@@ -731,6 +737,7 @@ def _validate_profile(profile: "BotProfile") -> None:
         "hard_stop_loss_atr_max_pct",
         "controlled_loss_max_position_fraction",
         "controlled_loss_min_move_fraction",
+        "controlled_loss_volatility_reprice_min_move_delta",
     ):
         value = getattr(profile.strategy, setting_name)
         if value < 0.0 or value > 1.0:
@@ -749,6 +756,14 @@ def _validate_profile(profile: "BotProfile") -> None:
         raise ValueError(f"{profile.name}.STRATEGY.hard_stop_loss_pct must be positive when hard stop is enabled")
     if profile.strategy.hard_stop_loss_atr_multiplier < 0:
         raise ValueError(f"{profile.name}.STRATEGY.hard_stop_loss_atr_multiplier must be non-negative")
+    if profile.strategy.controlled_loss_volatility_reference < 0:
+        raise ValueError(f"{profile.name}.STRATEGY.controlled_loss_volatility_reference must be non-negative")
+    if profile.strategy.controlled_loss_volatility_trigger_multiplier < 0:
+        raise ValueError(f"{profile.name}.STRATEGY.controlled_loss_volatility_trigger_multiplier must be non-negative")
+    if profile.strategy.controlled_loss_volatility_max_speed_multiplier < 1:
+        raise ValueError(f"{profile.name}.STRATEGY.controlled_loss_volatility_max_speed_multiplier must be at least 1")
+    if profile.strategy.controlled_loss_volatility_exponent < 1:
+        raise ValueError(f"{profile.name}.STRATEGY.controlled_loss_volatility_exponent must be at least 1")
 
     if profile.risk.max_position_notional_fraction > 0.03 + 1e-12:
         _add_config_warning(
@@ -1118,6 +1133,12 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         controlled_loss_reprice_minutes=_env_float("CONTROLLED_LOSS_REPRICE_MINUTES", 60.0, profile=name),
         controlled_loss_macro_gap_reference=_env_float("CONTROLLED_LOSS_MACRO_GAP_REFERENCE", 0.02, profile=name),
         controlled_loss_macro_max_speed_multiplier=_env_float("CONTROLLED_LOSS_MACRO_MAX_SPEED_MULTIPLIER", 2.0, profile=name),
+        controlled_loss_volatility_speed_enabled=_env_bool("CONTROLLED_LOSS_VOLATILITY_SPEED_ENABLED", True, profile=name),
+        controlled_loss_volatility_reference=max(0.0, _env_float("CONTROLLED_LOSS_VOLATILITY_REFERENCE", 0.0, profile=name)),
+        controlled_loss_volatility_trigger_multiplier=max(0.0, _env_float("CONTROLLED_LOSS_VOLATILITY_TRIGGER_MULTIPLIER", 1.5, profile=name)),
+        controlled_loss_volatility_max_speed_multiplier=max(1.0, _env_float("CONTROLLED_LOSS_VOLATILITY_MAX_SPEED_MULTIPLIER", 3.0, profile=name)),
+        controlled_loss_volatility_exponent=max(1.0, _env_float("CONTROLLED_LOSS_VOLATILITY_EXPONENT", 2.0, profile=name)),
+        controlled_loss_volatility_reprice_min_move_delta=_env_float("CONTROLLED_LOSS_VOLATILITY_REPRICE_MIN_MOVE_DELTA", 0.05, profile=name),
         max_unhealthy_positions_for_new_entries=_env_int("MAX_UNHEALTHY_POSITIONS_FOR_NEW_ENTRIES", 2, profile=name),
         cancel_unsafe_hidden_close_orders=_env_bool("CANCEL_UNSAFE_HIDDEN_CLOSE_ORDERS", True, profile=name),
         enable_volatility_adjusted_ladders=False,

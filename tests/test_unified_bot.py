@@ -4423,6 +4423,39 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 self.assertEqual(state.hard_stop_order["id"], bot.exchange.created_orders[0]["id"])
 
+    def test_hard_stop_loss_rejection_logs_original_exception(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_atr_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+                bot.exchange.reject_reduce_only_closeable_amount = True
+
+                placed = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertFalse(placed)
+                self.assertTrue(state.frozen_no_more_buys)
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                errors = [
+                    row for row in rows
+                    if row["event"] == "reduce_only_violation_prevented"
+                    and row["reason"].startswith("hard_stop_loss_order_rejected")
+                ]
+                self.assertTrue(errors)
+                self.assertEqual(errors[-1]["exception_type"], "RuntimeError")
+                self.assertEqual(errors[-1]["error_code"], "1492")
+                self.assertIn("Amount of Reduce Only order exceeds", errors[-1]["message"])
+
     def test_ema_2d_default_is_2880_minutes(self):
         with config.use_profile("long"):
             self.assertEqual(config.STRATEGY.ema_pullback_slow_minutes, 2880)
@@ -4474,6 +4507,12 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.controlled_loss_reprice_minutes, 60.0)
             self.assertEqual(config.STRATEGY.controlled_loss_macro_gap_reference, 0.02)
             self.assertEqual(config.STRATEGY.controlled_loss_macro_max_speed_multiplier, 2.0)
+            self.assertTrue(config.STRATEGY.controlled_loss_volatility_speed_enabled)
+            self.assertEqual(config.STRATEGY.controlled_loss_volatility_reference, 0.0)
+            self.assertEqual(config.STRATEGY.controlled_loss_volatility_trigger_multiplier, 1.5)
+            self.assertEqual(config.STRATEGY.controlled_loss_volatility_max_speed_multiplier, 3.0)
+            self.assertEqual(config.STRATEGY.controlled_loss_volatility_exponent, 2.0)
+            self.assertEqual(config.STRATEGY.controlled_loss_volatility_reprice_min_move_delta, 0.05)
             self.assertTrue(config.STRATEGY.hard_stop_loss_enabled)
             self.assertEqual(config.STRATEGY.hard_stop_loss_pct, 0.02)
             self.assertTrue(config.STRATEGY.hard_stop_loss_atr_enabled)
@@ -4808,6 +4847,48 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertAlmostEqual(neutral, 0.325)
                 self.assertAlmostEqual(adverse, 0.55)
 
+    def test_controlled_loss_move_fraction_uses_exponential_adverse_volatility(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(
+                config.STRATEGY,
+                controlled_loss_min_move_fraction=0.10,
+                controlled_loss_ramp_minutes=1440.0,
+                controlled_loss_macro_gap_reference=0.02,
+                controlled_loss_macro_max_speed_multiplier=1.0,
+                controlled_loss_volatility_speed_enabled=True,
+                controlled_loss_volatility_reference=0.001,
+                controlled_loss_volatility_trigger_multiplier=1.5,
+                controlled_loss_volatility_max_speed_multiplier=2.0,
+                controlled_loss_volatility_exponent=2.0,
+                hard_time_exit_after_minutes=0.0,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.sell_ladder_mode = "controlled_loss_exit"
+                now = 1_700_000_000.0
+                state.time_exit_activated_at = now - 360.0 * 60.0
+
+                with patch("time.time", return_value=now):
+                    neutral = bot._controlled_loss_ramp_context(
+                        state,
+                        symbol=SYMBOL,
+                        signal={"data_valid": True, "trend_ema_gap": -0.02, "atr_rate": 0.001},
+                    )
+                    spike = bot._controlled_loss_ramp_context(
+                        state,
+                        symbol=SYMBOL,
+                        signal={"data_valid": True, "trend_ema_gap": -0.02, "atr_rate": 0.003},
+                    )
+
+                self.assertAlmostEqual(neutral["move_fraction"], 0.325)
+                self.assertEqual(neutral["ramp_profile"], "linear")
+                self.assertEqual(spike["ramp_profile"], "exponential_volatility")
+                self.assertAlmostEqual(spike["volatility_intensity"], 1.0)
+                self.assertAlmostEqual(spike["volatility_speed_multiplier"], 2.0)
+                self.assertGreater(spike["move_fraction"], 0.66)
+                self.assertLess(spike["move_fraction"], 0.67)
+
     def test_controlled_loss_macro_ramp_is_direction_symmetric(self):
         results = {}
         for profile_name in ("long", "short"):
@@ -4832,6 +4913,39 @@ class UnifiedBotTests(unittest.TestCase):
                             state,
                             symbol=SYMBOL,
                             signal={"data_valid": True, "trend_ema_gap": -0.02},
+                        )
+
+        self.assertAlmostEqual(results["long"], results["short"])
+
+    def test_controlled_loss_volatility_ramp_is_direction_symmetric(self):
+        results = {}
+        for profile_name in ("long", "short"):
+            with self.subTest(profile=profile_name), tempfile.TemporaryDirectory() as raw_tmp, config.use_profile(profile_name):
+                strategy = replace(
+                    config.STRATEGY,
+                    controlled_loss_min_move_fraction=0.10,
+                    controlled_loss_ramp_minutes=1440.0,
+                    controlled_loss_macro_gap_reference=0.02,
+                    controlled_loss_macro_max_speed_multiplier=1.0,
+                    controlled_loss_volatility_speed_enabled=True,
+                    controlled_loss_volatility_reference=0.001,
+                    controlled_loss_volatility_trigger_multiplier=1.5,
+                    controlled_loss_volatility_max_speed_multiplier=2.0,
+                    controlled_loss_volatility_exponent=2.0,
+                    hard_time_exit_after_minutes=0.0,
+                )
+                with override_config(STRATEGY=strategy):
+                    bot = self.make_bot(Path(raw_tmp))
+                    state = bot._get_state(SYMBOL)
+                    state.sell_ladder_mode = "controlled_loss_exit"
+                    now = 1_700_000_000.0
+                    state.time_exit_activated_at = now - 360.0 * 60.0
+
+                    with patch("time.time", return_value=now):
+                        results[profile_name] = bot._controlled_loss_move_fraction(
+                            state,
+                            symbol=SYMBOL,
+                            signal={"data_valid": True, "trend_ema_gap": -0.02, "atr_rate": 0.003},
                         )
 
         self.assertAlmostEqual(results["long"], results["short"])
@@ -4882,6 +4996,67 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertAlmostEqual(state.sell_ladder_orders[0]["loss_move_fraction"], 0.55)
                 self.assertAlmostEqual(state.sell_ladder_orders[0]["loss_macro_intensity"], 1.0)
                 self.assertAlmostEqual(state.sell_ladder_orders[0]["loss_speed_multiplier"], 2.0)
+                self.assertTrue(bot.exchange.created_orders[-1]["params"].get("reduceOnly"))
+
+    def test_controlled_loss_reprices_immediately_on_adverse_volatility_spike(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(
+                config.STRATEGY,
+                enable_absolute_force_exit=False,
+                enable_controlled_loss_exit=False,
+                urgent_time_exit_after_minutes=0.0,
+                hard_time_exit_after_minutes=1.0,
+                hard_time_exit_close_fraction=1.0,
+                hard_time_exit_step_minutes=0.0,
+                hard_time_exit_fraction_step=0.0,
+                hard_time_exit_bypass_profit_bank=True,
+                controlled_loss_reprice_minutes=60.0,
+                controlled_loss_min_move_fraction=0.10,
+                controlled_loss_ramp_minutes=1440.0,
+                controlled_loss_macro_gap_reference=0.02,
+                controlled_loss_macro_max_speed_multiplier=1.0,
+                controlled_loss_volatility_speed_enabled=True,
+                controlled_loss_volatility_reference=0.001,
+                controlled_loss_volatility_trigger_multiplier=1.5,
+                controlled_loss_volatility_max_speed_multiplier=2.0,
+                controlled_loss_volatility_exponent=2.0,
+                controlled_loss_volatility_reprice_min_move_delta=0.05,
+            )
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                now = 1_700_000_000.0
+                bot.exchange.ticker = {"bid": 90.0, "ask": 90.1, "last": 90.0}
+                bot.signal_cache["symbols"][SYMBOL] = {"data_valid": True, "trend_ema_gap": 0.02, "atr_rate": 0.0}
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+                state.cycle_opened_at = now - 2.0 * 60.0
+                state.time_exit_activated_at = now - 360.0 * 60.0
+                state.sell_ladder_mode = "controlled_loss_exit"
+                state.sell_ladder_orders = [
+                    {
+                        "id": "old_exit",
+                        "side": "sell",
+                        "price": 100.0,
+                        "amount": 10.0,
+                        "created_at": now - 10.0,
+                        "loss_move_fraction": 0.325,
+                    }
+                ]
+
+                fresh_signal = {"data_valid": True, "valid": False, "trend_ema_gap": -0.02, "atr_rate": 0.003}
+                with patch("time.time", return_value=now):
+                    applied = bot._maybe_apply_controlled_loss_exit(SYMBOL, fresh_signal)
+
+                self.assertTrue(applied)
+                self.assertIn(("old_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertTrue(bot.exchange.created_orders)
+                self.assertEqual(state.sell_ladder_mode, "controlled_loss_exit")
+                self.assertEqual(state.sell_ladder_orders[0]["loss_ramp_profile"], "exponential_volatility")
+                self.assertAlmostEqual(state.sell_ladder_orders[0]["loss_volatility_intensity"], 1.0)
+                self.assertGreater(state.sell_ladder_orders[0]["loss_move_fraction"], 0.66)
                 self.assertTrue(bot.exchange.created_orders[-1]["params"].get("reduceOnly"))
 
     def test_hard_time_exit_uses_wider_loss_cap(self):

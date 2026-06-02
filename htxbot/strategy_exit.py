@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import csv
+import math
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
@@ -161,7 +162,7 @@ class ExitStrategy:
             self._save_state()
             self._log_event(
                 "ERROR",
-                f"Hard stop-loss order failed for {symbol}: {exc}",
+                f"Hard stop-loss order failed for {symbol}: {order_exc}",
                 event="reduce_only_violation_prevented",
                 symbol=symbol,
                 side=config.EXIT_SIDE,
@@ -311,21 +312,37 @@ class ExitStrategy:
         cached = symbols.get(symbol) if isinstance(symbols, dict) and symbol else None
         return cached if isinstance(cached, dict) else {}
 
-    def _controlled_loss_macro_pressure_context(self, symbol: str = "", signal: Optional[dict] = None) -> dict:
+    def _controlled_loss_signal_pressure_context(self, symbol: str = "", signal: Optional[dict] = None) -> dict:
         strategy = config.STRATEGY
         signal = self._controlled_loss_cached_signal(symbol, signal)
-        signal_intensity = 0.0
         directional_gap = 0.0
         signal_reason = "signal_unavailable"
+        data_valid = False
         if signal and bool(signal.get("data_valid", True)):
             for key in ("trend_ema_gap", "macro_gap"):
                 if key in signal:
                     directional_gap = self._safe_float(signal.get(key), 0.0)
-                    adverse_gap = max(0.0, -directional_gap)
-                    reference = max(1e-12, self._safe_float(strategy.controlled_loss_macro_gap_reference, 0.0))
-                    signal_intensity = self._clamp(adverse_gap / reference, 0.0, 1.0)
                     signal_reason = key
+                    data_valid = True
                     break
+
+        adverse_gap = max(0.0, -directional_gap)
+        reference = max(1e-12, self._safe_float(strategy.controlled_loss_macro_gap_reference, 0.0))
+        adverse_intensity = self._clamp(adverse_gap / reference, 0.0, 1.0)
+        return {
+            "data_valid": data_valid,
+            "adverse_gap": adverse_gap,
+            "adverse_intensity": adverse_intensity,
+            "directional_gap": directional_gap,
+            "signal_reason": signal_reason,
+        }
+
+    def _controlled_loss_macro_pressure_context(self, symbol: str = "", signal: Optional[dict] = None) -> dict:
+        strategy = config.STRATEGY
+        signal_pressure = self._controlled_loss_signal_pressure_context(symbol, signal)
+        signal_intensity = self._safe_float(signal_pressure.get("adverse_intensity"), 0.0)
+        directional_gap = self._safe_float(signal_pressure.get("directional_gap"), 0.0)
+        signal_reason = str(signal_pressure.get("signal_reason") or "signal_unavailable")
 
         macro_context = self._macro_guard_context()
         overlay_intensity = 0.0
@@ -353,6 +370,78 @@ class ExitStrategy:
             "budget_multiplier": budget_multiplier,
         }
 
+    def _controlled_loss_volatility_pressure_context(self, symbol: str = "", signal: Optional[dict] = None) -> dict:
+        strategy = config.STRATEGY
+        signal = self._controlled_loss_cached_signal(symbol, signal)
+        signal_pressure = self._controlled_loss_signal_pressure_context(symbol, signal)
+        adverse_intensity = self._safe_float(signal_pressure.get("adverse_intensity"), 0.0)
+        reference = self._safe_float(getattr(strategy, "controlled_loss_volatility_reference", 0.0), 0.0)
+        if reference <= 0:
+            reference = self._safe_float(getattr(strategy, "volatility_reference", 0.0), 0.0)
+        reference = max(reference, 1e-12)
+
+        if not getattr(strategy, "controlled_loss_volatility_speed_enabled", True):
+            return {
+                "volatility_intensity": 0.0,
+                "volatility_adverse_intensity": adverse_intensity,
+                "volatility_speed_multiplier": 1.0,
+                "volatility_exponential_curve": 1.0,
+                "volatility_ratio": 0.0,
+                "local_volatility": 0.0,
+                "atr_rate": 0.0,
+                "daily_volatility_multiplier": 1.0,
+                "volatility_reference": reference,
+                "volatility_trigger_multiplier": 0.0,
+                "volatility_reason": "disabled",
+            }
+
+        volatility = max(0.0, self._safe_float(signal.get("volatility"), 0.0))
+        atr_rate = max(0.0, self._safe_float(signal.get("atr_rate"), 0.0))
+        local_volatility = max(volatility, atr_rate)
+        volatility_ratio = local_volatility / reference if local_volatility > 0 else 0.0
+
+        daily_volatility_multiplier = max(0.0, self._safe_float(signal.get("daily_volatility_multiplier"), 1.0))
+        if daily_volatility_multiplier > 1.0:
+            volatility_ratio = max(volatility_ratio, daily_volatility_multiplier)
+
+        signal_volatility_multiplier = max(0.0, self._safe_float(signal.get("volatility_multiplier"), 1.0))
+        if signal_volatility_multiplier > 1.0:
+            volatility_ratio = max(volatility_ratio, signal_volatility_multiplier)
+
+        trigger = max(0.0, self._safe_float(getattr(strategy, "controlled_loss_volatility_trigger_multiplier", 1.5), 1.5))
+        if trigger <= 0:
+            raw_intensity = volatility_ratio
+        else:
+            raw_intensity = max(0.0, (volatility_ratio / trigger) - 1.0)
+        volatility_intensity = self._clamp(raw_intensity, 0.0, 1.0) * self._clamp(adverse_intensity, 0.0, 1.0)
+
+        max_speed = max(1.0, self._safe_float(getattr(strategy, "controlled_loss_volatility_max_speed_multiplier", 1.0), 1.0))
+        speed_multiplier = max_speed ** volatility_intensity
+        max_curve = max(1.0, self._safe_float(getattr(strategy, "controlled_loss_volatility_exponent", 1.0), 1.0))
+        exponential_curve = 1.0 + volatility_intensity * (max_curve - 1.0)
+        if volatility_intensity <= 0:
+            reason = (
+                "volatility_not_adverse"
+                if adverse_intensity <= 0
+                else "volatility_below_trigger"
+            )
+        else:
+            reason = "adverse_volatility_spike"
+
+        return {
+            "volatility_intensity": volatility_intensity,
+            "volatility_adverse_intensity": adverse_intensity,
+            "volatility_speed_multiplier": speed_multiplier,
+            "volatility_exponential_curve": exponential_curve,
+            "volatility_ratio": volatility_ratio,
+            "local_volatility": local_volatility,
+            "atr_rate": atr_rate,
+            "daily_volatility_multiplier": daily_volatility_multiplier,
+            "volatility_reference": reference,
+            "volatility_trigger_multiplier": trigger,
+            "volatility_reason": reason,
+        }
+
     def _controlled_loss_ramp_context(
         self,
         state: Optional[TradeState],
@@ -369,6 +458,20 @@ class ExitStrategy:
                 "signal_intensity": 0.0,
                 "overlay_intensity": 0.0,
                 "speed_multiplier": 1.0,
+                "macro_speed_multiplier": 1.0,
+                "volatility_intensity": 0.0,
+                "volatility_speed_multiplier": 1.0,
+                "volatility_exponential_curve": 1.0,
+                "volatility_ratio": 0.0,
+                "local_volatility": 0.0,
+                "atr_rate": 0.0,
+                "daily_volatility_multiplier": 1.0,
+                "volatility_reference": 0.0,
+                "volatility_trigger_multiplier": 0.0,
+                "volatility_reason": "state_unavailable",
+                "ramp_profile": "linear",
+                "linear_progress": 0.0,
+                "effective_progress": 0.0,
                 "directional_gap": 0.0,
                 "hard_move_fraction": 0.0,
                 "macro_regime": "unavailable",
@@ -384,13 +487,30 @@ class ExitStrategy:
         )
         ramp_minutes = max(0.0, self._safe_float(getattr(strategy, "controlled_loss_ramp_minutes", 24.0 * 60.0), 0.0))
         pressure = self._controlled_loss_macro_pressure_context(symbol, signal)
+        volatility_pressure = self._controlled_loss_volatility_pressure_context(symbol, signal)
+        macro_speed_multiplier = max(1.0, self._safe_float(pressure.get("speed_multiplier"), 1.0))
+        volatility_speed_multiplier = max(1.0, self._safe_float(volatility_pressure.get("volatility_speed_multiplier"), 1.0))
+        speed_multiplier = macro_speed_multiplier * volatility_speed_multiplier
         move_fraction = min_move
         elapsed_minutes = 0.0
+        linear_progress = 0.0
+        effective_progress = 0.0
+        ramp_profile = "linear"
 
         if state.sell_ladder_mode == "controlled_loss_exit" and state.time_exit_activated_at:
             elapsed_minutes = max(0.0, (time.time() - state.time_exit_activated_at) / 60.0)
-            progress = 1.0 if ramp_minutes <= 0 else (elapsed_minutes * pressure["speed_multiplier"]) / ramp_minutes
-            time_move = min_move + (1.0 - min_move) * progress
+            linear_progress = 1.0 if ramp_minutes <= 0 else (elapsed_minutes * speed_multiplier) / ramp_minutes
+            effective_progress = linear_progress
+            volatility_intensity = self._safe_float(volatility_pressure.get("volatility_intensity"), 0.0)
+            if volatility_intensity > 0.0 and linear_progress > 0.0:
+                if linear_progress >= 1.0:
+                    effective_progress = 1.0
+                else:
+                    curve = max(1.0, self._safe_float(volatility_pressure.get("volatility_exponential_curve"), 1.0))
+                    exponential_progress = 1.0 - math.exp(-linear_progress * curve)
+                    effective_progress = max(linear_progress, exponential_progress)
+                ramp_profile = "exponential_volatility"
+            time_move = min_move + (1.0 - min_move) * min(effective_progress, 1.0)
             move_fraction = max(move_fraction, time_move)
 
         hard_move = 0.0
@@ -406,6 +526,9 @@ class ExitStrategy:
                 move_fraction = max(move_fraction, hard_move)
 
         context = dict(pressure)
+        context["macro_speed_multiplier"] = macro_speed_multiplier
+        context["speed_multiplier"] = speed_multiplier
+        context.update(volatility_pressure)
         context.update(
             {
                 "move_fraction": self._clamp(move_fraction, 0.0, 1.0),
@@ -413,6 +536,9 @@ class ExitStrategy:
                 "ramp_minutes": ramp_minutes,
                 "min_move_fraction": min_move,
                 "hard_move_fraction": self._clamp(hard_move, 0.0, 1.0),
+                "ramp_profile": ramp_profile,
+                "linear_progress": self._clamp(linear_progress, 0.0, 1.0),
+                "effective_progress": self._clamp(effective_progress, 0.0, 1.0),
             }
         )
         return context
@@ -436,6 +562,7 @@ class ExitStrategy:
         mode: str = "normal",
         state: Optional[TradeState] = None,
         use_trailing_exit: bool = True,
+        signal: Optional[dict] = None,
     ) -> Tuple[List[dict], dict]:
         strategy = config.STRATEGY
         if state is None and symbol:
@@ -463,7 +590,7 @@ class ExitStrategy:
 
         if mode == "controlled_loss_exit":
             fractions = tuple(strategy.ema_exit_ladder_fractions)
-            ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol)
+            ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol, signal=signal)
             move_fraction = self._safe_float(ramp_context.get("move_fraction"), 0.0)
             steps = [
                 {"fraction": fraction, "markup": move_fraction, "runner": False}
@@ -477,11 +604,25 @@ class ExitStrategy:
                     "controlled_loss_signal_intensity": self._safe_float(ramp_context.get("signal_intensity"), 0.0),
                     "controlled_loss_overlay_intensity": self._safe_float(ramp_context.get("overlay_intensity"), 0.0),
                     "controlled_loss_speed_multiplier": self._safe_float(ramp_context.get("speed_multiplier"), 1.0),
+                    "controlled_loss_macro_speed_multiplier": self._safe_float(ramp_context.get("macro_speed_multiplier"), 1.0),
+                    "controlled_loss_volatility_intensity": self._safe_float(ramp_context.get("volatility_intensity"), 0.0),
+                    "controlled_loss_volatility_speed_multiplier": self._safe_float(ramp_context.get("volatility_speed_multiplier"), 1.0),
+                    "controlled_loss_volatility_exponential_curve": self._safe_float(ramp_context.get("volatility_exponential_curve"), 1.0),
+                    "controlled_loss_volatility_ratio": self._safe_float(ramp_context.get("volatility_ratio"), 0.0),
+                    "controlled_loss_local_volatility": self._safe_float(ramp_context.get("local_volatility"), 0.0),
+                    "controlled_loss_atr_rate": self._safe_float(ramp_context.get("atr_rate"), 0.0),
+                    "controlled_loss_daily_volatility_multiplier": self._safe_float(ramp_context.get("daily_volatility_multiplier"), 1.0),
+                    "controlled_loss_volatility_reference": self._safe_float(ramp_context.get("volatility_reference"), 0.0),
+                    "controlled_loss_volatility_trigger_multiplier": self._safe_float(ramp_context.get("volatility_trigger_multiplier"), 0.0),
+                    "controlled_loss_linear_progress": self._safe_float(ramp_context.get("linear_progress"), 0.0),
+                    "controlled_loss_effective_progress": self._safe_float(ramp_context.get("effective_progress"), 0.0),
                     "controlled_loss_directional_gap": self._safe_float(ramp_context.get("directional_gap"), 0.0),
                     "controlled_loss_elapsed_minutes": self._safe_float(ramp_context.get("elapsed_minutes"), 0.0),
                     "controlled_loss_ramp_minutes": self._safe_float(ramp_context.get("ramp_minutes"), 0.0),
                     "controlled_loss_macro_regime": str(ramp_context.get("macro_regime") or "neutral"),
                     "controlled_loss_macro_reason": str(ramp_context.get("macro_reason") or "neutral"),
+                    "controlled_loss_volatility_reason": str(ramp_context.get("volatility_reason") or "neutral"),
+                    "controlled_loss_ramp_profile": str(ramp_context.get("ramp_profile") or "linear"),
                 }
             )
             return steps, context
@@ -660,6 +801,7 @@ class ExitStrategy:
         total_contracts: Optional[float] = None,
         avg_entry_price: Optional[float] = None,
         use_trailing_exit: bool = True,
+        signal: Optional[dict] = None,
     ) -> str:
         if state is None and symbol:
             state = self._get_state(symbol)
@@ -679,6 +821,7 @@ class ExitStrategy:
             mode=mode,
             state=state,
             use_trailing_exit=use_trailing_exit,
+            signal=signal,
         )
         plan = ",".join(
             f"{self._safe_float(step.get('fraction'), 0.0):.8f}@runner"
@@ -695,7 +838,13 @@ class ExitStrategy:
                 f"{strategy.controlled_loss_ramp_minutes:.4f}:"
                 f"{strategy.controlled_loss_reprice_minutes:.4f}:"
                 f"{strategy.controlled_loss_macro_gap_reference:.8f}:"
-                f"{strategy.controlled_loss_macro_max_speed_multiplier:.4f}"
+                f"{strategy.controlled_loss_macro_max_speed_multiplier:.4f}:"
+                f"{int(strategy.controlled_loss_volatility_speed_enabled)}:"
+                f"{strategy.controlled_loss_volatility_reference:.8f}:"
+                f"{strategy.controlled_loss_volatility_trigger_multiplier:.4f}:"
+                f"{strategy.controlled_loss_volatility_max_speed_multiplier:.4f}:"
+                f"{strategy.controlled_loss_volatility_exponent:.4f}:"
+                f"{strategy.controlled_loss_volatility_reprice_min_move_delta:.8f}"
             )
         return (
             f"{mode}|strategy=ema_pullback|direction={config.POSITION_SIDE}|exit_side={config.EXIT_SIDE}|"
@@ -919,11 +1068,25 @@ class ExitStrategy:
             "controlled_loss_signal_intensity": 0.0,
             "controlled_loss_overlay_intensity": 0.0,
             "controlled_loss_speed_multiplier": 1.0,
+            "controlled_loss_macro_speed_multiplier": 1.0,
+            "controlled_loss_volatility_intensity": 0.0,
+            "controlled_loss_volatility_speed_multiplier": 1.0,
+            "controlled_loss_volatility_exponential_curve": 1.0,
+            "controlled_loss_volatility_ratio": 0.0,
+            "controlled_loss_local_volatility": 0.0,
+            "controlled_loss_atr_rate": 0.0,
+            "controlled_loss_daily_volatility_multiplier": 1.0,
+            "controlled_loss_volatility_reference": 0.0,
+            "controlled_loss_volatility_trigger_multiplier": 0.0,
+            "controlled_loss_linear_progress": 0.0,
+            "controlled_loss_effective_progress": 0.0,
             "controlled_loss_directional_gap": 0.0,
             "controlled_loss_elapsed_minutes": 0.0,
             "controlled_loss_ramp_minutes": 0.0,
             "controlled_loss_macro_regime": "neutral",
             "controlled_loss_macro_reason": "neutral",
+            "controlled_loss_volatility_reason": "neutral",
+            "controlled_loss_ramp_profile": "linear",
             "external_spread_bps": 0.0,
             "external_reason": "unavailable",
         }
@@ -1076,6 +1239,7 @@ class ExitStrategy:
             "exit_scope",
             "signature_override",
             "use_trailing_exit",
+            "signal",
         )
         if isinstance(ladder_config, str) or ladder_config is None:
             values = {}
@@ -1107,6 +1271,7 @@ class ExitStrategy:
                 exit_scope=ladder_config.exit_scope,
                 signature_override=ladder_config.signature_override,
                 use_trailing_exit=ladder_config.use_trailing_exit,
+                signal=ladder_config.signal,
             )
         elif args or kwargs:
             raise TypeError("_place_sell_ladder does not accept extra arguments with ExitLadderConfig")
@@ -1122,6 +1287,7 @@ class ExitStrategy:
         exit_scope = ladder_config.exit_scope
         signature_override = ladder_config.signature_override
         use_trailing_exit = ladder_config.use_trailing_exit
+        signal = ladder_config.signal
         state = self._get_state(symbol)
         exit_side = config.EXIT_SIDE
         exit_label = "Buy" if exit_side == "buy" else "Sell"
@@ -1198,6 +1364,7 @@ class ExitStrategy:
             mode=mode,
             state=state,
             use_trailing_exit=use_trailing_exit,
+            signal=signal,
         )
         allocations, runner_contracts = self._exit_ladder_contract_allocations(symbol, ladder_contracts, steps, state)
         state.sell_ladder_signature = signature_override or self._sell_ladder_signature(
@@ -1207,6 +1374,7 @@ class ExitStrategy:
             total_contracts=total_contracts,
             avg_entry_price=avg_entry_price,
             use_trailing_exit=use_trailing_exit,
+            signal=signal,
         )
         if plan_context.get("runner_enabled") and runner_contracts > 0:
             state.exit_runner_contracts = runner_contracts
@@ -1226,6 +1394,18 @@ class ExitStrategy:
                 "controlled_loss_signal_intensity",
                 "controlled_loss_overlay_intensity",
                 "controlled_loss_speed_multiplier",
+                "controlled_loss_macro_speed_multiplier",
+                "controlled_loss_volatility_intensity",
+                "controlled_loss_volatility_speed_multiplier",
+                "controlled_loss_volatility_exponential_curve",
+                "controlled_loss_volatility_ratio",
+                "controlled_loss_local_volatility",
+                "controlled_loss_atr_rate",
+                "controlled_loss_daily_volatility_multiplier",
+                "controlled_loss_volatility_reference",
+                "controlled_loss_volatility_trigger_multiplier",
+                "controlled_loss_linear_progress",
+                "controlled_loss_effective_progress",
                 "controlled_loss_directional_gap",
                 "controlled_loss_elapsed_minutes",
                 "controlled_loss_ramp_minutes",
@@ -1236,6 +1416,16 @@ class ExitStrategy:
             )
             sell_context["controlled_loss_macro_reason"] = str(
                 plan_context.get("controlled_loss_macro_reason") or sell_context.get("controlled_loss_macro_reason") or "neutral"
+            )
+            sell_context["controlled_loss_volatility_reason"] = str(
+                plan_context.get("controlled_loss_volatility_reason")
+                or sell_context.get("controlled_loss_volatility_reason")
+                or "neutral"
+            )
+            sell_context["controlled_loss_ramp_profile"] = str(
+                plan_context.get("controlled_loss_ramp_profile")
+                or sell_context.get("controlled_loss_ramp_profile")
+                or "linear"
             )
         for index, step, contracts in allocations:
             markup = self._safe_float(step.get("markup"), 0.0)
@@ -1373,6 +1563,12 @@ class ExitStrategy:
                 ref["reference_price_at_placement"] = self._safe_float(sell_context.get("controlled_reference_price"), 0.0)
                 ref["loss_macro_intensity"] = self._safe_float(sell_context.get("controlled_loss_macro_intensity"), 0.0)
                 ref["loss_speed_multiplier"] = self._safe_float(sell_context.get("controlled_loss_speed_multiplier"), 1.0)
+                ref["loss_macro_speed_multiplier"] = self._safe_float(sell_context.get("controlled_loss_macro_speed_multiplier"), 1.0)
+                ref["loss_volatility_intensity"] = self._safe_float(sell_context.get("controlled_loss_volatility_intensity"), 0.0)
+                ref["loss_volatility_speed_multiplier"] = self._safe_float(sell_context.get("controlled_loss_volatility_speed_multiplier"), 1.0)
+                ref["loss_volatility_ratio"] = self._safe_float(sell_context.get("controlled_loss_volatility_ratio"), 0.0)
+                ref["loss_atr_rate"] = self._safe_float(sell_context.get("controlled_loss_atr_rate"), 0.0)
+                ref["loss_ramp_profile"] = str(sell_context.get("controlled_loss_ramp_profile") or "linear")
                 ref["loss_directional_macro_gap"] = self._safe_float(sell_context.get("controlled_loss_directional_gap"), 0.0)
                 ref["loss_macro_regime"] = str(sell_context.get("controlled_loss_macro_regime") or "neutral")
             state.sell_ladder_orders.append(ref)
@@ -1384,7 +1580,7 @@ class ExitStrategy:
             self._record_signal_analytics(
                 event,
                 symbol=symbol,
-                signal={},
+                signal=signal or {},
                 planned_orders=exit_planned_orders,
                 planned_notional=exit_planned_notional,
                 placed_orders=exit_planned_orders,
@@ -1433,6 +1629,10 @@ class ExitStrategy:
                     f"controlled_loss_move={plan_context.get('controlled_loss_move_fraction', 0.0):.4f};"
                     f"controlled_loss_macro_intensity={sell_context.get('controlled_loss_macro_intensity', 0.0):.3f};"
                     f"controlled_loss_speed={sell_context.get('controlled_loss_speed_multiplier', 1.0):.3f};"
+                    f"controlled_loss_vol_intensity={sell_context.get('controlled_loss_volatility_intensity', 0.0):.3f};"
+                    f"controlled_loss_vol_ratio={sell_context.get('controlled_loss_volatility_ratio', 0.0):.3f};"
+                    f"controlled_loss_atr_rate={sell_context.get('controlled_loss_atr_rate', 0.0):.6f};"
+                    f"controlled_loss_ramp_profile={sell_context.get('controlled_loss_ramp_profile', 'linear')};"
                     f"controlled_loss_gap={sell_context.get('controlled_loss_directional_gap', 0.0):.6f};"
                     f"controlled_loss_macro_regime={sell_context.get('controlled_loss_macro_regime', 'neutral')};"
                     f"external_spread_bps={sell_context.get('external_spread_bps', 0.0):.4f};"
@@ -2506,6 +2706,67 @@ class ExitStrategy:
             )
         return closeable
 
+    def _controlled_loss_current_move_fraction(self, state: TradeState) -> float:
+        values = [
+            self._safe_float(ref.get("loss_move_fraction", ref.get("markup")), 0.0)
+            for ref in state.sell_ladder_orders
+            if isinstance(ref, dict)
+        ]
+        return max(values) if values else 0.0
+
+    def _maybe_reprice_controlled_loss_for_volatility(self, symbol: str, signal: Optional[dict] = None) -> bool:
+        state = self._get_state(symbol)
+        if state.sell_ladder_mode != "controlled_loss_exit" or not state.sell_ladder_orders:
+            return False
+
+        ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol, signal=signal)
+        volatility_intensity = self._safe_float(ramp_context.get("volatility_intensity"), 0.0)
+        if volatility_intensity <= 0.0:
+            return False
+
+        desired_move = self._safe_float(ramp_context.get("move_fraction"), 0.0)
+        current_move = self._controlled_loss_current_move_fraction(state)
+        min_delta = max(
+            0.0,
+            self._safe_float(getattr(config.STRATEGY, "controlled_loss_volatility_reprice_min_move_delta", 0.05), 0.05),
+        )
+        if desired_move <= current_move + min_delta:
+            return False
+
+        self._log_event(
+            "WARNING",
+            f"Repricing controlled loss ladder for {symbol}: adverse volatility accelerated exit",
+            event="exit_ladder_rebuilt",
+            symbol=symbol,
+            side=config.EXIT_SIDE,
+            position_size=state.position_size,
+            entry_price=state.entry_price,
+            reason=(
+                "controlled_loss_volatility_acceleration;"
+                f"current_move={current_move:.4f};desired_move={desired_move:.4f};"
+                f"vol_intensity={volatility_intensity:.3f};"
+                f"vol_ratio={self._safe_float(ramp_context.get('volatility_ratio'), 0.0):.3f};"
+                f"atr_rate={self._safe_float(ramp_context.get('atr_rate'), 0.0):.6f};"
+                f"speed={self._safe_float(ramp_context.get('speed_multiplier'), 1.0):.3f};"
+                f"profile={ramp_context.get('ramp_profile', 'linear')}"
+            ),
+        )
+        self._cancel_sell_orders(symbol, reason="controlled_loss_volatility_acceleration")
+        state = self._get_state(symbol)
+        if state.sell_ladder_orders:
+            return True
+
+        self._place_sell_ladder(ExitLadderConfig(
+            symbol,
+            state.position_size,
+            state.entry_price,
+            rebuild=True,
+            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=True),
+            mode="controlled_loss_exit",
+            signal=signal,
+        ))
+        return True
+
     def _controlled_loss_block_reason(self, symbol: str, state: TradeState, reference_price: float) -> str:
         strategy = config.STRATEGY
         hard_time_exit = self._hard_time_exit_elapsed(state)
@@ -2535,7 +2796,7 @@ class ExitStrategy:
             return "controlled_loss_no_profit_bank"
         return ""
 
-    def _rebuild_controlled_loss_exit_ladder(self, symbol: str, reason: str) -> bool:
+    def _rebuild_controlled_loss_exit_ladder(self, symbol: str, reason: str, signal: Optional[dict] = None) -> bool:
         state = self._get_state(symbol)
         reference_price, _ = self._fetch_reference_price(symbol)
         if reference_price <= 0:
@@ -2570,11 +2831,12 @@ class ExitStrategy:
             rebuild=True,
             closeable_contracts=close_contracts,
             mode="controlled_loss_exit",
+            signal=signal,
         ))
         state = self._get_state(symbol)
         if not state.sell_ladder_orders:
             return True
-        ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol)
+        ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol, signal=signal)
         self._log_event(
             "WARNING",
             f"Controlled loss exit ladder activated for {symbol}: contracts={close_contracts}",
@@ -2592,7 +2854,10 @@ class ExitStrategy:
                 f"loss_move={self._safe_float(ramp_context.get('move_fraction'), 0.0):.4f};"
                 f"macro_intensity={self._safe_float(ramp_context.get('macro_intensity'), 0.0):.3f};"
                 f"speed={self._safe_float(ramp_context.get('speed_multiplier'), 1.0):.3f};"
-                f"macro_gap={self._safe_float(ramp_context.get('directional_gap'), 0.0):.6f}"
+                f"macro_gap={self._safe_float(ramp_context.get('directional_gap'), 0.0):.6f};"
+                f"vol_intensity={self._safe_float(ramp_context.get('volatility_intensity'), 0.0):.3f};"
+                f"vol_ratio={self._safe_float(ramp_context.get('volatility_ratio'), 0.0):.3f};"
+                f"ramp_profile={ramp_context.get('ramp_profile', 'linear')}"
             ),
         )
         return True
@@ -2625,10 +2890,12 @@ class ExitStrategy:
             if not state.sell_ladder_orders:
                 if self._is_exit_ladder_waiting_for_closeable(symbol, "controlled_loss_exit", state):
                     return True
-                return self._rebuild_controlled_loss_exit_ladder(symbol, reason="controlled_loss_missing_ladder")
-            return self._maybe_reprice_time_exit_ladder(symbol) or True
+                return self._rebuild_controlled_loss_exit_ladder(symbol, reason="controlled_loss_missing_ladder", signal=signal)
+            if self._maybe_reprice_controlled_loss_for_volatility(symbol, signal):
+                return True
+            return self._maybe_reprice_time_exit_ladder(symbol, signal=signal) or True
 
-        return self._rebuild_controlled_loss_exit_ladder(symbol, reason="controlled_loss_activation")
+        return self._rebuild_controlled_loss_exit_ladder(symbol, reason="controlled_loss_activation", signal=signal)
 
     def _maybe_apply_urgent_time_exit(self, symbol: str, signal: Optional[dict] = None) -> bool:
         state = self._get_state(symbol)
@@ -2704,7 +2971,7 @@ class ExitStrategy:
             return max(0.0, config.STRATEGY.controlled_loss_reprice_minutes)
         return 0.0
 
-    def _maybe_reprice_time_exit_ladder(self, symbol: str) -> bool:
+    def _maybe_reprice_time_exit_ladder(self, symbol: str, signal: Optional[dict] = None) -> bool:
         state = self._get_state(symbol)
         mode = state.sell_ladder_mode if self._is_managed_exit_mode(state.sell_ladder_mode) else "time_exit"
         reprice_after = self._time_exit_reprice_after_minutes(mode)
@@ -2745,6 +3012,7 @@ class ExitStrategy:
             rebuild=True,
             closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=True),
             mode=mode,
+            signal=signal if mode == "controlled_loss_exit" else None,
         ))
         return True
 
