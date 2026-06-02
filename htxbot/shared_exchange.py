@@ -36,6 +36,61 @@ def _cache_key(value: Any):
     return repr(value)
 
 
+def _thread_safe_lock(exchange) -> threading.RLock:
+    getter = getattr(exchange, "thread_safe_lock", None)
+    if callable(getter):
+        lock = getter()
+        if lock is not None:
+            return lock
+    lock = getattr(exchange, "_thread_safe_exchange_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        try:
+            setattr(exchange, "_thread_safe_exchange_lock", lock)
+        except Exception:
+            return threading.RLock()
+    return lock
+
+
+class ThreadSafeExchange:
+    """Serialize calls into a synchronous ccxt exchange instance."""
+
+    def __init__(self, exchange, lock=None):
+        object.__setattr__(self, "_exchange", exchange)
+        object.__setattr__(self, "_thread_safe_exchange_lock", lock or _thread_safe_lock(exchange))
+
+    def thread_safe_lock(self):
+        return self._thread_safe_exchange_lock
+
+    def unsafe_exchange(self):
+        return self._exchange
+
+    def __getattr__(self, name: str):
+        value = getattr(self._exchange, name)
+        if not callable(value):
+            return value
+
+        def locked_call(*args, **kwargs):
+            with self._thread_safe_exchange_lock:
+                return value(*args, **kwargs)
+
+        return locked_call
+
+    def __setattr__(self, name: str, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        with self._thread_safe_exchange_lock:
+            setattr(self._exchange, name, value)
+
+
+def ensure_thread_safe_exchange(exchange):
+    getter = getattr(exchange, "thread_safe_lock", None)
+    if callable(getter):
+        return exchange
+    return ThreadSafeExchange(exchange)
+
+
 class CachedMarketDataExchange:
     """Small shared cache for immutable-ish market reads inside one bot process."""
 
@@ -50,6 +105,7 @@ class CachedMarketDataExchange:
         object.__setattr__(self, "_ticker_ttl_sec", max(0.0, ticker_ttl_sec))
         object.__setattr__(self, "_funding_ttl_sec", max(0.0, funding_ttl_sec))
         object.__setattr__(self, "_order_book_ttl_sec", max(0.0, order_book_ttl_sec))
+        object.__setattr__(self, "_exchange_lock", _thread_safe_lock(exchange))
         object.__setattr__(self, "_ohlcv_cache", {})
         object.__setattr__(self, "_ohlcv_bucket_by_timeframe", {})
         object.__setattr__(self, "_ohlcv_inflight", {})
@@ -60,14 +116,31 @@ class CachedMarketDataExchange:
         object.__setattr__(self, "_funding_cache", {})
         object.__setattr__(self, "_cache_lock", threading.RLock())
 
+    def thread_safe_lock(self):
+        return self._exchange_lock
+
     def __getattr__(self, name: str):
-        return getattr(self._exchange, name)
+        value = getattr(self._exchange, name)
+        if not callable(value):
+            return value
+
+        def locked_call(*args, **kwargs):
+            with self._exchange_lock:
+                return value(*args, **kwargs)
+
+        return locked_call
 
     def __setattr__(self, name: str, value):
         if name.startswith("_"):
             object.__setattr__(self, name, value)
         else:
-            setattr(self._exchange, name, value)
+            with self._exchange_lock:
+                setattr(self._exchange, name, value)
+
+    def _call_exchange(self, method_name: str, *args, **kwargs):
+        method = getattr(self._exchange, method_name)
+        with self._exchange_lock:
+            return method(*args, **kwargs)
 
     def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None):
         timeframe_sec = max(1, _timeframe_seconds(timeframe))
@@ -102,8 +175,10 @@ class CachedMarketDataExchange:
                 raise entry["exception"]
             return entry.get("value")
 
+        value = None
         try:
-            value = self._exchange.fetch_ohlcv(
+            value = self._call_exchange(
+                "fetch_ohlcv",
                 symbol,
                 timeframe=timeframe,
                 since=since,
@@ -127,7 +202,7 @@ class CachedMarketDataExchange:
     def fetch_ticker(self, symbol: str, params=None):
         ttl = self._ticker_ttl_sec
         if ttl <= 0:
-            return self._exchange.fetch_ticker(symbol, params=params or {})
+            return self._call_exchange("fetch_ticker", symbol, params=params or {})
         now = time.time()
         key = (symbol, _cache_key(params))
         entry = None
@@ -150,7 +225,7 @@ class CachedMarketDataExchange:
 
         value = None
         try:
-            value = self._exchange.fetch_ticker(symbol, params=params or {})
+            value = self._call_exchange("fetch_ticker", symbol, params=params or {})
             with self._cache_lock:
                 self._ticker_cache[key] = (time.time(), value)
             return value
@@ -170,10 +245,10 @@ class CachedMarketDataExchange:
         key_params = _cache_key(params)
 
         if ttl <= 0:
-            return self._exchange.fetch_tickers(symbols, params=params or {})
+            return self._call_exchange("fetch_tickers", symbols, params=params or {})
 
         if symbols is None:
-            return self._exchange.fetch_tickers(symbols, params=params or {})
+            return self._call_exchange("fetch_tickers", symbols, params=params or {})
 
         with self._cache_lock:
             missing_symbols = []
@@ -187,7 +262,7 @@ class CachedMarketDataExchange:
                     missing_symbols.append(symbol)
 
             if missing_symbols:
-                fetched = self._exchange.fetch_tickers(missing_symbols, params=params or {})
+                fetched = self._call_exchange("fetch_tickers", missing_symbols, params=params or {})
                 for symbol, value in fetched.items():
                     self._ticker_cache[(symbol, key_params)] = (now, value)
                     result[symbol] = value
@@ -196,9 +271,9 @@ class CachedMarketDataExchange:
 
     def _fetch_order_book_uncached(self, symbol: str, limit=None, params=None):
         try:
-            return self._exchange.fetch_order_book(symbol, limit=limit, params=params or {})
+            return self._call_exchange("fetch_order_book", symbol, limit=limit, params=params or {})
         except TypeError:
-            return self._exchange.fetch_order_book(symbol, limit=limit)
+            return self._call_exchange("fetch_order_book", symbol, limit=limit)
 
     @staticmethod
     def _valid_order_book_payload(payload: Any) -> bool:
@@ -267,17 +342,17 @@ class CachedMarketDataExchange:
     def fetch_funding_rate(self, symbol: str, params=None):
         ttl = self._funding_ttl_sec
         if ttl <= 0:
-            return self._exchange.fetch_funding_rate(symbol, params=params or {})
+            return self._call_exchange("fetch_funding_rate", symbol, params=params or {})
         now = time.time()
         key = (symbol, _cache_key(params))
         with self._cache_lock:
             cached = self._funding_cache.get(key)
             if cached and now - cached[0] <= ttl:
                 return cached[1]
-            value = self._exchange.fetch_funding_rate(symbol, params=params or {})
+            value = self._call_exchange("fetch_funding_rate", symbol, params=params or {})
             if self._funding_rate_value(value) is not None:
                 self._funding_cache[key] = (now, value)
             return value
 
 
-__all__ = ["CachedMarketDataExchange"]
+__all__ = ["CachedMarketDataExchange", "ThreadSafeExchange", "ensure_thread_safe_exchange"]

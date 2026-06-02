@@ -13,6 +13,7 @@ import ccxt
 import config
 
 from .concurrency import instance_rlock
+from .shared_exchange import ThreadSafeExchange
 
 
 class UnexpectedExchangeResponse(RuntimeError):
@@ -35,6 +36,14 @@ class ExchangeMixin:
 
     def _market_data_cache_runtime_lock(self):
         return self._runtime_rlock("_market_data_cache_lock")
+
+    def _exchange_runtime_lock(self):
+        getter = getattr(self.exchange, "thread_safe_lock", None)
+        if callable(getter):
+            lock = getter()
+            if lock is not None:
+                return lock
+        return instance_rlock(self.exchange, "_thread_safe_exchange_lock")
 
     def _create_exchange(self):
         if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
@@ -62,7 +71,7 @@ class ExchangeMixin:
         exchange = ccxt.htx(exchange_config)
         exchange.has["fetchCurrencies"] = False
         self._set_contract_hostname(exchange, self._contract_hostnames()[0])
-        return exchange
+        return ThreadSafeExchange(exchange)
 
     def _timeframe_to_seconds(self, timeframe: str) -> int:
         try:
@@ -138,7 +147,7 @@ class ExchangeMixin:
         for attempt in range(1, retries + 1):
             for hostname in hostnames:
                 try:
-                    with instance_rlock(self, "_exchange_host_lock"):
+                    with self._exchange_runtime_lock():
                         self._set_contract_hostname(self.exchange, hostname)
                         markets = self.exchange.load_markets(reload=reload)
                     self._save_markets_cache(markets)
@@ -242,20 +251,7 @@ class ExchangeMixin:
         for attempt in range(1, attempts + 1):
             hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
             try:
-                if hostname:
-                    with instance_rlock(self, "_exchange_host_lock"):
-                        current_hostname = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
-                        if current_hostname != hostname:
-                            self._set_contract_hostname(self.exchange, hostname)
-
-                if attempt > 1:
-                    fetch_lock = instance_rlock(self, "_exchange_host_lock")
-                else:
-                    fetch_lock = None
-
-                if fetch_lock:
-                    fetch_lock.acquire()
-                try:
+                with self._exchange_runtime_lock():
                     if hostname:
                         self._set_contract_hostname(self.exchange, hostname)
                     ohlcv = self.exchange.fetch_ohlcv(
@@ -271,9 +267,6 @@ class ExchangeMixin:
                         symbol=symbol,
                         item_types=(list, tuple),
                     )
-                finally:
-                    if fetch_lock:
-                        fetch_lock.release()
             except Exception as exc:
                 if not self._is_transient_exchange_error(exc):
                     raise
@@ -310,7 +303,7 @@ class ExchangeMixin:
         for attempt in range(1, attempts + 1):
             hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
             try:
-                with instance_rlock(self, "_exchange_host_lock"):
+                with self._exchange_runtime_lock():
                     if hostname:
                         self._set_contract_hostname(self.exchange, hostname)
                     return fetch()
@@ -2015,7 +2008,7 @@ class ExchangeMixin:
             }
         )
         exchange.has["fetchCurrencies"] = False
-        return exchange
+        return ThreadSafeExchange(exchange)
 
     def _spot_exchange(self):
         if getattr(self, "macro_spot_exchange", None) is None:

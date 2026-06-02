@@ -25,7 +25,7 @@ from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
 from htxbot.indicators import average_true_range, calculate_rsi, compute_log_return, realized_volatility
 from htxbot.models import PositionLifecycle, SellLadderParams, SignalContext
-from htxbot.shared_exchange import CachedMarketDataExchange
+from htxbot.shared_exchange import CachedMarketDataExchange, ThreadSafeExchange
 
 
 SYMBOL = "TEST/USDT:USDT"
@@ -397,6 +397,39 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertIn("_risk_budget", RiskManager.__dict__)
         self.assertIn("_entry_gate_block_reason", SignalFilters.__dict__)
 
+    def test_bot_init_wraps_injected_exchange_with_thread_safe_proxy(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            tmp_path = Path(raw_tmp)
+            runtime = replace(
+                config.RUNTIME,
+                state_file=str(tmp_path / "state.json"),
+                markets_cache_file=str(tmp_path / "markets.json"),
+            )
+            monitoring = replace(
+                config.MONITORING,
+                cycle_stats_csv_file=str(tmp_path / "cycles.csv"),
+                csv_log_file=str(tmp_path / "trades.csv"),
+                macro_csv_file=str(tmp_path / "macro.csv"),
+                external_price_csv_file=str(tmp_path / "external_price.csv"),
+                account_pnl_csv_file=str(tmp_path / "account_pnl.csv"),
+                signal_analytics_csv_file=str(tmp_path / "signal_analytics.csv"),
+                signal_analytics_jsonl_file=str(tmp_path / "signal_analytics.jsonl"),
+                diagnostics_csv_file=str(tmp_path / "diagnostics.csv"),
+                diagnostics_jsonl_file=str(tmp_path / "diagnostics.jsonl"),
+                csv_archive_dir=str(tmp_path / "archive"),
+            )
+            raw_exchange = FakeExchange()
+
+            with override_config(RUNTIME=runtime, MONITORING=monitoring):
+                bot = HtxFuturesBot(
+                    profile="long",
+                    exchange=raw_exchange,
+                    external_price_feed=StaticExternalPriceFeed(self.external_context()),
+                )
+
+            self.assertIs(bot.exchange.unsafe_exchange(), raw_exchange)
+            self.assertIsNotNone(bot.exchange.thread_safe_lock())
+
     def test_compute_log_return_cases(self):
         # price_now <= 0
         self.assertEqual(compute_log_return(0.0, 100.0), 0.0)
@@ -450,7 +483,7 @@ class UnifiedBotTests(unittest.TestCase):
         instance.profile = config.current_profile()
         instance.profile_name = config.BOT_NAME
         instance.log = logger
-        instance.exchange = FakeExchange()
+        instance.exchange = ThreadSafeExchange(FakeExchange())
         instance.state_path = tmp_path / "state.json"
         instance.lock_path = tmp_path / "state.lock"
         instance.markets_cache_path = tmp_path / "markets.json"
@@ -1829,7 +1862,7 @@ class UnifiedBotTests(unittest.TestCase):
                     rows = list(csv.DictReader(handle))
                 self.assertIn("htx_orderbook_spread_too_wide", rows[-1]["block_reason"])
 
-    def test_order_book_prefetch_fetches_symbols_in_parallel_and_reuses_cycle_cache(self):
+    def test_order_book_prefetch_serializes_exchange_calls_and_reuses_cycle_cache(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, market_data_max_workers=4, poll_interval_sec=3)
             strategy = replace(
@@ -1862,7 +1895,7 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._reset_market_data_caches()
                 bot._prefetch_market_data_snapshots()
 
-                self.assertGreater(active["max"], 1)
+                self.assertEqual(active["max"], 1)
                 self.assertEqual(set(bot.exchange.order_book_calls), set(symbols))
                 calls_after_prefetch = bot.exchange.fetch_order_book_calls
 
@@ -1902,7 +1935,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(seen_sides)
                 self.assertEqual(set(seen_sides), {"short"})
 
-    def test_ticker_prefetch_fetches_symbols_in_parallel_and_reuses_cycle_cache(self):
+    def test_ticker_prefetch_serializes_exchange_calls_and_reuses_cycle_cache(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, market_data_max_workers=4, poll_interval_sec=3)
             with override_config(RUNTIME=runtime):
@@ -1933,7 +1966,7 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._reset_market_data_caches()
                 bot._prefetch_ticker_snapshots(symbols)
 
-                self.assertGreater(active["max"], 1)
+                self.assertEqual(active["max"], 1)
                 self.assertEqual(set(bot.exchange.ticker_calls), set(symbols))
                 calls_after_prefetch = bot.exchange.fetch_ticker_calls
 
@@ -4689,7 +4722,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertGreaterEqual(max(symbol_limits), strategy.ema_volume_profile_window)
                 self.assertIn(SYMBOL, bot.signal_cache["symbols"])
 
-    def test_signal_update_fetches_symbol_candles_in_parallel(self):
+    def test_signal_update_serializes_exchange_candle_fetches(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, market_data_max_workers=4)
             strategy = self.ema_test_strategy(
@@ -4746,7 +4779,7 @@ class UnifiedBotTests(unittest.TestCase):
                 updated = bot._update_signal_cache_if_needed()
 
                 self.assertTrue(updated)
-                self.assertGreater(active["max"], 1)
+                self.assertEqual(active["max"], 1)
                 self.assertEqual(set(bot.signal_cache["symbols"]), set(symbols))
 
     def test_parallel_signal_fetch_preserves_profile_context(self):
@@ -6641,7 +6674,7 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(cached.fetch_ohlcv(SYMBOL, timeframe="1m", limit=1), exchange.ohlcv[(SYMBOL, "1m")])
         self.assertEqual(len(exchange.ohlcv_calls), 2)
 
-    def test_shared_exchange_ohlcv_cache_allows_different_symbols_concurrent_fetches(self):
+    def test_shared_exchange_ohlcv_cache_serializes_different_symbol_fetches(self):
         class SlowOhlcvExchange:
             def __init__(self):
                 self.calls = []
@@ -6669,7 +6702,7 @@ class UnifiedBotTests(unittest.TestCase):
             results = list(executor.map(lambda item: cached.fetch_ohlcv(item, timeframe="1m", limit=1), symbols))
 
         self.assertEqual(len(results), len(symbols))
-        self.assertGreater(exchange.max_active, 1)
+        self.assertEqual(exchange.max_active, 1)
         self.assertEqual(set(exchange.calls), set(symbols))
 
     def test_shared_exchange_ticker_cache_is_singleflight_across_threads(self):
@@ -6693,7 +6726,7 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(exchange.calls, 1)
         self.assertTrue(all(result["symbol"] == SYMBOL for result in results))
 
-    def test_shared_exchange_fetches_distinct_tickers_in_parallel(self):
+    def test_shared_exchange_serializes_distinct_ticker_fetches(self):
         class SlowTickerExchange:
             def __init__(self):
                 self.calls = []
@@ -6721,7 +6754,7 @@ class UnifiedBotTests(unittest.TestCase):
             results = list(executor.map(cached.fetch_ticker, symbols))
 
         self.assertEqual(len(results), len(symbols))
-        self.assertGreater(exchange.max_active, 1)
+        self.assertEqual(exchange.max_active, 1)
         self.assertEqual(set(exchange.calls), set(symbols))
 
     def test_shared_exchange_order_book_cache_is_singleflight_across_threads(self):
@@ -6744,6 +6777,79 @@ class UnifiedBotTests(unittest.TestCase):
 
         self.assertEqual(exchange.calls, 1)
         self.assertTrue(all(result["symbol"] == SYMBOL for result in results))
+
+    def test_shared_exchange_serializes_distinct_order_book_fetches(self):
+        class SlowOrderBookExchange:
+            def __init__(self):
+                self.calls = []
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+
+            def fetch_order_book(self, symbol, limit=None, params=None):
+                with self.lock:
+                    self.calls.append(symbol)
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    time.sleep(0.03)
+                    return {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]], "symbol": symbol}
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        exchange = SlowOrderBookExchange()
+        cached = CachedMarketDataExchange(exchange, order_book_ttl_sec=60)
+        symbols = [SYMBOL, SECOND_SYMBOL, BTC_SYMBOL, XAUT_SYMBOL]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(lambda item: cached.fetch_order_book(item, limit=5), symbols))
+
+        self.assertEqual(len(results), len(symbols))
+        self.assertEqual(exchange.max_active, 1)
+        self.assertEqual(set(exchange.calls), set(symbols))
+
+    def test_thread_safe_exchange_serializes_delegated_calls(self):
+        class SlowExchange:
+            def __init__(self):
+                self.active = 0
+                self.max_active = 0
+                self.calls = []
+                self.lock = threading.Lock()
+
+            def fetch_positions(self, symbols=None, params=None):
+                return self._record("fetch_positions", symbols, params)
+
+            def create_order(self, symbol, type, side, amount, price, params=None):
+                return self._record("create_order", symbol, side, amount, price, params)
+
+            def _record(self, name, *payload):
+                with self.lock:
+                    self.calls.append(name)
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    time.sleep(0.03)
+                    return {"name": name, "payload": payload}
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        exchange = SlowExchange()
+        safe = ThreadSafeExchange(exchange)
+
+        def call(index):
+            if index % 2:
+                return safe.create_order(SYMBOL, "limit", "buy", 1.0, 10.0, params={})
+            return safe.fetch_positions([SYMBOL], params={})
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            results = list(executor.map(call, range(6)))
+
+        self.assertEqual(len(results), 6)
+        self.assertEqual(exchange.max_active, 1)
+        self.assertEqual(exchange.calls.count("fetch_positions"), 3)
+        self.assertEqual(exchange.calls.count("create_order"), 3)
 
     def test_public_ohlcv_fetch_retries_transient_gateway_failure(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

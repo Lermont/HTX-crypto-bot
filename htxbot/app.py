@@ -13,6 +13,7 @@ from .models import TradeState
 from .monitoring import MonitoringMixin
 from .runner import RunnerMixin
 from .signal_engine import SignalMixin
+from .shared_exchange import ensure_thread_safe_exchange
 from .state import StateMixin
 from .strategy import StrategyMixin
 
@@ -96,7 +97,7 @@ class HtxFuturesBot(
             self.profile_name = self.profile.name
             ensure_runtime_locks(self)
             self.log = self._build_logger()
-            self.exchange = exchange or self._create_exchange()
+            self.exchange = ensure_thread_safe_exchange(exchange) if exchange is not None else self._create_exchange()
             self.external_price_feed = external_price_feed or ExternalPriceFeed(config.EXTERNAL_PRICE_FEED)
             self.state_path = Path(config.RUNTIME.state_file)
             self.lock_path = self.state_path.with_suffix(".lock")
