@@ -366,7 +366,16 @@ class MonitoringMixin:
             return "signal_invalid"
         if signal.get("entry_valid"):
             return ""
-        for key in ("macro_valid", "pullback_valid", "trigger_valid", "rs_confirm_valid", "btc_entry_valid"):
+        for key in (
+            "macro_valid",
+            "pullback_valid",
+            "trigger_valid",
+            "rs_confirm_valid",
+            "btc_entry_valid",
+            "volume_valid",
+            "chop_valid",
+            "market_structure_valid",
+        ):
             if key in signal and not signal.get(key):
                 return key
         return "entry_valid_false"
@@ -439,6 +448,16 @@ class MonitoringMixin:
             self._fmt_monitoring_float(signal.get("volatility"), 8),
             self._fmt_monitoring_float(signal.get("budget_multiplier"), 8),
             self._fmt_monitoring_float(signal.get("ladder_multiplier"), 8),
+            int(bool(signal.get("volume_valid", False))) if "volume_valid" in signal else "",
+            self._fmt_monitoring_float(signal.get("volume_ratio"), 8),
+            self._fmt_monitoring_float(signal.get("volume_spike_ratio"), 8),
+            signal.get("volume_spike_direction", ""),
+            int(bool(signal.get("volume_profile_valid", False))) if "volume_profile_valid" in signal else "",
+            int(bool(signal.get("volume_profile_break", False))) if "volume_profile_break" in signal else "",
+            self._fmt_monitoring_float(signal.get("volume_profile_poc"), 12),
+            self._fmt_monitoring_float(signal.get("volume_profile_value_area_low"), 12),
+            self._fmt_monitoring_float(signal.get("volume_profile_value_area_high"), 12),
+            signal.get("volume_reason", ""),
             signal.get("macro_regime", ""),
             int(bool(external_context.get("valid", False))) if external_context else "",
             int(bool(external_context.get("stale", False))) if external_context else "",

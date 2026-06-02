@@ -357,6 +357,99 @@ def ema_signal_direction_metrics(
     }
 
 
+def _volume_direction(open_price: float, close_price: float) -> str:
+    if close_price > open_price:
+        return "long"
+    if close_price < open_price:
+        return "short"
+    return "neutral"
+
+
+def _volume_profile_context(
+    rows: Sequence[tuple],
+    profile_window: int,
+    bins: int,
+    value_area_fraction: float,
+    position_side: str,
+) -> dict:
+    profile_window = max(1, int(profile_window))
+    bins = max(2, int(bins))
+    value_area_fraction = clamp(float(value_area_fraction), 0.10, 1.0)
+    if len(rows) < profile_window:
+        return {
+            "volume_profile_valid": False,
+            "volume_profile_poc": 0.0,
+            "volume_profile_value_area_low": 0.0,
+            "volume_profile_value_area_high": 0.0,
+            "volume_profile_break": False,
+            "volume_profile_reason": f"volume_profile_history_short;candles={len(rows)};required={profile_window}",
+        }
+
+    profile_rows = list(rows[-profile_window:])
+    low_price = min(row[2] for row in profile_rows)
+    high_price = max(row[1] for row in profile_rows)
+    current_close = profile_rows[-1][3]
+    if low_price <= 0 or high_price <= low_price or current_close <= 0:
+        return {
+            "volume_profile_valid": True,
+            "volume_profile_poc": current_close,
+            "volume_profile_value_area_low": low_price if low_price > 0 else 0.0,
+            "volume_profile_value_area_high": high_price if high_price > 0 else 0.0,
+            "volume_profile_break": False,
+            "volume_profile_reason": "volume_profile_flat_range",
+        }
+
+    bin_size = (high_price - low_price) / bins
+    bucket_volume = [0.0 for _ in range(bins)]
+    for open_price, high, low, close_price, volume in profile_rows:
+        typical_price = (high + low + close_price) / 3.0
+        raw_index = int((typical_price - low_price) / bin_size)
+        index = max(0, min(bins - 1, raw_index))
+        bucket_volume[index] += volume
+
+    total_volume = sum(bucket_volume)
+    if total_volume <= 0:
+        return {
+            "volume_profile_valid": True,
+            "volume_profile_poc": current_close,
+            "volume_profile_value_area_low": low_price,
+            "volume_profile_value_area_high": high_price,
+            "volume_profile_break": False,
+            "volume_profile_reason": "volume_profile_empty",
+        }
+
+    poc_index = max(range(bins), key=lambda index: bucket_volume[index])
+    low_index = high_index = poc_index
+    covered = bucket_volume[poc_index]
+    target = total_volume * value_area_fraction
+    while covered < target and (low_index > 0 or high_index < bins - 1):
+        left_volume = bucket_volume[low_index - 1] if low_index > 0 else -1.0
+        right_volume = bucket_volume[high_index + 1] if high_index < bins - 1 else -1.0
+        if right_volume >= left_volume:
+            high_index += 1
+            covered += max(0.0, right_volume)
+        else:
+            low_index -= 1
+            covered += max(0.0, left_volume)
+
+    poc = low_price + (poc_index + 0.5) * bin_size
+    value_area_low = low_price + low_index * bin_size
+    value_area_high = low_price + (high_index + 1) * bin_size
+    if str(position_side).lower() == "short":
+        profile_break = current_close > value_area_high
+    else:
+        profile_break = current_close < value_area_low
+
+    return {
+        "volume_profile_valid": True,
+        "volume_profile_poc": poc,
+        "volume_profile_value_area_low": value_area_low,
+        "volume_profile_value_area_high": value_area_high,
+        "volume_profile_break": bool(profile_break),
+        "volume_profile_reason": "volume_profile_break" if profile_break else "volume_profile_ok",
+    }
+
+
 def volume_confirmation_context(
     candles: Sequence[Sequence[float]],
     short_window: int,
@@ -364,11 +457,23 @@ def volume_confirmation_context(
     min_ratio: float,
     min_directional_fraction: float,
     position_side: str,
+    spike_window: int = 0,
+    spike_min_ratio: float = 0.0,
+    adverse_spike_min_ratio: float = 0.0,
+    profile_enabled: bool = False,
+    profile_window: int = 0,
+    profile_bins: int = 12,
+    profile_value_area: float = 0.70,
 ) -> dict:
     short_window = max(1, int(short_window))
     long_window = max(short_window, int(long_window))
     min_ratio = max(0.0, float(min_ratio))
     min_directional_fraction = clamp(float(min_directional_fraction), 0.0, 1.0)
+
+    spike_window = max(1, int(spike_window or short_window))
+    spike_min_ratio = max(0.0, float(spike_min_ratio))
+    adverse_spike_min_ratio = max(0.0, float(adverse_spike_min_ratio))
+    profile_window = max(1, int(profile_window or long_window))
 
     rows = []
     for row in candles or []:
@@ -376,54 +481,136 @@ def volume_confirmation_context(
             continue
         try:
             open_price = float(row[1])
+            high_price = float(row[2])
+            low_price = float(row[3])
             close_price = float(row[4])
             volume = float(row[5])
         except (TypeError, ValueError):
             continue
-        if open_price <= 0 or close_price <= 0 or volume <= 0:
+        if open_price <= 0 or high_price <= 0 or low_price <= 0 or close_price <= 0 or volume <= 0:
             continue
-        rows.append((open_price, close_price, volume))
+        rows.append((open_price, high_price, low_price, close_price, volume))
 
-    required = max(short_window, long_window)
+    required = max(short_window, long_window, profile_window if profile_enabled else 0)
     if len(rows) < required:
         return {
             "volume_valid": False,
+            "volume_average_valid": False,
             "volume_ratio": 0.0,
             "volume_recent": 0.0,
             "volume_baseline": 0.0,
             "volume_directional_fraction": 0.0,
+            "volume_spike_valid": False,
+            "volume_spike_ratio": 0.0,
+            "volume_spike_volume": 0.0,
+            "volume_spike_baseline": 0.0,
+            "volume_spike_direction": "unknown",
+            "volume_spike_reason": "volume_history_short",
+            "volume_profile_valid": False,
+            "volume_profile_poc": 0.0,
+            "volume_profile_value_area_low": 0.0,
+            "volume_profile_value_area_high": 0.0,
+            "volume_profile_break": False,
+            "volume_profile_reason": "volume_history_short",
             "volume_required_candles": required,
             "volume_reason": f"volume_history_short;candles={len(rows)};required={required}",
         }
 
     recent = rows[-short_window:]
     baseline = rows[-long_window:]
-    recent_average = sum(row[2] for row in recent) / short_window
-    baseline_average = sum(row[2] for row in baseline) / long_window
+    recent_average = sum(row[4] for row in recent) / short_window
+    baseline_average = sum(row[4] for row in baseline) / long_window
     ratio = recent_average / baseline_average if baseline_average > 0 else 0.0
 
-    total_recent_volume = sum(row[2] for row in recent)
+    total_recent_volume = sum(row[4] for row in recent)
     if str(position_side).lower() == "short":
-        directional_volume = sum(volume for open_price, close_price, volume in recent if close_price < open_price)
+        directional_volume = sum(volume for open_price, _high, _low, close_price, volume in recent if close_price < open_price)
     else:
-        directional_volume = sum(volume for open_price, close_price, volume in recent if close_price > open_price)
+        directional_volume = sum(volume for open_price, _high, _low, close_price, volume in recent if close_price > open_price)
     directional_fraction = directional_volume / total_recent_volume if total_recent_volume > 0 else 0.0
 
     ratio_valid = ratio + 1e-12 >= min_ratio
     directional_valid = directional_fraction + 1e-12 >= min_directional_fraction
-    if ratio_valid and directional_valid:
-        reason = "volume_confirmed"
-    elif not ratio_valid:
-        reason = "volume_ratio_below_min"
+    average_valid = bool(ratio_valid and directional_valid)
+
+    spike_recent = rows[-spike_window:]
+    previous_rows = rows[-(long_window + spike_window):-spike_window] if len(rows) > spike_window else []
+    if not previous_rows:
+        previous_rows = rows[-long_window:]
+    spike_baseline = sum(row[4] for row in previous_rows) / len(previous_rows) if previous_rows else baseline_average
+    spike_row = max(spike_recent, key=lambda row: row[4])
+    spike_direction = _volume_direction(spike_row[0], spike_row[3])
+    spike_ratio = spike_row[4] / spike_baseline if spike_baseline > 0 else 0.0
+    aligned_spike = spike_min_ratio > 0 and spike_ratio + 1e-12 >= spike_min_ratio and spike_direction == str(position_side).lower()
+    adverse_spike = (
+        adverse_spike_min_ratio > 0
+        and spike_ratio + 1e-12 >= adverse_spike_min_ratio
+        and spike_direction not in {"neutral", str(position_side).lower()}
+    )
+
+    if profile_enabled:
+        profile = _volume_profile_context(
+            rows,
+            profile_window,
+            profile_bins,
+            profile_value_area,
+            position_side,
+        )
     else:
+        profile = {
+            "volume_profile_valid": True,
+            "volume_profile_poc": 0.0,
+            "volume_profile_value_area_low": 0.0,
+            "volume_profile_value_area_high": 0.0,
+            "volume_profile_break": False,
+            "volume_profile_reason": "disabled",
+        }
+
+    profile_break = bool(profile.get("volume_profile_break", False))
+    spike_valid = not bool(adverse_spike and (profile_break or not profile_enabled))
+    profile_valid = bool(profile.get("volume_profile_valid", True)) and not bool(adverse_spike and profile_break)
+    if aligned_spike and spike_valid:
+        spike_reason = "volume_aligned_spike"
+    elif adverse_spike and not spike_valid:
+        spike_reason = "volume_adverse_spike"
+    elif spike_min_ratio > 0 or adverse_spike_min_ratio > 0:
+        spike_reason = "volume_spike_neutral"
+    else:
+        spike_reason = "disabled"
+
+    confirmed = bool(average_valid or (aligned_spike and spike_valid))
+    volume_valid = bool(confirmed and spike_valid and profile_valid)
+
+    if volume_valid and average_valid:
+        reason = "volume_confirmed"
+    elif volume_valid:
+        reason = "volume_spike_confirmed"
+    elif not profile_valid:
+        reason = "volume_profile_adverse_break" if adverse_spike and profile_break else profile.get("volume_profile_reason", "volume_profile_invalid")
+    elif not spike_valid:
+        reason = spike_reason
+    elif not ratio_valid and not aligned_spike:
+        reason = "volume_ratio_below_min"
+    elif not directional_valid:
         reason = "volume_directional_fraction_below_min"
+    else:
+        reason = "volume_confirmation_missing"
 
     return {
-        "volume_valid": bool(ratio_valid and directional_valid),
+        "volume_valid": volume_valid,
+        "volume_average_valid": average_valid,
         "volume_ratio": ratio,
         "volume_recent": recent_average,
         "volume_baseline": baseline_average,
         "volume_directional_fraction": directional_fraction,
+        "volume_spike_valid": bool(spike_valid),
+        "volume_spike_ratio": spike_ratio,
+        "volume_spike_volume": spike_row[4],
+        "volume_spike_baseline": spike_baseline,
+        "volume_spike_direction": spike_direction,
+        "volume_spike_reason": spike_reason,
+        **profile,
+        "volume_profile_valid": bool(profile_valid),
         "volume_required_candles": required,
         "volume_reason": reason,
     }

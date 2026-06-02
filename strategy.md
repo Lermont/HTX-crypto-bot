@@ -88,7 +88,7 @@ market_structure_valid=true
 - `entry_valid` — пройдены условия именно для нового входа;
 - `add_valid` — сигнал достаточно здоров для добора уже открытой позиции, даже если полный new-entry gate сейчас не проходит.
 
-`market_structure_valid` по умолчанию требует `EMA_CHOP_FILTER_ENABLED=true` с `chop <= EMA_CHOP_MAX` на trigger-свечах и `EMA_VOLUME_CONFIRMATION_ENABLED=true` с отношением свежего объёма к базовой средней не ниже `EMA_VOLUME_MIN_RATIO`. Этот gate применяется к `entry_valid` и `add_valid`, но не сбрасывает `valid`, чтобы уже открытая позиция не теряла управление выходами из-за шумного рынка.
+`market_structure_valid` по умолчанию требует `EMA_CHOP_FILTER_ENABLED=true` с `chop <= EMA_CHOP_MAX` на trigger-свечах и `EMA_VOLUME_CONFIRMATION_ENABLED=true` с отношением свежего объёма к базовой средней не ниже `EMA_VOLUME_MIN_RATIO`. Volume gate дополнительно учитывает single-candle spike (`EMA_VOLUME_SPIKE_*`) и простой volume profile/value area (`EMA_VOLUME_PROFILE_*`): направленный spike может подтвердить восстановление после отката, а сильный adverse spike с пробоем value-area против профиля блокирует `entry_valid` и `add_valid` как риск начала разворота. Этот gate применяется к `entry_valid` и `add_valid`, но не сбрасывает `valid`, чтобы уже открытая позиция не теряла управление выходами из-за шумного рынка.
 
 Для нового входа дополнительно проверяются:
 

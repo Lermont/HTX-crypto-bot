@@ -236,6 +236,14 @@ class StrategySettings:
     ema_volume_long_window: int
     ema_volume_min_ratio: float
     ema_volume_min_directional_fraction: float
+    ema_volume_spike_filter_enabled: bool
+    ema_volume_spike_window: int
+    ema_volume_spike_min_ratio: float
+    ema_volume_adverse_spike_min_ratio: float
+    ema_volume_profile_filter_enabled: bool
+    ema_volume_profile_window: int
+    ema_volume_profile_bins: int
+    ema_volume_profile_value_area: float
     ema_trigger_fast_minutes: int
     ema_trigger_slow_minutes: int
     ema_use_rs_confirmation: bool
@@ -918,6 +926,17 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_volume_min_directional_fraction=max(
             0.0,
             min(1.0, _env_float("EMA_VOLUME_MIN_DIRECTIONAL_FRACTION", 0.0, profile=name)),
+        ),
+        ema_volume_spike_filter_enabled=_env_bool("EMA_VOLUME_SPIKE_FILTER_ENABLED", True, profile=name),
+        ema_volume_spike_window=max(1, _env_int("EMA_VOLUME_SPIKE_WINDOW", 5, profile=name)),
+        ema_volume_spike_min_ratio=max(0.0, _env_float("EMA_VOLUME_SPIKE_MIN_RATIO", 1.80, profile=name)),
+        ema_volume_adverse_spike_min_ratio=max(0.0, _env_float("EMA_VOLUME_ADVERSE_SPIKE_MIN_RATIO", 2.00, profile=name)),
+        ema_volume_profile_filter_enabled=_env_bool("EMA_VOLUME_PROFILE_FILTER_ENABLED", True, profile=name),
+        ema_volume_profile_window=max(1, _env_int("EMA_VOLUME_PROFILE_WINDOW", 60, profile=name)),
+        ema_volume_profile_bins=max(2, _env_int("EMA_VOLUME_PROFILE_BINS", 12, profile=name)),
+        ema_volume_profile_value_area=max(
+            0.10,
+            min(1.0, _env_float("EMA_VOLUME_PROFILE_VALUE_AREA", 0.70, profile=name)),
         ),
         ema_trigger_fast_minutes=_env_int("EMA_TRIGGER_FAST_MINUTES", 50, profile=name),
         ema_trigger_slow_minutes=_env_int("EMA_TRIGGER_SLOW_MINUTES", 100, profile=name),

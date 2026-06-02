@@ -329,6 +329,74 @@ class SignalMathTests(unittest.TestCase):
         self.assertTrue(confirmed_context["volume_valid"])
         self.assertGreater(confirmed_context["volume_ratio"], 1.05)
 
+    def test_volume_spike_can_confirm_pullback_recovery(self):
+        candles = [[index, 100.0, 101.0, 99.0, 101.0, 10.0] for index in range(24)]
+        candles.append([24, 101.0, 104.0, 100.0, 103.0, 80.0])
+
+        context = volume_confirmation_context(
+            candles,
+            short_window=5,
+            long_window=20,
+            min_ratio=3.0,
+            min_directional_fraction=0.0,
+            position_side="long",
+            spike_window=5,
+            spike_min_ratio=1.80,
+            adverse_spike_min_ratio=2.00,
+        )
+
+        self.assertTrue(context["volume_valid"])
+        self.assertFalse(context["volume_average_valid"])
+        self.assertGreater(context["volume_spike_ratio"], 1.80)
+        self.assertEqual(context["volume_spike_direction"], "long")
+        self.assertEqual(context["volume_reason"], "volume_spike_confirmed")
+
+    def test_volume_profile_blocks_adverse_spike_breaks_symmetrically(self):
+        long_candles = [[index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)]
+        long_candles.append([59, 100.0, 101.0, 89.0, 90.0, 30.0])
+        short_candles = [[index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)]
+        short_candles.append([59, 100.0, 111.0, 99.0, 110.0, 30.0])
+
+        long_context = volume_confirmation_context(
+            long_candles,
+            short_window=5,
+            long_window=20,
+            min_ratio=1.0,
+            min_directional_fraction=0.0,
+            position_side="long",
+            spike_window=5,
+            spike_min_ratio=1.80,
+            adverse_spike_min_ratio=2.00,
+            profile_enabled=True,
+            profile_window=60,
+            profile_bins=12,
+            profile_value_area=0.70,
+        )
+        short_context = volume_confirmation_context(
+            short_candles,
+            short_window=5,
+            long_window=20,
+            min_ratio=1.0,
+            min_directional_fraction=0.0,
+            position_side="short",
+            spike_window=5,
+            spike_min_ratio=1.80,
+            adverse_spike_min_ratio=2.00,
+            profile_enabled=True,
+            profile_window=60,
+            profile_bins=12,
+            profile_value_area=0.70,
+        )
+
+        self.assertFalse(long_context["volume_valid"])
+        self.assertFalse(short_context["volume_valid"])
+        self.assertFalse(long_context["volume_profile_valid"])
+        self.assertFalse(short_context["volume_profile_valid"])
+        self.assertTrue(long_context["volume_profile_break"])
+        self.assertTrue(short_context["volume_profile_break"])
+        self.assertEqual(long_context["volume_spike_direction"], "short")
+        self.assertEqual(short_context["volume_spike_direction"], "long")
+
     def test_market_structure_math_is_direction_symmetric(self):
         long_candles = [[index, 100.0, 101.0, 99.0, 101.0, 2.0] for index in range(20)]
         short_candles = [[index, 101.0, 102.0, 100.0, 100.0, 2.0] for index in range(20)]

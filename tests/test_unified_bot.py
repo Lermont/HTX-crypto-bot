@@ -1107,6 +1107,16 @@ class UnifiedBotTests(unittest.TestCase):
             signal["macro_gap"] = 0.031
             signal["trigger_gap"] = 0.012
             signal["pullback_depth"] = 0.007
+            signal["volume_valid"] = True
+            signal["volume_ratio"] = 1.25
+            signal["volume_spike_ratio"] = 2.50
+            signal["volume_spike_direction"] = "long"
+            signal["volume_profile_valid"] = True
+            signal["volume_profile_break"] = False
+            signal["volume_profile_poc"] = 100.5
+            signal["volume_profile_value_area_low"] = 99.5
+            signal["volume_profile_value_area_high"] = 102.5
+            signal["volume_reason"] = "volume_spike_confirmed"
 
             bot._record_signal_analytics(
                 "signal_built",
@@ -1126,6 +1136,16 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(rows[-1]["macro_gap"], "0.03100000")
             self.assertEqual(rows[-1]["trigger_gap"], "0.01200000")
             self.assertEqual(rows[-1]["pullback_depth"], "0.00700000")
+            self.assertEqual(rows[-1]["volume_valid"], "1")
+            self.assertEqual(rows[-1]["volume_ratio"], "1.25000000")
+            self.assertEqual(rows[-1]["volume_spike_ratio"], "2.50000000")
+            self.assertEqual(rows[-1]["volume_spike_direction"], "long")
+            self.assertEqual(rows[-1]["volume_profile_valid"], "1")
+            self.assertEqual(rows[-1]["volume_profile_break"], "0")
+            self.assertEqual(rows[-1]["volume_profile_poc"], "100.500000000000")
+            self.assertEqual(rows[-1]["volume_profile_value_area_low"], "99.500000000000")
+            self.assertEqual(rows[-1]["volume_profile_value_area_high"], "102.500000000000")
+            self.assertEqual(rows[-1]["volume_reason"], "volume_spike_confirmed")
 
             payloads = [
                 json.loads(line)
@@ -3311,7 +3331,94 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertFalse(signal["volume_valid"])
                 self.assertFalse(signal["market_structure_valid"])
                 self.assertFalse(signal["entry_valid"])
+                self.assertEqual(bot._signal_block_reason(signal), "volume_valid")
                 self.assertIn("volume_reason=volume_ratio_below_min", signal["reason"])
+
+    def test_ema_entry_signal_accepts_aligned_volume_spike_confirmation(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy(
+                ema_chop_filter_enabled=False,
+                ema_volume_confirmation_enabled=True,
+                ema_volume_short_window=5,
+                ema_volume_long_window=20,
+                ema_volume_min_ratio=10.0,
+                ema_volume_spike_filter_enabled=True,
+                ema_volume_spike_window=5,
+                ema_volume_spike_min_ratio=2.0,
+                ema_volume_adverse_spike_min_ratio=2.0,
+                ema_volume_profile_filter_enabled=False,
+                ema_use_rs_confirmation=False,
+                ema_use_btc_risk_filter=False,
+                ema_pullback_recovery_gap=0.0,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                benchmark_closes = [100.0] * len(closes)
+                volumes = [10.0] * (len(closes) - 1) + [80.0]
+                candles = ohlcv_series(closes, volumes=volumes)
+                candles[-1][1] = closes[-1] - 2.0
+                candles[-1][2] = closes[-1] + 1.0
+                candles[-1][3] = closes[-1] - 3.0
+                ctx = SignalContext(
+                    closes=closes,
+                    benchmark_closes=benchmark_closes,
+                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    latest_ts=1000,
+                    candles=candles,
+                    cache_key=SYMBOL,
+                )
+
+                signal = bot._build_signal_from_closes(ctx)
+
+                self.assertIsNotNone(signal)
+                self.assertTrue(signal["volume_valid"])
+                self.assertFalse(signal["volume_average_valid"])
+                self.assertTrue(signal["market_structure_valid"])
+                self.assertTrue(signal["entry_valid"])
+                self.assertEqual(signal["volume_spike_direction"], "long")
+                self.assertEqual(signal["volume_reason"], "volume_spike_confirmed")
+
+    def test_market_structure_blocks_adverse_volume_profile_break(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy(
+                ema_chop_filter_enabled=False,
+                ema_volume_confirmation_enabled=True,
+                ema_volume_short_window=5,
+                ema_volume_long_window=20,
+                ema_volume_min_ratio=1.0,
+                ema_volume_spike_filter_enabled=True,
+                ema_volume_spike_window=5,
+                ema_volume_spike_min_ratio=1.80,
+                ema_volume_adverse_spike_min_ratio=2.00,
+                ema_volume_profile_filter_enabled=True,
+                ema_volume_profile_window=60,
+                ema_volume_profile_bins=12,
+                ema_volume_profile_value_area=0.70,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                candles = [[index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)]
+                candles.append([59, 100.0, 101.0, 89.0, 90.0, 30.0])
+
+                context = bot._ema_market_structure_context(candles)
+                signal = {
+                    "valid": True,
+                    "data_valid": True,
+                    "direction_valid": True,
+                    "entry_valid": False,
+                    **context,
+                }
+                block_reason = bot._entry_signal_quality_block_reason(signal)
+
+                self.assertFalse(context["volume_valid"])
+                self.assertFalse(context["market_structure_valid"])
+                self.assertFalse(context["volume_profile_valid"])
+                self.assertTrue(context["volume_profile_break"])
+                self.assertEqual(context["volume_spike_direction"], "short")
+                self.assertEqual(context["volume_reason"], "volume_profile_adverse_break")
+                self.assertIn("volume_profile_break=1", block_reason)
+                self.assertIn("volume_spike_direction=short", block_reason)
 
     def test_ema_entry_signal_blocks_choppy_trigger_noise(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -4349,6 +4456,14 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.ema_volume_short_window, 5)
             self.assertEqual(config.STRATEGY.ema_volume_long_window, 20)
             self.assertEqual(config.STRATEGY.ema_volume_min_ratio, 1.05)
+            self.assertTrue(config.STRATEGY.ema_volume_spike_filter_enabled)
+            self.assertEqual(config.STRATEGY.ema_volume_spike_window, 5)
+            self.assertEqual(config.STRATEGY.ema_volume_spike_min_ratio, 1.80)
+            self.assertEqual(config.STRATEGY.ema_volume_adverse_spike_min_ratio, 2.00)
+            self.assertTrue(config.STRATEGY.ema_volume_profile_filter_enabled)
+            self.assertEqual(config.STRATEGY.ema_volume_profile_window, 60)
+            self.assertEqual(config.STRATEGY.ema_volume_profile_bins, 12)
+            self.assertEqual(config.STRATEGY.ema_volume_profile_value_area, 0.70)
             self.assertEqual(config.STRATEGY.hard_time_exit_after_minutes, 96.0 * 60.0)
             self.assertEqual(config.STRATEGY.hard_time_exit_close_fraction, 0.25)
             self.assertEqual(config.STRATEGY.hard_time_exit_fraction_step, 0.25)
@@ -4488,6 +4603,52 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertLess(limits["1d"], 100)
             self.assertLess(limits["4h"], 30)
             self.assertLess(limits["1m"], 2000)
+
+    def test_signal_update_fetches_volume_profile_history(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy(
+                ema_macro_timeframe="1m",
+                ema_pullback_timeframe="1m",
+                ema_trigger_timeframe="1m",
+                ema_macro_fast_minutes=5,
+                ema_macro_slow_minutes=10,
+                ema_pullback_fast_minutes=3,
+                ema_pullback_slow_minutes=8,
+                ema_trigger_fast_minutes=5,
+                ema_trigger_slow_minutes=10,
+                ema_chop_filter_enabled=False,
+                ema_volume_confirmation_enabled=True,
+                ema_volume_short_window=5,
+                ema_volume_long_window=20,
+                ema_volume_profile_filter_enabled=True,
+                ema_volume_profile_window=160,
+                ema_volume_spike_filter_enabled=True,
+                ema_use_rs_confirmation=False,
+                ema_use_btc_risk_filter=False,
+                ema_pullback_recovery_gap=0.0,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.benchmark_symbol = BTC_SYMBOL
+                bot.market_by_symbol = {SYMBOL: MARKET, BTC_SYMBOL: BTC_MARKET}
+                closes = [100.0 + index * 0.1 for index in range(170)]
+                bot.exchange.ohlcv[(BTC_SYMBOL, "1m")] = ohlcv_series([100.0] * 170)
+                bot.exchange.ohlcv[(SYMBOL, "1m")] = ohlcv_series(
+                    closes,
+                    volumes=[10.0] * 165 + [30.0] * 5,
+                )
+
+                updated = bot._update_signal_cache_if_needed()
+
+                self.assertTrue(updated)
+                symbol_limits = [
+                    int(call["limit"] or 0)
+                    for call in bot.exchange.ohlcv_calls
+                    if call["symbol"] == SYMBOL and call["timeframe"] == "1m"
+                ]
+                self.assertTrue(symbol_limits)
+                self.assertGreaterEqual(max(symbol_limits), strategy.ema_volume_profile_window)
+                self.assertIn(SYMBOL, bot.signal_cache["symbols"])
 
     def test_signal_update_fetches_symbol_candles_in_parallel(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

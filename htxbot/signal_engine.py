@@ -68,6 +68,10 @@ class SignalMixin:
                 max(1, int(strategy.ema_volume_short_window)),
                 max(1, int(strategy.ema_volume_long_window)),
             )
+            if getattr(strategy, "ema_volume_spike_filter_enabled", False):
+                required = max(required, max(1, int(getattr(strategy, "ema_volume_spike_window", strategy.ema_volume_short_window))))
+            if getattr(strategy, "ema_volume_profile_filter_enabled", False):
+                required = max(required, max(1, int(getattr(strategy, "ema_volume_profile_window", strategy.ema_volume_long_window))))
         return required
 
     def _ema_market_structure_context(self, candles: Optional[List[list]]) -> dict:
@@ -96,17 +100,46 @@ class SignalMixin:
                 strategy.ema_volume_min_ratio,
                 strategy.ema_volume_min_directional_fraction,
                 config.POSITION_SIDE,
+                getattr(strategy, "ema_volume_spike_window", strategy.ema_volume_short_window),
+                (
+                    getattr(strategy, "ema_volume_spike_min_ratio", 0.0)
+                    if getattr(strategy, "ema_volume_spike_filter_enabled", False)
+                    else 0.0
+                ),
+                (
+                    getattr(strategy, "ema_volume_adverse_spike_min_ratio", 0.0)
+                    if getattr(strategy, "ema_volume_spike_filter_enabled", False)
+                    else 0.0
+                ),
+                getattr(strategy, "ema_volume_profile_filter_enabled", False),
+                getattr(strategy, "ema_volume_profile_window", strategy.ema_volume_long_window),
+                getattr(strategy, "ema_volume_profile_bins", 12),
+                getattr(strategy, "ema_volume_profile_value_area", 0.70),
             )
         else:
             volume = {
                 "volume_valid": True,
+                "volume_average_valid": True,
                 "volume_ratio": 0.0,
                 "volume_recent": 0.0,
                 "volume_baseline": 0.0,
                 "volume_directional_fraction": 0.0,
+                "volume_spike_valid": True,
+                "volume_spike_ratio": 0.0,
+                "volume_spike_volume": 0.0,
+                "volume_spike_baseline": 0.0,
+                "volume_spike_direction": "unknown",
+                "volume_spike_reason": "disabled",
+                "volume_profile_valid": True,
+                "volume_profile_poc": 0.0,
+                "volume_profile_value_area_low": 0.0,
+                "volume_profile_value_area_high": 0.0,
+                "volume_profile_break": False,
+                "volume_profile_reason": "disabled",
                 "volume_required_candles": max(
                     max(1, int(getattr(strategy, "ema_volume_short_window", 5))),
                     max(1, int(getattr(strategy, "ema_volume_long_window", 20))),
+                    max(1, int(getattr(strategy, "ema_volume_profile_window", 20))),
                 ),
                 "volume_reason": (
                     "disabled"
@@ -128,6 +161,14 @@ class SignalMixin:
             f"volume_valid={int(bool(signal.get('volume_valid', True)))};"
             f"volume_ratio={self._safe_float(signal.get('volume_ratio'), 0.0):.6f};"
             f"volume_min_ratio={self._safe_float(getattr(config.STRATEGY, 'ema_volume_min_ratio', 0.0), 0.0):.6f};"
+            f"volume_spike_valid={int(bool(signal.get('volume_spike_valid', True)))};"
+            f"volume_spike_ratio={self._safe_float(signal.get('volume_spike_ratio'), 0.0):.6f};"
+            f"volume_spike_direction={signal.get('volume_spike_direction', '')};"
+            f"volume_spike_reason={signal.get('volume_spike_reason', '')};"
+            f"volume_profile_valid={int(bool(signal.get('volume_profile_valid', True)))};"
+            f"volume_profile_break={int(bool(signal.get('volume_profile_break', False)))};"
+            f"volume_profile_poc={self._safe_float(signal.get('volume_profile_poc'), 0.0):.12f};"
+            f"volume_profile_reason={signal.get('volume_profile_reason', '')};"
             f"volume_reason={signal.get('volume_reason', '')};"
             f"chop_valid={int(bool(signal.get('chop_valid', True)))};"
             f"chop={self._safe_float(signal.get('chop'), 0.0):.6f};"
@@ -861,7 +902,6 @@ class SignalMixin:
                 periods["ema_trigger_slow"],
                 rs_slow_window + 1,
                 btc_fast_window + 1,
-                self._ema_market_structure_required_history(),
             )
         return max(
             max(periods.values()),
@@ -994,10 +1034,23 @@ class SignalMixin:
             "btc_entry_valid": False,
             "market_structure_valid": False,
             "volume_valid": False,
+            "volume_average_valid": False,
             "volume_ratio": 0.0,
             "volume_recent": 0.0,
             "volume_baseline": 0.0,
             "volume_directional_fraction": 0.0,
+            "volume_spike_valid": False,
+            "volume_spike_ratio": 0.0,
+            "volume_spike_volume": 0.0,
+            "volume_spike_baseline": 0.0,
+            "volume_spike_direction": "unknown",
+            "volume_spike_reason": "empty_signal",
+            "volume_profile_valid": False,
+            "volume_profile_poc": 0.0,
+            "volume_profile_value_area_low": 0.0,
+            "volume_profile_value_area_high": 0.0,
+            "volume_profile_break": False,
+            "volume_profile_reason": "empty_signal",
             "volume_reason": "empty_signal",
             "chop_valid": False,
             "chop": 0.0,
@@ -1254,6 +1307,17 @@ class SignalMixin:
             f"market_structure_valid={int(market_structure_valid)};"
             f"volume_valid={int(bool(market_structure['volume_valid']))};"
             f"volume_ratio={market_structure['volume_ratio']:.6f};"
+            f"volume_average_valid={int(bool(market_structure.get('volume_average_valid', False)))};"
+            f"volume_spike_valid={int(bool(market_structure.get('volume_spike_valid', True)))};"
+            f"volume_spike_ratio={market_structure.get('volume_spike_ratio', 0.0):.6f};"
+            f"volume_spike_direction={market_structure.get('volume_spike_direction', '')};"
+            f"volume_spike_reason={market_structure.get('volume_spike_reason', '')};"
+            f"volume_profile_valid={int(bool(market_structure.get('volume_profile_valid', True)))};"
+            f"volume_profile_break={int(bool(market_structure.get('volume_profile_break', False)))};"
+            f"volume_profile_poc={market_structure.get('volume_profile_poc', 0.0):.12f};"
+            f"volume_profile_va_low={market_structure.get('volume_profile_value_area_low', 0.0):.12f};"
+            f"volume_profile_va_high={market_structure.get('volume_profile_value_area_high', 0.0):.12f};"
+            f"volume_profile_reason={market_structure.get('volume_profile_reason', '')};"
             f"volume_reason={market_structure['volume_reason']};"
             f"chop_valid={int(bool(market_structure['chop_valid']))};"
             f"chop={market_structure['chop']:.6f};"
@@ -1326,10 +1390,23 @@ class SignalMixin:
             "btc_entry_valid": btc_entry_valid,
             "market_structure_valid": market_structure_valid,
             "volume_valid": bool(market_structure["volume_valid"]),
+            "volume_average_valid": bool(market_structure.get("volume_average_valid", False)),
             "volume_ratio": market_structure["volume_ratio"],
             "volume_recent": market_structure["volume_recent"],
             "volume_baseline": market_structure["volume_baseline"],
             "volume_directional_fraction": market_structure["volume_directional_fraction"],
+            "volume_spike_valid": bool(market_structure.get("volume_spike_valid", True)),
+            "volume_spike_ratio": market_structure.get("volume_spike_ratio", 0.0),
+            "volume_spike_volume": market_structure.get("volume_spike_volume", 0.0),
+            "volume_spike_baseline": market_structure.get("volume_spike_baseline", 0.0),
+            "volume_spike_direction": market_structure.get("volume_spike_direction", ""),
+            "volume_spike_reason": market_structure.get("volume_spike_reason", ""),
+            "volume_profile_valid": bool(market_structure.get("volume_profile_valid", True)),
+            "volume_profile_poc": market_structure.get("volume_profile_poc", 0.0),
+            "volume_profile_value_area_low": market_structure.get("volume_profile_value_area_low", 0.0),
+            "volume_profile_value_area_high": market_structure.get("volume_profile_value_area_high", 0.0),
+            "volume_profile_break": bool(market_structure.get("volume_profile_break", False)),
+            "volume_profile_reason": market_structure.get("volume_profile_reason", ""),
             "volume_reason": market_structure["volume_reason"],
             "chop_valid": bool(market_structure["chop_valid"]),
             "chop": market_structure["chop"],
@@ -1419,6 +1496,7 @@ class SignalMixin:
 
         trigger_history_limit = max(
             self._ema_required_history("trigger", converted=True) + 5,
+            self._ema_market_structure_required_history(),
             max(
                 self._trigger_window_candles(config.SIGNALS.rs_slow_window, trigger_timeframe),
                 self._trigger_window_candles(config.SIGNALS.rs_fast_window, trigger_timeframe),
