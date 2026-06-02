@@ -26,6 +26,7 @@ from htxbot.external_price import BookTicker, ExternalPriceFeed
 from htxbot.indicators import average_true_range, calculate_rsi, compute_log_return, realized_volatility
 from htxbot.models import PositionLifecycle, SellLadderParams, SignalContext
 from htxbot.shared_exchange import CachedMarketDataExchange, ThreadSafeExchange
+from tests.config_overrides import override_config
 
 
 SYMBOL = "TEST/USDT:USDT"
@@ -339,22 +340,6 @@ class FakeExchange:
             "status": "ok",
             "data": data,
         }
-
-
-@contextmanager
-def override_config(**values):
-    sentinel = object()
-    previous = {name: config.__dict__.get(name, sentinel) for name in values}
-    for name, value in values.items():
-        setattr(config, name, value)
-    try:
-        yield
-    finally:
-        for name, old_value in previous.items():
-            if old_value is sentinel:
-                delattr(config, name)
-            else:
-                setattr(config, name, old_value)
 
 
 class UnifiedBotTests(unittest.TestCase):

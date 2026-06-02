@@ -3,10 +3,12 @@
 import os
 import unittest
 from contextlib import contextmanager
+from dataclasses import FrozenInstanceError
 
 import config
 import htxbot.config as package_config
 from htxbot.config import CONFIG_WARNINGS, _add_config_warning
+from tests.config_overrides import override_frozen_config_fields
 
 
 @contextmanager
@@ -59,6 +61,31 @@ class ConfigTests(unittest.TestCase):
             profile = config._make_profile("long", "long", config.LONG_COINS)
 
         self.assertEqual(profile.runtime.market_data_max_workers, 3)
+
+    def test_frozen_runtime_rejects_direct_field_assignment(self):
+        with self.assertRaises(FrozenInstanceError):
+            config.RUNTIME.poll_interval_sec = config.RUNTIME.poll_interval_sec + 1
+
+    def test_override_frozen_config_fields_temporarily_bypasses_dataclass_lock(self):
+        original_poll_interval = config.RUNTIME.poll_interval_sec
+        original_leverage = config.RISK.leverage
+
+        with override_frozen_config_fields(config.RUNTIME, poll_interval_sec=original_poll_interval + 7):
+            self.assertEqual(config.RUNTIME.poll_interval_sec, original_poll_interval + 7)
+
+        self.assertEqual(config.RUNTIME.poll_interval_sec, original_poll_interval)
+
+        with self.assertRaises(RuntimeError):
+            with override_frozen_config_fields(config.RISK, leverage=original_leverage + 2):
+                self.assertEqual(config.RISK.leverage, original_leverage + 2)
+                raise RuntimeError("force restore")
+
+        self.assertEqual(config.RISK.leverage, original_leverage)
+
+    def test_override_frozen_config_fields_rejects_unknown_field(self):
+        with self.assertRaises(AttributeError):
+            with override_frozen_config_fields(config.RUNTIME, does_not_exist=True):
+                pass
 
     def test_ema_max_averaging_stages_is_capped(self):
         initial_warnings = list(config.CONFIG_WARNINGS)
