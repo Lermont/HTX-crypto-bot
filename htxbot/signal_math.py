@@ -16,9 +16,11 @@ def signal_score(
     ema_gap_weight: float,
 ) -> float:
     if str(position_side).lower() == "short":
-        rs_edge = max(0.0, rs30 - rs60)
+        rs_direction = rs30 - rs60
+        rs_edge = max(0.0, rs_direction)
     else:
-        rs_edge = max(0.0, rs60 - rs30)
+        rs_direction = rs60 - rs30
+        rs_edge = max(0.0, rs_direction)
 
     ema_edge = 0.0
     if price > 0:
@@ -27,7 +29,9 @@ def signal_score(
         else:
             ema_gap = (ema100 - ema50) / price
         ema_edge = max(0.0, ema_gap) * ema_gap_weight
-    return rs_edge + ema_edge
+
+    rs_multiplier = max(0.01, 1.0 + rs_direction)
+    return ema_edge * rs_multiplier
 
 
 def local_reversion_context(closes: Sequence[float], current_close: float, position_side: str, window: int = 15) -> dict:
@@ -327,7 +331,8 @@ def ema_signal_direction_metrics(
         macro_gap = (ema_macro_slow - ema_macro_fast) / current_close
         trigger_gap = (ema_trigger_slow - ema_trigger_fast) / current_close
         pullback_depth = (ema_pullback_slow - ema_pullback_fast) / current_close
-        rs_edge = max(0.0, -rs60)
+        rs_direction = -rs60
+        rs_edge = max(0.0, rs_direction)
     else:
         macro_valid = ema_macro_fast > ema_macro_slow
         trigger_valid = ema_trigger_fast > ema_trigger_slow
@@ -336,9 +341,13 @@ def ema_signal_direction_metrics(
         macro_gap = (ema_macro_fast - ema_macro_slow) / current_close
         trigger_gap = (ema_trigger_fast - ema_trigger_slow) / current_close
         pullback_depth = (ema_pullback_fast - ema_pullback_slow) / current_close
-        rs_edge = max(0.0, rs60)
+        rs_direction = rs60
+        rs_edge = max(0.0, rs_direction)
 
-    score = macro_gap + trigger_gap + pullback_depth + rs_edge
+    rs_multiplier = max(0.01, 1.0 + rs_direction)
+    pullback_multiplier = max(0.01, 1.0 + pullback_depth)
+    base_trend = macro_gap + trigger_gap
+    score = base_trend * pullback_multiplier * rs_multiplier
     entry_valid = bool(macro_valid and pullback_valid and trigger_valid and rs_confirm_valid and btc_entry_valid)
     add_valid = bool(macro_valid and (trigger_valid or pullback_valid))
     return {

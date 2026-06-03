@@ -116,8 +116,12 @@ class SignalMathTests(unittest.TestCase):
             ema_gap_weight=2.0,
         )
 
-        self.assertAlmostEqual(long_score, 0.02 + 0.04)
-        self.assertAlmostEqual(short_score, long_score)
+        # Multiplicative logic: ema_edge * (1.0 + rs_direction)
+        # Long: rs_direction = 0.03 - 0.01 = 0.02. ema_edge = (100 - 98) / 100 * 2 = 0.04. Result = 0.04 * 1.02 = 0.0408
+        self.assertAlmostEqual(long_score, 0.0408)
+        # Short: rs_direction = 0.03 - 0.01 = 0.02. ema_edge = (102 - 100) / 100 * 2 = 0.04. Result = 0.04 * 1.02 = 0.0408
+        self.assertAlmostEqual(short_score, 0.0408)
+        # 0.0 * 1.0 = 0.0
         self.assertEqual(signal_score(0.0, 0.0, 100.0, 99.0, 100.0, "long", 1.0), 0.0)
 
     def test_relative_strength_uses_btc_as_benchmark(self):
@@ -196,8 +200,22 @@ class SignalMathTests(unittest.TestCase):
 
         self.assertTrue(long_metrics["entry_valid"])
         self.assertTrue(short_metrics["entry_valid"])
-        self.assertAlmostEqual(long_metrics["score"], 0.05 + 0.02 + 0.01 + 0.02)
-        self.assertAlmostEqual(short_metrics["score"], 0.05 + 0.04 + 0.03 + 0.02)
+
+        # Multiplicative score logic:
+        # Long base_trend = 0.05 (macro gap) + 0.02 (trigger gap) = 0.07
+        # Long pullback_depth = (102.0 - 101.0) / 100.0 = 0.01
+        # Long pullback multiplier = 1.0 + 0.01 = 1.01
+        # Long rs multiplier = 1.0 + 0.02 = 1.02
+        # Score = 0.07 * 1.01 * 1.02 = 0.072114
+        self.assertAlmostEqual(long_metrics["score"], 0.072114)
+
+        # Short base_trend = 0.05 (macro gap) + 0.04 (trigger gap) = 0.09
+        # Short pullback_depth = (101.0 - 98.0) / 100.0 = 0.03
+        # Short pullback multiplier = 1.0 + 0.03 = 1.03
+        # Short rs multiplier = 1.0 + 0.02 (rs60 is -0.02 -> short direction is 0.02) = 1.02
+        # Score = 0.09 * 1.03 * 1.02 = 0.094554
+        self.assertAlmostEqual(short_metrics["score"], 0.094554)
+
         self.assertTrue(long_metrics["add_valid"])
         self.assertTrue(short_metrics["add_valid"])
 
