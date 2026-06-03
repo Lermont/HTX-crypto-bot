@@ -491,7 +491,7 @@ class StateMixin:
 
         if pending_closeable:
             return PositionLifecycle.PENDING_CLOSEABLE.value
-        if mode == "absolute_force_exit":
+        if mode in {"absolute_force_exit", "hard_stop_loss"}:
             return PositionLifecycle.FORCE_EXIT.value
         if getattr(state, "zombie_position", False):
             return PositionLifecycle.ZOMBIE.value
@@ -1227,9 +1227,11 @@ class StateMixin:
         if contracts <= 0:
             return
         self._ensure_cost_basis_initialized(state)
-        fallback_quote = self._estimate_sell_quote_from_refs(symbol, state, contracts)
-        if fallback_quote <= 0 and fallback_price > 0:
-            fallback_quote = self._contracts_to_notional(symbol, contracts, fallback_price)
+        fallback_quote = (
+            self._contracts_to_notional(symbol, contracts, fallback_price)
+            if fallback_price > 0
+            else self._estimate_sell_quote_from_refs(symbol, state, contracts)
+        )
         details = self._fill_details_with_fallback(
             symbol,
             side,
@@ -1395,6 +1397,37 @@ class StateMixin:
             else:
                 self._record_sell_fill(symbol, state, contracts, reason=reason, fill_details=fill_details, entry_price=price)
 
+        if opposite_size > eps and old_size > eps and new_size <= eps:
+            opposite_entry = self._safe_float(snapshot.get(f"{opposite_side}_entry_price"), 0.0)
+            fallback_exit_price = opposite_entry or state.entry_price
+            self._log_event(
+                "WARNING",
+                f"Tracked {position_side} state disappeared while exchange now has a {opposite_side} position for {symbol}; closing stale state",
+                event="state_exchange_mismatch",
+                symbol=symbol,
+                side=opposite_side,
+                amount=opposite_size,
+                position_size=old_size,
+                entry_price=state.entry_price,
+                reason=f"state_{position_side}_replaced_by_{opposite_side}",
+            )
+            fill_details = self._collect_order_fill_details(symbol, state, exit_side, old_size, open_orders)
+            record_side_fill(
+                exit_side,
+                old_size,
+                fallback_exit_price,
+                reason=f"position_replaced_by_{opposite_side}",
+                fill_details=fill_details,
+            )
+            state.position_size = 0.0
+            state.position_available = 0.0
+            state.position_frozen = 0.0
+            state.position_side = ""
+            state.entry_price = 0.0
+            self._clear_pending_exit_ladder(state)
+            self._close_cycle(symbol, reason=f"position_replaced_by_{opposite_side}")
+            return "closed"
+
         if opposite_size > eps:
             external_reserved_symbols = getattr(self, "external_reserved_symbols", set())
             if symbol in external_reserved_symbols and old_size <= eps:
@@ -1502,7 +1535,7 @@ class StateMixin:
         if old_size > new_size + eps:
             closed = old_size - new_size
             fill_details = self._collect_order_fill_details(symbol, state, exit_side, closed, open_orders)
-            record_side_fill(exit_side, closed, 0.0, reason="position_decreased", fill_details=fill_details)
+            record_side_fill(exit_side, closed, state.entry_price, reason="position_decreased", fill_details=fill_details)
             if new_size <= eps:
                 state.position_size = 0.0
                 state.position_side = ""
@@ -1545,7 +1578,7 @@ class StateMixin:
 
         if old_size > eps and new_size <= eps:
             fill_details = self._collect_order_fill_details(symbol, state, exit_side, old_size, open_orders)
-            record_side_fill(exit_side, old_size, 0.0, reason="position_gone", fill_details=fill_details)
+            record_side_fill(exit_side, old_size, state.entry_price, reason="position_gone", fill_details=fill_details)
             state.position_size = 0.0
             state.position_available = 0.0
             state.position_frozen = 0.0

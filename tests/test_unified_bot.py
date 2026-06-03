@@ -142,6 +142,7 @@ class FakeExchange:
         self.account_leverage = 50
         self.account_position_mode = "single_side"
         self.reject_reduce_only_closeable_amount = False
+        self.reject_stop_loss_trigger_crossed = False
         self.create_order_calls = 0
         self.set_leverage_calls = []
         self.set_leverage_error = None
@@ -285,6 +286,11 @@ class FakeExchange:
                     'htx {"status":"error","err_code":1045,'
                     '"err_msg":"Unable to change leverage due to open orders."}'
                 )
+        if self.reject_stop_loss_trigger_crossed and "stopLossPrice" in params:
+            raise RuntimeError(
+                'htx {"status":"error","err_code":1407,'
+                '"err_msg":"The stop-loss price shall not be greater than or equal to current price."}'
+            )
         if self.reject_reduce_only_closeable_amount and params.get("reduceOnly"):
             raise RuntimeError(
                 'htx {"status":"error","err_code":1492,'
@@ -1112,6 +1118,10 @@ class UnifiedBotTests(unittest.TestCase):
             state.pending_exit_ladder_since = None
             state.sell_ladder_signature = ""
             state.sell_ladder_mode = "absolute_force_exit"
+            bot._refresh_active_side(state)
+            self.assertEqual(state.lifecycle, PositionLifecycle.FORCE_EXIT.value)
+
+            state.sell_ladder_mode = "hard_stop_loss"
             bot._refresh_active_side(state)
             self.assertEqual(state.lifecycle, PositionLifecycle.FORCE_EXIT.value)
 
@@ -4441,6 +4451,113 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 self.assertEqual(state.hard_stop_order["id"], bot.exchange.created_orders[0]["id"])
 
+    def test_hard_stop_loss_crossed_trigger_switches_to_reduce_only_market_close(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_atr_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 0.0
+                state.position_frozen = 10.0
+                state.entry_price = 100.0
+                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 101.0, "amount": 10.0}]
+                bot.exchange.reject_stop_loss_trigger_crossed = True
+
+                placed = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(placed)
+                self.assertTrue(state.frozen_no_more_buys)
+                self.assertEqual(state.sell_ladder_mode, "hard_stop_loss")
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(state.hard_stop_order, {})
+                self.assertIn(("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["type"], "market")
+                self.assertEqual(order["side"], "sell")
+                self.assertEqual(order["amount"], 10.0)
+                self.assertTrue(order["params"].get("reduceOnly"))
+                self.assertNotIn("stopLossPrice", order["params"])
+
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                crossed = [row for row in rows if row["event"] == "hard_stop_loss_trigger_crossed"]
+                self.assertTrue(crossed)
+                self.assertEqual(crossed[-1]["error_code"], "1407")
+                self.assertTrue(any(row["event"] == "hard_stop_loss_market_close_placed" for row in rows))
+                self.assertFalse(
+                    any(row["reason"].startswith("hard_stop_loss_order_rejected") for row in rows)
+                )
+
+    def test_hard_stop_loss_crossed_trigger_market_close_mirrors_short_side(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_atr_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 7.0
+                state.position_available = 7.0
+                state.entry_price = 100.0
+                bot.exchange.reject_stop_loss_trigger_crossed = True
+
+                placed = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(placed)
+                self.assertEqual(state.sell_ladder_mode, "hard_stop_loss")
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["side"], "buy")
+                self.assertEqual(order["amount"], 7.0)
+                self.assertTrue(order["params"].get("reduceOnly"))
+                self.assertNotIn("stopLossPrice", order["params"])
+
+    def test_hard_stop_loss_market_close_retries_after_closeable_rejection(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_atr_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 6.0
+                state.position_available = 0.0
+                state.position_frozen = 6.0
+                state.entry_price = 100.0
+                bot.exchange.reject_stop_loss_trigger_crossed = True
+                bot.exchange.reject_reduce_only_closeable_amount = True
+
+                first = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(first)
+                self.assertEqual(state.sell_ladder_mode, "hard_stop_loss")
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(bot.exchange.create_order_calls, 2)
+
+                bot.exchange.reject_reduce_only_closeable_amount = False
+                second = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(second)
+                self.assertEqual(bot.exchange.create_order_calls, 3)
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                self.assertNotIn("stopLossPrice", bot.exchange.created_orders[0]["params"])
+
     def test_hard_stop_loss_rejection_logs_original_exception(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
@@ -5227,6 +5344,49 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(bot.exchange.created_orders[0]["type"], "market")
                 self.assertEqual(bot.exchange.created_orders[0]["side"], "sell")
                 self.assertEqual(state.sell_ladder_mode, "absolute_force_exit")
+
+    def test_step_symbol_stops_after_crossed_hard_stop_market_close(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_atr_enabled=False,
+                enable_absolute_force_exit=False,
+                enable_controlled_loss_exit=False,
+                urgent_time_exit_after_minutes=0.0,
+                hard_time_exit_after_minutes=0.0,
+            )
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 4.0
+                state.position_available = 4.0
+                state.entry_price = 100.0
+                bot.signal_cache["symbols"][SYMBOL] = self.entry_signal()
+                bot.exchange.reject_stop_loss_trigger_crossed = True
+                bot.exchange.positions = [
+                    {
+                        "symbol": SYMBOL,
+                        "side": "long",
+                        "contracts": 4.0,
+                        "available": 4.0,
+                        "entryPrice": 100.0,
+                        "marginMode": config.RISK.margin_mode,
+                        "leverage": config.RISK.leverage,
+                    }
+                ]
+
+                bot.step_symbol(SYMBOL)
+
+                self.assertEqual(state.sell_ladder_mode, "hard_stop_loss")
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["type"], "market")
+                self.assertEqual(order["side"], "sell")
+                self.assertTrue(order["params"].get("reduceOnly"))
+                self.assertNotIn("stopLossPrice", order["params"])
 
     def test_step_symbol_invokes_hard_time_controlled_exit_when_controlled_disabled(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7138,6 +7298,85 @@ class UnifiedBotTests(unittest.TestCase):
                         for row in rows
                     )
                 )
+
+    def test_stale_profile_state_closes_before_opposite_combined_reservation(self):
+        for profile_name, opposite_side, opposite_entry in (
+            ("long", "short", 90.0),
+            ("short", "long", 110.0),
+        ):
+            with self.subTest(profile=profile_name):
+                with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile(profile_name):
+                    bot = self.make_bot(Path(raw_tmp))
+                    bot.external_reserved_symbols = {SYMBOL}
+                    state = bot._get_state(SYMBOL)
+                    state.position_size = 5.0
+                    state.position_available = 0.0
+                    state.position_frozen = 5.0
+                    state.position_side = profile_name
+                    state.entry_price = 100.0
+                    state.cycle_opened_at = time.time() - 60.0
+                    if profile_name == "long":
+                        state.total_bought_amount = 5.0
+                        state.total_bought_quote = 500.0
+                    else:
+                        state.total_sold_amount = 5.0
+                        state.total_sold_quote = 500.0
+
+                    snapshot = {
+                        f"{profile_name}_size": 0.0,
+                        f"{profile_name}_available": 0.0,
+                        f"{opposite_side}_size": 5.0,
+                        f"{opposite_side}_available": 5.0,
+                        f"{opposite_side}_entry_price": opposite_entry,
+                    }
+
+                    closed_status = bot._sync_state_with_position(SYMBOL, snapshot, open_orders=[])
+
+                    self.assertEqual(closed_status, "closed")
+                    self.assertNotIn(SYMBOL, bot.disabled_symbols)
+                    self.assertEqual(bot._get_state(SYMBOL).position_size, 0.0)
+                    with bot.cycle_stats_path.open(newline="", encoding="utf-8") as handle:
+                        cycle_rows = list(csv.DictReader(handle))
+                    self.assertTrue(cycle_rows)
+                    self.assertEqual(
+                        cycle_rows[-1]["close_reason"],
+                        f"position_replaced_by_{opposite_side}",
+                    )
+                    self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), opposite_entry)
+                    self.assertLess(float(cycle_rows[-1]["realized_pnl_quote"]), 0.0)
+
+                    reserved_status = bot._sync_state_with_position(SYMBOL, snapshot, open_orders=[])
+
+                    self.assertEqual(reserved_status, "reserved")
+                    self.assertNotIn(SYMBOL, bot.disabled_symbols)
+
+    def test_position_gone_without_fill_details_uses_neutral_entry_price(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            state.position_size = 5.0
+            state.position_available = 5.0
+            state.position_side = "long"
+            state.entry_price = 100.0
+            state.total_bought_amount = 5.0
+            state.total_bought_quote = 500.0
+
+            status = bot._sync_state_with_position(
+                SYMBOL,
+                {
+                    "long_size": 0.0,
+                    "long_available": 0.0,
+                    "short_size": 0.0,
+                    "short_available": 0.0,
+                },
+                open_orders=[],
+            )
+
+            self.assertEqual(status, "closed")
+            with bot.cycle_stats_path.open(newline="", encoding="utf-8") as handle:
+                cycle_rows = list(csv.DictReader(handle))
+            self.assertTrue(cycle_rows)
+            self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), 100.0)
 
     def test_combined_reserved_symbols_include_exchange_side_opposite_profile_activity(self):
         class ReservationBot:

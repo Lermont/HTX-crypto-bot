@@ -69,16 +69,170 @@ class ExitStrategy:
             extra_params={"stopLossPrice": trigger_price},
         )
 
+    def _force_hard_stop_loss_market_close(
+        self,
+        symbol: str,
+        trigger_price: float,
+        loss_rate: float,
+        loss_rate_reason: str,
+        trigger_exception: Optional[Exception] = None,
+    ) -> bool:
+        state = self._get_state(symbol)
+        first_breach = state.sell_ladder_mode != "hard_stop_loss"
+        state.frozen_no_more_buys = True
+        state.sell_ladder_mode = "hard_stop_loss"
+        state.sell_ladder_signature = ""
+        state.hard_stop_signature = ""
+        self._refresh_active_side(state)
+        self._save_state()
+
+        if first_breach:
+            self._log_event(
+                "WARNING",
+                f"Hard stop-loss trigger is already crossed for {symbol}; switching to reduce-only market close",
+                event="hard_stop_loss_trigger_crossed",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                price=trigger_price,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"hard_stop_loss_trigger_crossed;loss_rate={loss_rate:.6f};{loss_rate_reason}",
+                exception=trigger_exception,
+            )
+
+        if state.entry_orders:
+            self._cancel_entry_orders(symbol, reason="hard_stop_loss_trigger_crossed")
+        if state.sell_ladder_orders:
+            self._cancel_sell_orders(symbol, reason="hard_stop_loss_trigger_crossed")
+        if state.hard_stop_order:
+            self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_trigger_crossed")
+        state = self._get_state(symbol)
+        state.frozen_no_more_buys = True
+        state.sell_ladder_mode = "hard_stop_loss"
+        state.sell_ladder_signature = ""
+        state.hard_stop_signature = ""
+        self._refresh_active_side(state)
+        self._save_state()
+
+        if state.entry_orders or state.sell_ladder_orders or state.hard_stop_order:
+            self._log_event(
+                "WARNING",
+                f"Hard stop-loss market close delayed for {symbol}: tracked order cancel did not fully clear",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                price=trigger_price,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"hard_stop_loss_market_close_cancel_failed;{loss_rate_reason}",
+            )
+            return True
+
+        if not config.RUNTIME.reduce_only_enabled:
+            self._log_event(
+                "ERROR",
+                f"Hard stop-loss market close blocked for {symbol}: reduce-only disabled",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                price=trigger_price,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"hard_stop_loss_market_close_reduce_only_disabled;{loss_rate_reason}",
+            )
+            return True
+
+        raw_amount = max(0.0, state.position_size)
+        amount = min(raw_amount, max(0.0, self._amount_to_precision(symbol, raw_amount)))
+        if amount <= 0:
+            self._log_event(
+                "WARNING",
+                f"Hard stop-loss market close delayed for {symbol}: close amount is below exchange minimum",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                price=trigger_price,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=f"hard_stop_loss_market_close_amount_below_minimum;{loss_rate_reason}",
+            )
+            return True
+
+        try:
+            order = self._create_one_way_order(
+                symbol=symbol,
+                order_type="market",
+                side=config.EXIT_SIDE,
+                amount=amount,
+                price=None,
+                reduce_only=True,
+            )
+            order_id = str(order.get("id") or "")
+        except Exception as exc:
+            closeable_rejected = self._is_reduce_only_amount_exceeds_closeable_error(exc)
+            if closeable_rejected:
+                state.position_available = 0.0
+                state.position_frozen = max(state.position_frozen, state.position_size)
+                self._refresh_active_side(state)
+                self._save_state()
+            self._log_event(
+                "WARNING" if closeable_rejected else "ERROR",
+                (
+                    f"Hard stop-loss market close delayed for {symbol}: HTX reports no closeable amount"
+                    if closeable_rejected
+                    else f"Hard stop-loss market close failed for {symbol}: {exc}"
+                ),
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                price=trigger_price,
+                amount=amount,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=(
+                    f"hard_stop_loss_market_close_closeable_rejected;{loss_rate_reason}"
+                    if closeable_rejected
+                    else f"hard_stop_loss_market_close_order_rejected;{loss_rate_reason}"
+                ),
+                exception=exc,
+            )
+            return True
+
+        self._log_event(
+            "WARNING",
+            f"Hard stop-loss reduce-only market close placed for {symbol}: contracts={amount}",
+            event="hard_stop_loss_market_close_placed",
+            symbol=symbol,
+            side=config.EXIT_SIDE,
+            order_id=order_id,
+            price=trigger_price,
+            amount=amount,
+            position_size=state.position_size,
+            entry_price=state.entry_price,
+            reason=f"hard_stop_loss_trigger_crossed;loss_rate={loss_rate:.6f};{loss_rate_reason}",
+        )
+        return True
+
     def _ensure_hard_stop_loss(self, symbol: str, signal: Optional[dict] = None) -> bool:
         state = self._get_state(symbol)
-        if not config.STRATEGY.hard_stop_loss_enabled:
-            if state.hard_stop_order:
-                self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_disabled")
-            return False
-
         if state.position_size <= 0 or state.entry_price <= 0:
             if state.hard_stop_order:
                 self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_flat_position")
+            return False
+
+        loss_rate, loss_rate_reason = self._hard_stop_loss_rate(signal)
+        trigger_price = self._hard_stop_loss_trigger_price(symbol, state, loss_rate)
+        if state.sell_ladder_mode == "hard_stop_loss":
+            return self._force_hard_stop_loss_market_close(
+                symbol,
+                trigger_price,
+                loss_rate,
+                loss_rate_reason,
+            )
+
+        if not config.STRATEGY.hard_stop_loss_enabled:
+            if state.hard_stop_order:
+                self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_disabled")
             return False
 
         if not config.RUNTIME.reduce_only_enabled:
@@ -98,8 +252,6 @@ class ExitStrategy:
             return False
 
         amount = self._amount_to_precision(symbol, min(max(0.0, state.position_size), state.position_size))
-        loss_rate, loss_rate_reason = self._hard_stop_loss_rate(signal)
-        trigger_price = self._hard_stop_loss_trigger_price(symbol, state, loss_rate)
         if amount <= 0 or trigger_price <= 0:
             return False
 
@@ -157,6 +309,14 @@ class ExitStrategy:
                     order_exc = retry_exc
 
         if not order_id and order_exc is not None:
+            if self._is_hard_stop_loss_trigger_reached_error(order_exc):
+                return self._force_hard_stop_loss_market_close(
+                    symbol,
+                    trigger_price,
+                    loss_rate,
+                    loss_rate_reason,
+                    trigger_exception=order_exc,
+                )
             state.frozen_no_more_buys = True
             self._refresh_active_side(state)
             self._save_state()
