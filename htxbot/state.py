@@ -243,12 +243,14 @@ class StateMixin:
             return False
         try:
             os.kill(pid, 0)
+        except PermissionError:
+            return True
         except OSError:
             return False
         if os.name == "nt":
             cmdline = self._pid_command_line(pid)
             if not cmdline:
-                return False
+                return True
             return "bot.py" in cmdline.replace("\\", "/").lower()
         return True
 
@@ -310,6 +312,25 @@ class StateMixin:
                 raise
             atexit.register(self._release_runtime_lock)
             return
+
+    def _assert_runtime_lock_owned(self):
+        expected_pid = str(os.getpid())
+        try:
+            raw_pid = self.lock_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"Runtime lock {self.lock_path} is missing; stopping to prevent duplicate bot instances."
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not verify runtime lock {self.lock_path}; stopping to prevent duplicate bot instances: {exc}"
+            ) from exc
+        if raw_pid != expected_pid:
+            owner = raw_pid or "<empty>"
+            raise RuntimeError(
+                f"Runtime lock {self.lock_path} is owned by PID {owner}, not {expected_pid}; "
+                "stopping to prevent duplicate bot instances."
+            )
 
     def _release_runtime_lock(self):
         try:

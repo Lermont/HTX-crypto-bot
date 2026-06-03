@@ -916,6 +916,9 @@ class CombinedHtxFuturesBot:
 
             while True:
                 started_at = time.time()
+                for bot in self.bots:
+                    with config.use_profile(bot.profile):
+                        bot._assert_runtime_lock_owned()
                 self.run_once()
                 elapsed = time.time() - started_at
                 time.sleep(max(0.0, self.poll_interval() - elapsed))

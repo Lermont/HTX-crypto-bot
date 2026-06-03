@@ -233,6 +233,7 @@ class RunnerMixin:
 
             while True:
                 started_at = time.time()
+                self._assert_runtime_lock_owned()
                 self._reset_private_caches()
                 reset_market_data = getattr(self, "_reset_market_data_caches", None)
                 if reset_market_data:

@@ -897,6 +897,35 @@ class UnifiedBotTests(unittest.TestCase):
             bot._release_runtime_lock()
             self.assertFalse(bot.lock_path.exists())
 
+    def test_runtime_lock_ownership_check_stops_displaced_process(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bot = self.make_bot(Path(raw_tmp))
+            bot._acquire_runtime_lock()
+            bot._assert_runtime_lock_owned()
+
+            bot.lock_path.write_text("999999", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "stopping to prevent duplicate bot instances"):
+                bot._assert_runtime_lock_owned()
+            bot._release_runtime_lock()
+            self.assertTrue(bot.lock_path.exists())
+
+    def test_windows_live_pid_is_not_treated_as_stale_when_command_line_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bot = self.make_bot(Path(raw_tmp))
+            with (
+                patch("htxbot.state.os.name", "nt"),
+                patch("htxbot.state.os.kill"),
+                patch.object(bot, "_pid_command_line", return_value=""),
+            ):
+                self.assertTrue(bot._pid_is_running(12345))
+
+    def test_runtime_lock_treats_pid_permission_error_as_running(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bot = self.make_bot(Path(raw_tmp))
+            with patch("htxbot.state.os.kill", side_effect=PermissionError("denied")):
+                self.assertTrue(bot._pid_is_running(12345))
+
     def test_legacy_state_load_repairs_long_profile_defaults_and_cost_basis(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             risk = replace(config.RISK, leverage=7, margin_mode="cross")
@@ -6342,6 +6371,82 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(bot.exchange.fetch_positions_calls, 4)
                 self.assertEqual(bot.exchange.urls["hostnames"]["contract"], "api.two.test")
 
+    def test_bulk_private_position_network_outage_skips_per_symbol_cascade(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            exchange_config = replace(
+                config.EXCHANGE,
+                market_load_retries=2,
+                contract_hostnames=("api.one.test", "api.two.test"),
+            )
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.fetch_positions_failures = [
+                    ccxt.RequestTimeout("timeout-1"),
+                    ccxt.RequestTimeout("timeout-2"),
+                ]
+
+                bot._reset_private_caches()
+                snapshot = bot._fetch_position_snapshot(SYMBOL)
+                second_snapshot = bot._fetch_position_snapshot(SECOND_SYMBOL)
+
+                self.assertFalse(snapshot["ok"])
+                self.assertFalse(second_snapshot["ok"])
+                self.assertEqual(bot.exchange.fetch_positions_calls, 2)
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertTrue(
+                    any(row["reason"] == "bulk_positions_fetch_failed_cycle_skipped" for row in rows)
+                )
+                self.assertFalse(any(row["reason"] == "position_fetch_failed" for row in rows))
+
+    def test_bulk_private_open_orders_network_outage_skips_per_symbol_cascade(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            exchange_config = replace(
+                config.EXCHANGE,
+                market_load_retries=2,
+                contract_hostnames=("api.one.test", "api.two.test"),
+            )
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.fetch_open_orders_failures = [
+                    ccxt.RequestTimeout("timeout-1"),
+                    ccxt.RequestTimeout("timeout-2"),
+                ]
+
+                bot._reset_private_caches()
+                orders = bot._fetch_open_orders(SYMBOL)
+                second_orders = bot._fetch_open_orders(SECOND_SYMBOL)
+
+                self.assertIsNone(orders)
+                self.assertIsNone(second_orders)
+                self.assertEqual(bot.exchange.fetch_open_orders_calls, 2)
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertTrue(
+                    any(row["reason"] == "bulk_open_orders_fetch_failed_cycle_skipped" for row in rows)
+                )
+                self.assertFalse(any(row["reason"] == "open_orders_fetch_failed" for row in rows))
+
+    def test_private_prefetch_stops_after_bulk_position_network_outage(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            exchange_config = replace(
+                config.EXCHANGE,
+                market_load_retries=2,
+                contract_hostnames=("api.one.test", "api.two.test"),
+            )
+            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.fetch_positions_failures = [
+                    ccxt.RequestTimeout("timeout-1"),
+                    ccxt.RequestTimeout("timeout-2"),
+                ]
+
+                bot._reset_private_caches()
+                bot._prefetch_private_snapshots()
+
+                self.assertEqual(bot.exchange.fetch_positions_calls, 2)
+                self.assertEqual(bot.exchange.fetch_open_orders_calls, 0)
+
     def test_private_position_fetch_returns_not_ok_on_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -6379,8 +6484,10 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._reset_private_caches()
                 snapshot = bot._fetch_position_snapshot(SYMBOL)
+                second_snapshot = bot._fetch_position_snapshot(SECOND_SYMBOL)
 
                 self.assertFalse(snapshot["ok"])
+                self.assertFalse(second_snapshot["ok"])
                 self.assertEqual(bot.exchange.fetch_positions_calls, 2)
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
@@ -6405,8 +6512,10 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._reset_private_caches()
                 orders = bot._fetch_open_orders(SYMBOL)
+                second_orders = bot._fetch_open_orders(SECOND_SYMBOL)
 
                 self.assertIsNone(orders)
+                self.assertIsNone(second_orders)
                 self.assertEqual(bot.exchange.fetch_open_orders_calls, 2)
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
@@ -7263,6 +7372,37 @@ class UnifiedBotTests(unittest.TestCase):
         CombinedHtxFuturesBot.run_once(combined)
 
         self.assertEqual(fake_bot.calls, [SYMBOL])
+
+    def test_combined_run_checks_runtime_lock_before_live_cycle(self):
+        class LockBot:
+            def __init__(self):
+                self.profile = config.resolve_profile("long")
+                self.assert_calls = 0
+                self.release_calls = 0
+
+            def _log_event(self, *args, **kwargs):
+                pass
+
+            def _assert_runtime_lock_owned(self):
+                self.assert_calls += 1
+                raise RuntimeError("lock ownership lost")
+
+            def _release_runtime_lock(self):
+                self.release_calls += 1
+
+        combined = object.__new__(CombinedHtxFuturesBot)
+        lock_bot = LockBot()
+        combined.bots = [lock_bot]
+        combined.setup = lambda: None
+        run_once_calls = []
+        combined.run_once = lambda: run_once_calls.append(True)
+
+        with self.assertRaisesRegex(RuntimeError, "lock ownership lost"):
+            CombinedHtxFuturesBot.run(combined)
+
+        self.assertEqual(lock_bot.assert_calls, 1)
+        self.assertEqual(lock_bot.release_calls, 1)
+        self.assertEqual(run_once_calls, [])
 
     def test_reserved_opposite_position_does_not_disable_combined_profile(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):

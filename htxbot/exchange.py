@@ -783,6 +783,7 @@ class ExchangeMixin:
             self._private_positions_bulk_failed = False
             self._private_open_orders_bulk_failed = False
             self._private_tickers_bulk_failed = False
+            self._private_api_network_failed = False
             self._external_price_context_cache = {}
 
     def _reset_market_data_caches(self):
@@ -1134,6 +1135,8 @@ class ExchangeMixin:
             cached = getattr(self, "_private_positions_by_symbol", None)
             if cached is not None:
                 return cached
+            if getattr(self, "_private_api_network_failed", False):
+                return None
             if getattr(self, "_private_positions_bulk_failed", False):
                 return None
             if not self.exchange.has.get("fetchPositions"):
@@ -1154,11 +1157,22 @@ class ExchangeMixin:
                 )
             except Exception as exc:
                 self._private_positions_bulk_failed = True
+                network_failed = self._is_transient_exchange_error(exc)
+                if network_failed:
+                    self._private_api_network_failed = True
                 self._log_event(
-                    "DEBUG",
-                    f"Bulk positions fetch unavailable; falling back to per-symbol sync: {exc}",
+                    "WARNING" if network_failed else "DEBUG",
+                    (
+                        f"Bulk positions fetch unavailable after network retries; skipping private sync for this cycle: {exc}"
+                        if network_failed
+                        else f"Bulk positions fetch unavailable; falling back to per-symbol sync: {exc}"
+                    ),
                     event="state_exchange_mismatch",
-                    reason="bulk_positions_fetch_failed",
+                    reason=(
+                        "bulk_positions_fetch_failed_cycle_skipped"
+                        if network_failed
+                        else "bulk_positions_fetch_failed"
+                    ),
                     exception=exc,
                 )
                 return None
@@ -1181,6 +1195,8 @@ class ExchangeMixin:
             cached = getattr(self, "_private_open_orders_by_symbol", None)
             if cached is not None:
                 return cached
+            if getattr(self, "_private_api_network_failed", False):
+                return None
             if getattr(self, "_private_open_orders_bulk_failed", False):
                 return None
             if not self.exchange.has.get("fetchOpenOrders"):
@@ -1204,11 +1220,22 @@ class ExchangeMixin:
                 )
             except Exception as exc:
                 self._private_open_orders_bulk_failed = True
+                network_failed = self._is_transient_exchange_error(exc)
+                if network_failed:
+                    self._private_api_network_failed = True
                 self._log_event(
-                    "DEBUG",
-                    f"Bulk open-orders fetch unavailable; falling back to per-symbol sync: {exc}",
+                    "WARNING" if network_failed else "DEBUG",
+                    (
+                        f"Bulk open-orders fetch unavailable after network retries; skipping private sync for this cycle: {exc}"
+                        if network_failed
+                        else f"Bulk open-orders fetch unavailable; falling back to per-symbol sync: {exc}"
+                    ),
                     event="state_exchange_mismatch",
-                    reason="bulk_open_orders_fetch_failed",
+                    reason=(
+                        "bulk_open_orders_fetch_failed_cycle_skipped"
+                        if network_failed
+                        else "bulk_open_orders_fetch_failed"
+                    ),
                     exception=exc,
                 )
                 return None
@@ -1228,7 +1255,11 @@ class ExchangeMixin:
 
     def _prefetch_private_snapshots(self):
         self._bulk_positions_by_symbol()
+        if getattr(self, "_private_api_network_failed", False):
+            return
         self._bulk_open_orders_by_symbol()
+        if getattr(self, "_private_api_network_failed", False):
+            return
         if self._bulk_tickers_by_symbol() is None:
             self._prefetch_ticker_snapshots()
 
@@ -1652,6 +1683,9 @@ class ExchangeMixin:
         bulk_positions = self._bulk_positions_by_symbol()
         if bulk_positions is not None:
             positions = bulk_positions.get(symbol, [])
+        elif getattr(self, "_private_api_network_failed", False):
+            snapshot["ok"] = False
+            return snapshot
         else:
             try:
                 positions = self._private_fetch_with_retry(
@@ -1667,7 +1701,10 @@ class ExchangeMixin:
                     item_types=(dict,),
                 )
             except Exception as exc:
-                level = "WARNING" if self._is_transient_exchange_error(exc) else "ERROR"
+                network_failed = self._is_transient_exchange_error(exc)
+                if network_failed:
+                    self._private_api_network_failed = True
+                level = "WARNING" if network_failed else "ERROR"
                 self._log_event(
                     level,
                     f"Could not fetch position for {symbol}: {exc}",
@@ -1763,6 +1800,8 @@ class ExchangeMixin:
         bulk_orders = self._bulk_open_orders_by_symbol()
         if bulk_orders is not None:
             orders = bulk_orders.get(symbol, [])
+        elif getattr(self, "_private_api_network_failed", False):
+            return None
         else:
             def fetch_symbol_open_orders():
                 return self.exchange.fetch_open_orders(symbol, params=self._position_params())
@@ -1781,7 +1820,10 @@ class ExchangeMixin:
                     item_types=(dict,),
                 )
             except Exception as exc:
-                level = "WARNING" if self._is_transient_exchange_error(exc) else "ERROR"
+                network_failed = self._is_transient_exchange_error(exc)
+                if network_failed:
+                    self._private_api_network_failed = True
+                level = "WARNING" if network_failed else "ERROR"
                 self._log_event(
                     level,
                     f"Could not fetch open orders for {symbol}: {exc}",
