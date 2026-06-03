@@ -41,7 +41,7 @@ Long entry requires the macro and trigger EMAs to point up, the pullback layer t
 
 Short entry mirrors the same logic downward: macro and trigger EMAs point down, pullback layer recovers downward after a recent bounce, optional RS confirmation, and BTC 30m is not too positive.
 
-Signal flags are split by use: `valid` means the symbol has a coherent directional signal, `entry_valid` means a full new-entry gate passed, and `add_valid` is the stricter health gate used for averaging an already open position. The default EMA entry gate also requires non-choppy trigger candles and recent volume confirmation, so a late EMA cross alone no longer opens or averages a position.
+Signal flags are split by use: `valid` means the symbol has a coherent directional signal, `entry_valid` means a full new-entry gate passed, and `add_valid` is the stricter health gate used for averaging an already open position. The default EMA entry gate also requires non-choppy trigger candles and recent volume confirmation, so a late EMA cross alone no longer opens or averages a position. Signal scoring logic uses a multiplicative hybrid model where negative indicators apply penalty multipliers.
 
 If HTX rejects a reduce-only exit because the whole position is reported as closeable-reserved/frozen, the bot keeps a pending exit-ladder state and waits for available closeable amount, a position-size change, or visible close orders to adopt/cancel. It does not keep duplicating exit ladders on timeout alone.
 
@@ -51,9 +51,10 @@ For implementation-level details, see [strategy.md](strategy.md).
 
 Requirements:
 
-- Python 3.11+
-- HTX futures account for live mode
-- API key/secret with the required futures permissions for live trading
+- Python 3.12 verified locally; Python 3.11+ recommended.
+- HTX futures account for live mode: [open HTX with invite code `6hc25223`](https://www.htx.com/invite/en-us/1f?invite_code=6hc25223).
+- Optional MEXC account for reference market analysis: [open MEXC via referral link](https://promote.mexc.com/r/lxcLKaZgvh). The current MEXC radar uses public market data and does not require MEXC API keys.
+- API key/secret with the required futures permissions for live trading.
 
 Install:
 
@@ -214,6 +215,64 @@ EXTERNAL_PRICE_EXIT_ADJUSTMENT_ENABLED=false
 ```
 
 Per-profile overrides are supported through `LONG_` and `SHORT_` prefixes, for example `LONG_LEVERAGE=30` or `SHORT_LEVERAGE=30`.
+
+## Macro Gold/BTC RSI Overlay
+
+The bot features a macro overlay that compares a gold proxy (usually XAUT) against BTC using RSI and relative gold/BTC movement. This is not an independent entry strategy, but a market regime detection layer: it can reduce risk, disable averaging, or make exits more conservative when crypto underperforms a defensive asset.
+
+Default macro settings:
+
+```dotenv
+ENABLE_GOLD_BTC_RSI_OVERLAY=true
+MACRO_GOLD_COINS=xaut
+GOLD_TIMEFRAME=4h
+GOLD_RSI_PERIOD=14
+GOLD_CACHE_TTL_SEC=900
+GOLD_STRONG_RSI=60
+GOLD_WEAK_RSI=40
+BTC_STRONG_RSI=60
+BTC_WEAK_RSI=40
+RSI_SPREAD_THRESHOLD=15
+```
+
+The overlay classifies regimes:
+
+- `crypto_underperforms_gold`: gold is strong, while BTC is weak or significantly lagging. Long budget is reduced, short side can remain softer, averaging may be disabled, and time-exit accelerates.
+- `crypto_risk_on`: BTC is strong, gold is lagging. The bot maintains normal long behavior and may reduce short aggressiveness.
+- `broad_liquidity_risk_on`: BTC and gold are both strong. This is a constructive regime, but does not automatically increase leverage.
+- `deleveraging`: BTC and gold are both weak. New entries may be blocked, averaging is disabled, and exits are accelerated.
+- `neutral` or `macro_unavailable`: overlay does not add strong directional filters.
+
+Macro context is cached, written to CSV, and used in decisions for new-entry blocks, averaging blocks, ladder multipliers, and time-exit multipliers. Exact regime logic is described in [strategy.md](strategy.md).
+
+## MEXC Reference Price Signals
+
+The external price radar compares the HTX order-book mid-price with the public MEXC book-ticker. Its purpose is to detect cross-exchange premium, discount, stale reference data, and short-term impulses before opening or managing a position.
+
+Key default MEXC settings:
+
+```dotenv
+EXTERNAL_PRICE_FEED_ENABLED=true
+EXTERNAL_PRICE_REFERENCE_EXCHANGES=mexc
+EXTERNAL_PRICE_REST_POLL_INTERVAL_SEC=1
+EXTERNAL_PRICE_MAX_HTX_PREMIUM_FOR_LONG_BPS=15
+EXTERNAL_PRICE_MAX_HTX_DISCOUNT_FOR_SHORT_BPS=15
+EXTERNAL_PRICE_BLOCK_IF_DIVERGENCE_1M_BPS=50
+EXTERNAL_PRICE_MEXC_LEAD_THRESHOLD_BPS_30S=5
+EXTERNAL_PRICE_IMPULSE_SCORE_BONUS=0.02
+EXTERNAL_PRICE_EXIT_ADJUSTMENT_ENABLED=false
+```
+
+In practice:
+
+- Long entry may be blocked if HTX is too expensive relative to MEXC.
+- Short entry may be blocked if HTX is too cheap relative to MEXC.
+- A large 1-minute HTX/MEXC divergence can send the symbol into cooldown.
+- If MEXC moves ahead of HTX in the same direction, the candidate may receive an impulse score bonus.
+- The exit ladder may be widened if the HTX premium/discount suggests a more cautious take-profit.
+- If reference data is stale, the default behavior is to ignore the reference rather than shut down trading; this can be made stricter via `.env`.
+
+The radar maps HTX symbols to MEXC spot-style `BASEUSDT` symbols and writes bid, ask, mid, spread, z-score, age, and short-window changes to the external price CSV.
 
 ## Generated Files
 

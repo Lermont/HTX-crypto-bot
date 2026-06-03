@@ -54,7 +54,7 @@ rs60 <= EMA_SHORT_MAX_RS60
 btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 ```
 
-信号不是单一均线交叉。它结合了高周期趋势方向、recovery-cross 年龄、recovery gap、短周期触发、相对 BTC 强弱、短期 BTC 风险和用于候选排序的 score。完整实现级说明见 [strategy.md](../strategy.md)。
+信号不是单一均线交叉。它结合了高周期趋势方向、recovery-cross 年龄、recovery gap、短周期触发、相对 BTC 强弱、短期 BTC 风险和用于候选排序的 score。信号评分逻辑使用乘法混合模型，其中负面指标会应用惩罚乘数。完整实现级说明见 [strategy.md](../strategy.md)。
 
 ## 风险与仓位管理
 
@@ -76,7 +76,7 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 
 要求：
 
-- 本地已在 Python 3.14 验证；建议 Python 3.11+。
+- 本地已在 Python 3.12 验证；建议 Python 3.11+。
 - 真实交易需要 HTX account：[使用 invite code `6hc25223` 开通 HTX](https://www.htx.com/invite/en-us/1f?invite_code=6hc25223)。
 - 可选的 MEXC account 可用于参考市场研究：[通过此 referral link 开通 MEXC](https://promote.mexc.com/r/lxcLKaZgvh)。当前 MEXC radar 使用公开市场数据，不需要 MEXC API keys。
 - 需要 USDT-M futures 权限。

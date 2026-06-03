@@ -54,7 +54,7 @@ rs60 <= EMA_SHORT_MAX_RS60
 btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 ```
 
-Сигнал не сводится к одному пересечению. Он объединяет направление старшего тренда, возраст recovery-cross, recovery gap, локальный trigger, относительную силу к BTC, краткосрочный BTC-risk и score для ранжирования кандидатов. Полное техническое описание находится в [strategy.md](../strategy.md).
+Сигнал не сводится к одному пересечению. Он объединяет направление старшего тренда, возраст recovery-cross, recovery gap, локальный trigger, относительную силу к BTC, краткосрочный BTC-risk и score для ранжирования кандидатов. Логика оценки сигналов использует мультипликативную гибридную модель, в которой негативные индикаторы применяют штрафные множители. Полное техническое описание находится в [strategy.md](../strategy.md).
 
 ## Управление Риском И Позицией
 
@@ -76,7 +76,7 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 
 Требования:
 
-- Локально проверен Python 3.14; рекомендуется Python 3.11+.
+- Локально проверен Python 3.12; рекомендуется Python 3.11+.
 - HTX account для live-режима: [открыть HTX с invite code `6hc25223`](https://www.htx.com/invite/en-us/1f?invite_code=6hc25223).
 - Опциональный MEXC account для анализа reference market: [открыть MEXC по referral link](https://promote.mexc.com/r/lxcLKaZgvh). Текущий MEXC radar использует публичные рыночные данные и не требует MEXC API keys.
 - Доступ к USDT-M futures.
