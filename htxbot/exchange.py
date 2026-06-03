@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import ccxt
 
 import config
+from .models import OrderRequest
 
 from .concurrency import instance_rlock
 from .shared_exchange import ThreadSafeExchange
@@ -46,6 +47,8 @@ class ExchangeMixin:
         return instance_rlock(self.exchange, "_thread_safe_exchange_lock")
 
     def _create_exchange(self):
+        if config.RUNTIME.dry_run:
+            return None
         if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
             raise ValueError("HTX API credentials are required")
 
@@ -1613,28 +1616,18 @@ class ExchangeMixin:
 
     def _create_one_way_order(
         self,
-        symbol: str,
-        order_type: str,
-        side: str,
-        amount: float,
-        price: float,
-        reduce_only: bool = False,
-        post_only: bool = False,
-        leverage: Optional[float] = None,
-        extra_params: Optional[dict] = None,
+        req: OrderRequest,
     ) -> dict:
-        if leverage is None:
-            leverage = self._fetch_account_order_leverage(symbol)
-        params = self._order_params(reduce_only=reduce_only, post_only=post_only, leverage=leverage)
-        if extra_params:
-            params.update(dict(extra_params))
+        if req.leverage is None:
+            req.leverage = self._fetch_account_order_leverage(req.symbol)
+        params = self._order_params(reduce_only=req.reduce_only, post_only=req.post_only, leverage=req.leverage)
         try:
             return self.exchange.create_order(
-                symbol=symbol,
-                type=order_type,
-                side=side,
-                amount=amount,
-                price=price,
+                symbol=req.symbol,
+                type=req.order_type,
+                side=req.side,
+                amount=req.amount,
+                price=req.price,
                 params=params,
             )
         except Exception as exc:
@@ -1643,10 +1636,10 @@ class ExchangeMixin:
 
             self._log_event(
                 "WARNING",
-                f"HTX account is still in hedge mode while placing {side} {symbol}; switching to one-way and retrying",
+                f"HTX account is still in hedge mode while placing {req.side} {req.symbol}; switching to one-way and retrying",
                 event="futures_setup",
-                symbol=symbol,
-                side=side,
+                symbol=req.symbol,
+                side=req.side,
                 reason="hedge_mode_retry_one_way",
                 exception=exc,
             )
@@ -1654,11 +1647,11 @@ class ExchangeMixin:
                 raise
 
             return self.exchange.create_order(
-                symbol=symbol,
-                type=order_type,
-                side=side,
-                amount=amount,
-                price=price,
+                symbol=req.symbol,
+                type=req.order_type,
+                side=req.side,
+                amount=req.amount,
+                price=req.price,
                 params=params,
             )
 
