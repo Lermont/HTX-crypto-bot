@@ -292,7 +292,7 @@ Each profile writes state and logs into its own directory:
 - `external_price_feed.csv`
 - `bot_futures_macro.csv`
 
-These runtime CSV/JSONL artifacts are local audit output and are ignored by git. Local secrets live in `.env` or `htxbot/.env`; these files are also ignored by git.
+These runtime CSV/JSONL artifacts are local audit output and are ignored by git. Local secrets live in the root `.env`; this file is also ignored by git.
 
 ## Live Launch Checklist
 
@@ -300,7 +300,7 @@ These runtime CSV/JSONL artifacts are local audit output and are ignored by git.
 2. Combined mode requires identical API credentials across enabled profiles.
 3. Confirm HTX account leverage or set `ACCOUNT_LEVERAGE`.
 4. Keep conservative caps first: `EMA_POSITION_BUDGET_FRACTION=0.02`, `EMA_MAX_POSITION_MARGIN_FRACTION=0.03`, `EMA_MAX_TOTAL_MARGIN_FRACTION=0.50`.
-5. Check `.env` or `htxbot/.env` for profile-specific overrides.
+5. Check the root `.env` for profile-specific overrides.
 6. Confirm HTX position mode is one-way and margin mode is cross.
 7. Confirm runtime diagnostics/log artifacts are not staged or committed. If old signed HTX diagnostics were ever shared, rotate the affected HTX API key before live start.
 8. Start with small budgets and watch the first cycles closely.

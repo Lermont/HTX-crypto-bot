@@ -31,7 +31,6 @@ def _load_dotenv_if_present(path: Path, profile: str = "") -> None:
 
 
 _load_dotenv_if_present(BASE_DIR / ".env")
-_load_dotenv_if_present(BASE_DIR / "htxbot" / ".env")
 
 
 def _env(name: str, profile: str = "") -> str:

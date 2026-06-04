@@ -106,7 +106,7 @@ python bot.py --profiles long,short
 
 ## 配置
 
-将 `.env.example` 复制为 `.env`，只覆盖你需要修改的值。机器人先读取项目根目录的 `.env`，再用 `htxbot/.env` 补充仍未设置的变量；`LONG_`/`SHORT_` 前缀的 profile overrides 也放在同一个共享配置文件中。
+将 `.env.example` 复制为 `.env`，只覆盖你需要修改的值。机器人只读取项目根目录的 `.env`；`LONG_`/`SHORT_` 前缀的 profile overrides 也放在同一个共享配置文件中。
 
 与真实交易相关的最小配置：
 
@@ -245,7 +245,7 @@ docs/                  多语言发布文档
 
 ## 安全
 
-- 不要提交 `.env` 或 `htxbot/.env`。
+- 不要提交 `.env`。
 - 限制 API key 权限；如果怀疑泄露，请立即轮换。
 - 启动前运行测试，并用 mock/stub exchange 验证关键场景。
 - 在明确启用真实订单前，尽量使用最小 API 权限。

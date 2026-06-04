@@ -61,9 +61,20 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(cache_path.endswith("/short/bot_futures_short_markets_cache.json"))
         self.assertNotIn("short_state_markets_cache", cache_path)
 
-    def test_default_coin_universe_is_env_driven(self):
-        self.assertEqual(config.LONG_COINS, ())
-        self.assertEqual(config.SHORT_COINS, ())
+    def test_coin_universe_can_be_empty_when_env_is_not_set(self):
+        with temporary_env(
+            COINS=None,
+            HTX_COINS=None,
+            COINS_2=None,
+            HTX_COINS_2=None,
+            LONG_COINS=None,
+            HTXBOT_LONG_COINS=None,
+            LONG_COINS_2=None,
+            HTXBOT_LONG_COINS_2=None,
+        ):
+            profile = config._make_profile("long", "long", ())
+
+        self.assertEqual(profile.coins, ())
 
     def test_profile_reads_coin_universe_and_api_accounts_from_env(self):
         with temporary_env(
