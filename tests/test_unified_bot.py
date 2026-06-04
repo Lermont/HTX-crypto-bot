@@ -8333,7 +8333,8 @@ class UnifiedBotTests(unittest.TestCase):
         short_coins = {coin.lower() for coin in config.resolve_profile("short").coins}
 
         self.assertIn("doge", short_coins)
-        self.assertIn("fil", short_coins)
+        self.assertIn("bonk", short_coins)
+        self.assertIn("pengu", short_coins)
         self.assertNotIn("fartcoin", short_coins)
         self.assertNotIn("space", short_coins)
         self.assertNotIn("enj", short_coins)

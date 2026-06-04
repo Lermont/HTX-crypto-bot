@@ -11,6 +11,15 @@ from htxbot.config import CONFIG_WARNINGS, _add_config_warning
 from tests.config_overrides import override_frozen_config_fields
 
 
+EXPECTED_CONFIG_COINS = (
+    "aave", "ada", "algo", "apt", "arb", "atom", "avax", "bch", "bnb", "bonk",
+    "btc", "cake", "comp", "doge", "dot", "ena", "etc", "eth", "hbar", "htx",
+    "hype", "icp", "inj", "jup", "kas", "ldo", "link", "ltc", "near", "ondo",
+    "orca", "pendle", "pengu", "people", "pepe", "pol", "sei", "shib", "sol", "ssv",
+    "sui", "sushi", "ton", "trx", "uni", "xaut", "xlm", "xmr", "xrp", "zec",
+)
+
+
 @contextmanager
 def temporary_env(**updates):
     sentinel = object()
@@ -50,6 +59,12 @@ class ConfigTests(unittest.TestCase):
 
         self.assertTrue(cache_path.endswith("/short/bot_futures_short_markets_cache.json"))
         self.assertNotIn("short_state_markets_cache", cache_path)
+
+    def test_long_and_short_profiles_use_configured_coin_universe(self):
+        self.assertEqual(config.LONG_COINS, EXPECTED_CONFIG_COINS)
+        self.assertEqual(config.SHORT_COINS, EXPECTED_CONFIG_COINS)
+        self.assertEqual(config.resolve_profile("long").coins, EXPECTED_CONFIG_COINS)
+        self.assertEqual(config.resolve_profile("short").coins, EXPECTED_CONFIG_COINS)
 
     def test_market_data_max_workers_is_profile_runtime_setting(self):
         with temporary_env(

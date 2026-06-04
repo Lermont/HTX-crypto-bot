@@ -135,23 +135,19 @@ def _add_config_warning(message: str) -> None:
         CONFIG_WARNINGS.append(message)
 
 LONG_COINS = (
-    "eth", "sol", "bnb", "xrp", "ada", "avax", "link", "dot", "ltc", "bch",
-    "etc", "trx", "ton", "sui", "apt", "op", "near", "sei",
-    "inj", "fil", "atom", "algo", "pol", "tao", "icp", "wld", "grt",
-    "tia", "hbar", "kas", "xlm", "kaito", "ssv", "lpt", "pendle", "ena",
-    "ondo", "jup", "aave", "uni", "ldo", "ethfi", "zro", "zk", "1inch",
-    "crv", "orca", "hype", "zec", "xmr", "dydx", "ens", "cake", "comp",
-    "gala", "axs", "sand",
+    "aave", "ada", "algo", "apt", "arb", "atom", "avax", "bch", "bnb", "bonk",
+    "btc", "cake", "comp", "doge", "dot", "ena", "etc", "eth", "hbar", "htx",
+    "hype", "icp", "inj", "jup", "kas", "ldo", "link", "ltc", "near", "ondo",
+    "orca", "pendle", "pengu", "people", "pepe", "pol", "sei", "shib", "sol", "ssv",
+    "sui", "sushi", "ton", "trx", "uni", "xaut", "xlm", "xmr", "xrp", "zec",
 )
 
 SHORT_COINS = (
-    "eth", "sol", "bnb", "xrp", "ada", "avax", "link", "dot", "ltc", "bch",
-    "doge", "etc", "trx", "ton", "sui", "apt", "arb", "op", "near", "sei",
-    "inj", "fil", "atom", "algo", "pol", "tao", "icp", "wld", "grt", "pyth",
-    "tia", "hbar", "xlm", "kaito", "ssv", "lpt", "pendle", "ena",
-    "jup", "uni", "ldo", "ethfi", "zro", "zk", "1inch",
-    "crv", "orca", "zec", "xmr", "dydx", "ens", "cake", "comp",
-    "gala", "axs", "cfx", "sand",
+    "aave", "ada", "algo", "apt", "arb", "atom", "avax", "bch", "bnb", "bonk",
+    "btc", "cake", "comp", "doge", "dot", "ena", "etc", "eth", "hbar", "htx",
+    "hype", "icp", "inj", "jup", "kas", "ldo", "link", "ltc", "near", "ondo",
+    "orca", "pendle", "pengu", "people", "pepe", "pol", "sei", "shib", "sol", "ssv",
+    "sui", "sushi", "ton", "trx", "uni", "xaut", "xlm", "xmr", "xrp", "zec",
 )
 
 
