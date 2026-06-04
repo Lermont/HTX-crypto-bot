@@ -907,6 +907,36 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertTrue(canceled)
             self.assertEqual(bot.exchange.canceled_orders, [(order["id"], SYMBOL, {"marginMode": config.RISK.margin_mode})])
 
+    def test_unknown_short_entry_cancel_logs_entry_event(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            bot = self.make_bot(Path(raw_tmp))
+            unknown_entry = {
+                "id": "manual_short_entry",
+                "symbol": SYMBOL,
+                "side": "sell",
+                "price": 10.1,
+                "amount": 2.0,
+            }
+
+            valid = bot._validate_entry_orders(SYMBOL, [unknown_entry])
+
+            self.assertFalse(valid)
+            self.assertIn(("manual_short_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+            with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertTrue(
+                any(
+                    row["event"] == "entry_order_canceled"
+                    and row["order_id"] == "manual_short_entry"
+                    and row["side"] == "sell"
+                    and row["reason"] == "unknown_entry_orders"
+                    for row in rows
+                )
+            )
+            self.assertFalse(
+                any(row["event"] == "sell_order_canceled" and row["order_id"] == "manual_short_entry" for row in rows)
+            )
+
     def test_one_way_order_accepts_order_request_with_extra_params(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -7705,6 +7735,18 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertIn(("short_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
+                self.assertTrue(
+                    any(
+                        row["event"] == "entry_order_canceled"
+                        and row["order_id"] == "short_entry"
+                        and row["side"] == "sell"
+                        and row["reason"] == "reserved_by_other_profile"
+                        for row in rows
+                    )
+                )
+                self.assertFalse(
+                    any(row["event"] == "sell_order_canceled" and row["order_id"] == "short_entry" for row in rows)
+                )
                 self.assertTrue(any(row["event"] == "profile_reserved" for row in rows))
                 self.assertFalse(
                     any(

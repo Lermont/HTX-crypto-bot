@@ -379,7 +379,13 @@ class EntryStrategy:
             side=entry_side,
             reason="unknown_entry_orders",
         )
-        self._cancel_exchange_orders(symbol, unknown_entries, side=entry_side, reason="unknown_entry_orders")
+        self._cancel_exchange_orders(
+            symbol,
+            unknown_entries,
+            side=entry_side,
+            reason="unknown_entry_orders",
+            event="entry_order_canceled",
+        )
 
         if state.position_size > 0:
             self._freeze_no_more_buys(symbol, reason="unknown_entry_orders")

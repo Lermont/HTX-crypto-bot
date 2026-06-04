@@ -1910,8 +1910,7 @@ class ExchangeMixin:
         state = self._get_state(symbol)
         remaining = []
         for ref in list(state.entry_orders):
-            side = str(ref.get("side") or config.ENTRY_SIDE).lower()
-            if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+            if not self._cancel_order_ref(symbol, ref, event="entry_order_canceled", reason=reason):
                 remaining.append(ref)
         state.entry_orders = remaining
         self._refresh_active_side(state)
@@ -1949,7 +1948,14 @@ class ExchangeMixin:
         self._refresh_active_side(state)
         self._save_state()
 
-    def _cancel_exchange_orders(self, symbol: str, orders: List[dict], side: Optional[str], reason: str) -> bool:
+    def _cancel_exchange_orders(
+        self,
+        symbol: str,
+        orders: List[dict],
+        side: Optional[str],
+        reason: str,
+        event: Optional[str] = None,
+    ) -> bool:
         all_canceled = True
         for order in orders:
             order_side = (order.get("side") or "").lower()
@@ -1964,8 +1970,8 @@ class ExchangeMixin:
             cancel_params = order.get("bot_cancel_params") or order.get("cancel_params")
             if isinstance(cancel_params, dict):
                 ref["cancel_params"] = dict(cancel_params)
-            event = "buy_order_canceled" if order_side == "buy" else "sell_order_canceled"
-            if not self._cancel_order_ref(symbol, ref, event=event, reason=reason):
+            log_event = event or ("buy_order_canceled" if order_side == "buy" else "sell_order_canceled")
+            if not self._cancel_order_ref(symbol, ref, event=log_event, reason=reason):
                 all_canceled = False
         return all_canceled
 
@@ -1976,8 +1982,7 @@ class ExchangeMixin:
         hard_stop_ref = dict(state.hard_stop_order or {})
         canceled_all = True
         for ref in entry_refs:
-            side = str(ref.get("side") or config.ENTRY_SIDE).lower()
-            if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+            if not self._cancel_order_ref(symbol, ref, event="entry_order_canceled", reason=reason):
                 canceled_all = False
         for ref in sell_refs:
             side = str(ref.get("side") or config.EXIT_SIDE).lower()
