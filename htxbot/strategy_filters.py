@@ -60,7 +60,8 @@ class SignalFilters:
         return ""
 
     def _entry_signal_rank_key(self, symbol: str, signal: dict) -> tuple:
-        score = self._safe_float(signal.get("score"), 0.0) + self._external_entry_score_bonus(signal, symbol=symbol)
+        score = self._safe_float(signal.get("entry_weighted_score"), self._safe_float(signal.get("score"), 0.0))
+        score += self._external_entry_score_bonus(signal, symbol=symbol)
         rs60 = self._directional_entry_value(self._safe_float(signal.get("rs60"), 0.0))
         rs30 = self._directional_entry_value(self._safe_float(signal.get("rs30"), 0.0))
         trend_gap = max(0.0, self._safe_float(signal.get("trend_ema_gap"), 0.0))
@@ -157,20 +158,37 @@ class SignalFilters:
         crowded = self._entry_crowded_mode(len(raw_candidates), universe_count)
         blocked_reasons = {}
         quality_candidates = []
+        quality_scores = {}
         for symbol in raw_candidates:
             signal = signals.get(symbol)
             signal_for_quality = dict(signal or {})
             signal_for_quality["symbol"] = symbol
-            reason = self._entry_signal_quality_block_reason(signal_for_quality, crowded=crowded)
-            if reason:
+            external_bonus = self._safe_float(self._external_entry_score_bonus(signal_for_quality, symbol=symbol), 0.0)
+            quality_context = self._entry_signal_quality_context(
+                signal_for_quality,
+                crowded=crowded,
+                external_bonus=external_bonus,
+            )
+            if not quality_context.get("passed"):
+                reason = self._entry_weighted_score_block_reason(quality_context)
                 blocked_reasons[symbol] = f"entry_quality_blocked;crowded={int(crowded)};{reason}"
                 continue
             quality_candidates.append(symbol)
+            quality_scores[symbol] = self._safe_float(quality_context.get("weighted_score"), 0.0)
 
-        ranked = sorted(
-            quality_candidates,
-            key=lambda item: self._entry_signal_rank_key(item, signals.get(item, {})),
-        )
+        def ranked_key(item: str) -> tuple:
+            signal = signals.get(item, {})
+            score = quality_scores.get(
+                item,
+                self._safe_float(signal.get("entry_weighted_score"), self._safe_float(signal.get("score"), 0.0)),
+            )
+            rs60 = self._directional_entry_value(self._safe_float(signal.get("rs60"), 0.0))
+            rs30 = self._directional_entry_value(self._safe_float(signal.get("rs30"), 0.0))
+            trend_gap = max(0.0, self._safe_float(signal.get("trend_ema_gap"), 0.0))
+            trigger_gap = max(0.0, self._safe_float(signal.get("ema_gap"), 0.0))
+            return (-score, -rs60, -rs30, -trend_gap, -trigger_gap, item)
+
+        ranked = sorted(quality_candidates, key=ranked_key)
         strategy = config.STRATEGY
         per_signal_limit = int(
             strategy.entry_crowded_max_new_ladders_per_signal

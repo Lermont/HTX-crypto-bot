@@ -3585,7 +3585,7 @@ class UnifiedBotTests(unittest.TestCase):
                     "symbols": {
                         symbols[0]: self.entry_signal(score=0.06, rs30=0.002, rs60=0.004),
                         symbols[1]: self.entry_signal(score=0.04, rs30=0.004, rs60=0.004),
-                        symbols[2]: self.entry_signal(score=0.07, rs30=0.001, rs60=0.004),
+                        symbols[2]: self.entry_signal(score=0.061, rs30=0.001, rs60=0.004),
                     },
                 }
 
@@ -3593,8 +3593,8 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertTrue(gate["crowded"])
                 self.assertEqual(gate["allowed_symbols"], {symbols[0]})
-                self.assertIn("entry_score_below_min", gate["blocked_reasons"][symbols[1]])
-                self.assertIn("entry_rs30_below_min", gate["blocked_reasons"][symbols[2]])
+                self.assertIn("entry_weighted_score_below_min", gate["blocked_reasons"][symbols[1]])
+                self.assertIn("penalty_rs30", gate["blocked_reasons"][symbols[2]])
 
     def test_ema_long_entry_signal_is_valid(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3658,7 +3658,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertFalse(signal["market_structure_valid"])
                 self.assertFalse(signal["entry_valid"])
                 block_reason = bot._signal_block_reason(signal)
-                self.assertIn("entry_market_structure_invalid", block_reason)
+                self.assertIn("entry_weighted_score_below_min", block_reason)
+                self.assertIn("penalty_market_structure", block_reason)
+                self.assertIn("penalty_volume", block_reason)
                 self.assertIn("volume_reason=volume_ratio_below_min", block_reason)
                 self.assertIn("volume_reason=volume_ratio_below_min", signal["reason"])
 
@@ -3681,11 +3683,11 @@ class UnifiedBotTests(unittest.TestCase):
 
             block_reason = bot._entry_signal_quality_block_reason(signal)
 
-            self.assertTrue(block_reason.startswith("entry_signal_invalid;"))
+            self.assertTrue(block_reason.startswith("entry_weighted_score_below_min;"))
             self.assertIn("entry_valid=0", block_reason)
             self.assertIn("pullback_valid=0", block_reason)
             self.assertIn("rs_confirm_valid=0", block_reason)
-            self.assertIn("score=0.012300", block_reason)
+            self.assertIn("raw_score=0.012300", block_reason)
 
             bot._record_signal_analytics("entry_gate_checked", symbol=SYMBOL, signal=signal)
             with (Path(raw_tmp) / "signal_analytics.csv").open(newline="", encoding="utf-8") as handle:
@@ -3815,7 +3817,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertFalse(signal["market_structure_valid"])
                 self.assertFalse(signal["entry_valid"])
                 self.assertGreater(signal["chop"], strategy.ema_chop_max)
-                self.assertIn("entry_market_structure_invalid", block_reason)
+                self.assertIn("entry_weighted_score_below_min", block_reason)
+                self.assertIn("penalty_chop", block_reason)
+                self.assertIn("penalty_market_structure", block_reason)
                 self.assertIn("chop_reason=chop_above_max", block_reason)
 
     def test_ema_pullback_recovery_requires_fresh_cross(self):
@@ -3844,7 +3848,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(signal["direction_valid"])
                 self.assertTrue(signal["valid"])
                 self.assertFalse(signal["pullback_valid"])
-                self.assertFalse(signal["entry_valid"])
+                self.assertFalse(signal["raw_entry_valid"])
+                self.assertTrue(signal["entry_valid"])
+                self.assertLess(signal["entry_quality_budget_multiplier"], 1.0)
 
     def test_signal_build_applies_macro_budget_and_ladder_multipliers(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3869,7 +3875,12 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertIsNotNone(signal)
-                self.assertAlmostEqual(signal["budget_multiplier"], 0.44)
+                self.assertGreater(signal["entry_quality_budget_multiplier"], 0.0)
+                self.assertLessEqual(signal["entry_quality_budget_multiplier"], 1.0)
+                self.assertAlmostEqual(
+                    signal["budget_multiplier"],
+                    0.44 * signal["entry_quality_budget_multiplier"],
+                )
                 self.assertAlmostEqual(signal["ladder_multiplier"], 1.50)
                 self.assertEqual(signal["macro_regime"], "crypto_underperforms_gold")
                 self.assertTrue(signal["macro_disable_averaging"])
@@ -3898,7 +3909,12 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertIsNotNone(signal)
                 self.assertAlmostEqual(signal["macro_budget_multiplier"], 1.20)
-                self.assertAlmostEqual(signal["budget_multiplier"], 1.20)
+                self.assertGreater(signal["entry_quality_budget_multiplier"], 0.0)
+                self.assertLessEqual(signal["entry_quality_budget_multiplier"], 1.0)
+                self.assertAlmostEqual(
+                    signal["budget_multiplier"],
+                    1.20 * signal["entry_quality_budget_multiplier"],
+                )
                 self.assertAlmostEqual(signal["macro_direction_score"], 0.75)
 
     def test_signal_build_allows_short_macro_budget_above_one(self):

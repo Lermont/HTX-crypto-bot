@@ -329,6 +329,18 @@ class StrategySettings:
     entry_min_score: float
     entry_min_rs60_abs: float
     entry_min_rs30_abs: float
+    entry_macro_invalid_penalty: float
+    entry_pullback_invalid_penalty: float
+    entry_trigger_invalid_penalty: float
+    entry_btc_invalid_penalty: float
+    entry_btc_return_penalty_multiplier: float
+    entry_market_structure_invalid_penalty: float
+    entry_volume_invalid_penalty: float
+    entry_chop_invalid_penalty: float
+    entry_rs60_shortfall_penalty_multiplier: float
+    entry_rs30_shortfall_penalty_multiplier: float
+    entry_quality_budget_min_multiplier: float
+    entry_quality_budget_reference: float
     entry_max_new_ladders_per_signal: int
     entry_rate_limit_ladders: int
     entry_rate_limit_window_minutes: float
@@ -1066,6 +1078,18 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         entry_min_score=_env_float("ENTRY_MIN_SCORE", 0.03, profile=name),
         entry_min_rs60_abs=_env_float("ENTRY_MIN_RS60_ABS", 0.002, profile=name),
         entry_min_rs30_abs=_env_float("ENTRY_MIN_RS30_ABS", 0.001, profile=name),
+        entry_macro_invalid_penalty=_env_float("ENTRY_MACRO_INVALID_PENALTY", 0.018, profile=name),
+        entry_pullback_invalid_penalty=_env_float("ENTRY_PULLBACK_INVALID_PENALTY", 0.006, profile=name),
+        entry_trigger_invalid_penalty=_env_float("ENTRY_TRIGGER_INVALID_PENALTY", 0.018, profile=name),
+        entry_btc_invalid_penalty=_env_float("ENTRY_BTC_INVALID_PENALTY", 0.012, profile=name),
+        entry_btc_return_penalty_multiplier=_env_float("ENTRY_BTC_RETURN_PENALTY_MULTIPLIER", 4.0, profile=name),
+        entry_market_structure_invalid_penalty=_env_float("ENTRY_MARKET_STRUCTURE_INVALID_PENALTY", 0.020, profile=name),
+        entry_volume_invalid_penalty=_env_float("ENTRY_VOLUME_INVALID_PENALTY", 0.012, profile=name),
+        entry_chop_invalid_penalty=_env_float("ENTRY_CHOP_INVALID_PENALTY", 0.012, profile=name),
+        entry_rs60_shortfall_penalty_multiplier=_env_float("ENTRY_RS60_SHORTFALL_PENALTY_MULTIPLIER", 12.0, profile=name),
+        entry_rs30_shortfall_penalty_multiplier=_env_float("ENTRY_RS30_SHORTFALL_PENALTY_MULTIPLIER", 24.0, profile=name),
+        entry_quality_budget_min_multiplier=_env_float("ENTRY_QUALITY_BUDGET_MIN_MULTIPLIER", 0.35, profile=name),
+        entry_quality_budget_reference=_env_float("ENTRY_QUALITY_BUDGET_REFERENCE", 0.06, profile=name),
         entry_max_new_ladders_per_signal=_env_int("ENTRY_MAX_NEW_LADDERS_PER_SIGNAL", 5, profile=name),
         entry_rate_limit_ladders=_env_int("ENTRY_RATE_LIMIT_LADDERS", 10, profile=name),
         entry_rate_limit_window_minutes=_env_float("ENTRY_RATE_LIMIT_WINDOW_MINUTES", 60.0, profile=name),

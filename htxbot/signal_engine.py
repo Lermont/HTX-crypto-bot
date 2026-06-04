@@ -179,8 +179,10 @@ class SignalMixin:
     def _entry_raw_signal_block_reason(self, signal: Optional[dict], prefix: str = "entry_signal_invalid") -> str:
         if not signal:
             return f"{prefix};signal_missing=1"
-        if self._signal_direction_valid(signal) and not bool(signal.get("market_structure_valid", True)):
-            return self._signal_market_structure_block_reason(signal)
+        if not signal.get("entry_valid", False):
+            context = self._entry_signal_quality_context(signal, external_bonus=0.0)
+            if context.get("has_data"):
+                return self._entry_weighted_score_block_reason(context)
 
         def flag(name: str, default: bool = True) -> int:
             return int(bool(signal.get(name, default)))
@@ -232,7 +234,7 @@ class SignalMixin:
         )
 
     def _is_raw_entry_signal_valid(self, signal: Optional[dict]) -> bool:
-        if not signal or not self._signal_direction_valid(signal) or not self.signal_cache.get("benchmark_ok"):
+        if not signal or not self._signal_data_valid(signal) or not self.signal_cache.get("benchmark_ok"):
             return False
         return bool(signal.get("entry_valid", False))
 
@@ -275,36 +277,157 @@ class SignalMixin:
             )
         return thresholds
 
-    def _entry_signal_quality_block_reason(self, signal: Optional[dict], crowded: bool = False) -> str:
-        if signal and self._signal_direction_valid(signal) and not bool(signal.get("market_structure_valid", True)):
-            return self._signal_market_structure_block_reason(signal)
-        if not self._is_raw_entry_signal_valid(signal):
-            return self._entry_raw_signal_block_reason(signal)
-
+    def _entry_signal_quality_context(self, signal: Optional[dict], crowded: bool = False, external_bonus: float = 0.0) -> dict:
+        signal = signal or {}
         thresholds = self._entry_thresholds(crowded=crowded)
+        min_score = max(0.0, self._safe_float(thresholds.get("score"), 0.0))
+        strategy = config.STRATEGY
         raw_score = self._safe_float(signal.get("score"), 0.0)
-        external_bonus = self._safe_float(getattr(self, "_external_entry_score_bonus", lambda _signal: 0.0)(signal), 0.0)
-        score = raw_score + external_bonus
-        if score + 1e-12 < thresholds["score"]:
-            return f"entry_score_below_min;score={score:.6f};raw_score={raw_score:.6f};external_bonus={external_bonus:.6f};min={thresholds['score']:.6f}"
+        external_bonus = self._safe_float(external_bonus, 0.0)
+        base_score = raw_score + external_bonus
+        penalties = {}
+        flags = {
+            "valid": bool(signal.get("valid", False)),
+            "data_valid": bool(signal.get("data_valid", signal.get("valid", False))),
+            "direction_valid": bool(signal.get("direction_valid", signal.get("valid", False))),
+            "entry_valid": bool(signal.get("entry_valid", False)),
+            "macro_valid": bool(signal.get("macro_valid", signal.get("direction_valid", False))),
+            "pullback_valid": bool(signal.get("pullback_valid", True)),
+            "trigger_valid": bool(signal.get("trigger_valid", True)),
+            "rs_confirm_valid": bool(signal.get("rs_confirm_valid", True)),
+            "btc_entry_valid": bool(signal.get("btc_entry_valid", True)),
+            "market_structure_valid": bool(signal.get("market_structure_valid", True)),
+            "volume_valid": bool(signal.get("volume_valid", True)),
+            "chop_valid": bool(signal.get("chop_valid", True)),
+        }
+
+        def add_penalty(name: str, amount: float) -> None:
+            amount = max(0.0, self._safe_float(amount, 0.0))
+            if amount > 1e-12:
+                penalties[name] = penalties.get(name, 0.0) + amount
+
+        has_data = bool(signal and self._signal_data_valid(signal))
+        if not has_data:
+            add_penalty("data", min_score + abs(base_score) + 1.0)
+
+        if not flags["macro_valid"]:
+            add_penalty("macro", getattr(strategy, "entry_macro_invalid_penalty", 0.0))
+        if not flags["pullback_valid"]:
+            add_penalty("pullback", getattr(strategy, "entry_pullback_invalid_penalty", 0.0))
+        if not flags["trigger_valid"]:
+            add_penalty("trigger", getattr(strategy, "entry_trigger_invalid_penalty", 0.0))
+
+        btc_valid = flags["btc_entry_valid"]
+        if not btc_valid:
+            btc_penalty = self._safe_float(getattr(strategy, "entry_btc_invalid_penalty", 0.0), 0.0)
+            btc_return = self._safe_float(signal.get("btc_return_30m", signal.get("btc_entry_return")), 0.0)
+            if config.POSITION_SIDE == "short":
+                adverse_return = btc_return - self._safe_float(getattr(strategy, "ema_btc_short_max_return_30m", 0.0), 0.0)
+            else:
+                adverse_return = self._safe_float(getattr(strategy, "ema_btc_long_min_return_30m", 0.0), 0.0) - btc_return
+            btc_penalty += max(0.0, adverse_return) * self._safe_float(
+                getattr(strategy, "entry_btc_return_penalty_multiplier", 0.0),
+                0.0,
+            )
+            add_penalty("btc", btc_penalty)
+
+        if not flags["market_structure_valid"]:
+            add_penalty("market_structure", getattr(strategy, "entry_market_structure_invalid_penalty", 0.0))
+        if not flags["volume_valid"]:
+            add_penalty("volume", getattr(strategy, "entry_volume_invalid_penalty", 0.0))
+        if not flags["chop_valid"]:
+            add_penalty("chop", getattr(strategy, "entry_chop_invalid_penalty", 0.0))
 
         rs60 = self._safe_float(signal.get("rs60"), 0.0)
-        directional_rs60 = self._directional_entry_value(rs60)
-        if directional_rs60 + 1e-12 < thresholds["rs60"]:
-            return (
-                "entry_rs60_below_min;"
-                f"rs60={rs60:.6f};directional={directional_rs60:.6f};min={thresholds['rs60']:.6f}"
-            )
-
         rs30 = self._safe_float(signal.get("rs30"), 0.0)
+        directional_rs60 = self._directional_entry_value(rs60)
         directional_rs30 = self._directional_entry_value(rs30)
-        if directional_rs30 + 1e-12 < thresholds["rs30"]:
-            return (
-                "entry_rs30_below_min;"
-                f"rs30={rs30:.6f};directional={directional_rs30:.6f};min={thresholds['rs30']:.6f}"
-            )
+        rs60_shortfall = max(0.0, self._safe_float(thresholds.get("rs60"), 0.0) - directional_rs60)
+        rs30_shortfall = max(0.0, self._safe_float(thresholds.get("rs30"), 0.0) - directional_rs30)
+        add_penalty(
+            "rs60",
+            rs60_shortfall * self._safe_float(getattr(strategy, "entry_rs60_shortfall_penalty_multiplier", 0.0), 0.0),
+        )
+        add_penalty(
+            "rs30",
+            rs30_shortfall * self._safe_float(getattr(strategy, "entry_rs30_shortfall_penalty_multiplier", 0.0), 0.0),
+        )
 
-        return ""
+        penalty_total = sum(penalties.values())
+        weighted_score = base_score - penalty_total
+        reference = max(
+            min_score,
+            self._safe_float(getattr(strategy, "entry_quality_budget_reference", 0.0), 0.0),
+            1e-9,
+        )
+        min_budget_multiplier = min(
+            1.0,
+            max(0.0, self._safe_float(getattr(strategy, "entry_quality_budget_min_multiplier", 1.0), 1.0)),
+        )
+        quality_budget_multiplier = min(1.0, max(min_budget_multiplier, weighted_score / reference))
+        passed = bool(has_data and weighted_score + 1e-12 >= min_score)
+        return {
+            "has_data": has_data,
+            "passed": passed,
+            "thresholds": thresholds,
+            "min_score": min_score,
+            "raw_score": raw_score,
+            "external_bonus": external_bonus,
+            "base_score": base_score,
+            "weighted_score": weighted_score,
+            "penalty_total": penalty_total,
+            "penalties": penalties,
+            "flags": flags,
+            "directional_rs60": directional_rs60,
+            "directional_rs30": directional_rs30,
+            "rs60_shortfall": rs60_shortfall,
+            "rs30_shortfall": rs30_shortfall,
+            "quality_budget_multiplier": quality_budget_multiplier,
+            "volume_reason": signal.get("volume_reason", ""),
+            "volume_profile_break": bool(signal.get("volume_profile_break", False)),
+            "volume_spike_direction": signal.get("volume_spike_direction", ""),
+            "volume_spike_reason": signal.get("volume_spike_reason", ""),
+            "chop_reason": signal.get("chop_reason", ""),
+            "btc_return_30m": self._safe_float(signal.get("btc_return_30m", signal.get("btc_entry_return")), 0.0),
+        }
+
+    def _entry_weighted_score_block_reason(self, context: dict) -> str:
+        penalties = context.get("penalties") if isinstance(context.get("penalties"), dict) else {}
+        penalty_text = ";".join(f"penalty_{name}={value:.6f}" for name, value in sorted(penalties.items()))
+        if penalty_text:
+            penalty_text += ";"
+        flags = context.get("flags") if isinstance(context.get("flags"), dict) else {}
+        flag_text = ";".join(f"{name}={int(bool(value))}" for name, value in sorted(flags.items()))
+        if flag_text:
+            flag_text += ";"
+        return (
+            "entry_weighted_score_below_min;"
+            f"weighted_score={self._safe_float(context.get('weighted_score'), 0.0):.6f};"
+            f"raw_score={self._safe_float(context.get('raw_score'), 0.0):.6f};"
+            f"external_bonus={self._safe_float(context.get('external_bonus'), 0.0):.6f};"
+            f"penalty_total={self._safe_float(context.get('penalty_total'), 0.0):.6f};"
+            f"{penalty_text}"
+            f"{flag_text}"
+            f"min={self._safe_float(context.get('min_score'), 0.0):.6f};"
+            f"directional_rs30={self._safe_float(context.get('directional_rs30'), 0.0):.6f};"
+            f"directional_rs60={self._safe_float(context.get('directional_rs60'), 0.0):.6f};"
+            f"rs30_shortfall={self._safe_float(context.get('rs30_shortfall'), 0.0):.6f};"
+            f"rs60_shortfall={self._safe_float(context.get('rs60_shortfall'), 0.0):.6f};"
+            f"btc_return_30m={self._safe_float(context.get('btc_return_30m'), 0.0):.6f};"
+            f"quality_budget_multiplier={self._safe_float(context.get('quality_budget_multiplier'), 0.0):.6f};"
+            f"volume_profile_break={int(bool(context.get('volume_profile_break', False)))};"
+            f"volume_spike_direction={context.get('volume_spike_direction', '')};"
+            f"volume_spike_reason={context.get('volume_spike_reason', '')};"
+            f"volume_reason={context.get('volume_reason', '')};"
+            f"chop_reason={context.get('chop_reason', '')}"
+        )
+
+    def _entry_signal_quality_block_reason(self, signal: Optional[dict], crowded: bool = False) -> str:
+        external_bonus = self._safe_float(getattr(self, "_external_entry_score_bonus", lambda _signal: 0.0)(signal), 0.0)
+        context = self._entry_signal_quality_context(signal, crowded=crowded, external_bonus=external_bonus)
+        if context.get("passed"):
+            return ""
+        return self._entry_weighted_score_block_reason(context)
 
     def _is_entry_signal_valid(self, signal: Optional[dict]) -> bool:
         return not self._entry_signal_quality_block_reason(signal, crowded=False)
@@ -1301,11 +1424,10 @@ class SignalMixin:
         macro_context = self._macro_context_for_trading(macro_context)
         market_structure = self._ema_market_structure_context(candles)
         data_valid = True
-        direction_valid = bool(macro_valid)
+        direction_valid = bool(score > 0)
         market_structure_valid = bool(market_structure["market_structure_valid"])
         raw_entry_valid = bool(direction["entry_valid"])
         raw_add_valid = bool(direction["add_valid"])
-        entry_valid = bool(raw_entry_valid and market_structure_valid)
         add_valid = bool(raw_add_valid and market_structure_valid)
         volatility = self._realized_volatility(closes, strategy.volatility_window)
         volatility_multiplier = self._volatility_multiplier(volatility)
@@ -1319,7 +1441,34 @@ class SignalMixin:
         else:
             macro_budget_multiplier = max(0.0, self._safe_float(macro_context.get("long_budget_multiplier"), 1.0))
         macro_ladder_multiplier = max(0.0, self._safe_float(macro_context.get("ladder_multiplier"), 1.0))
-        budget_multiplier = signal_budget_multiplier * btc_budget_multiplier * macro_budget_multiplier
+        entry_quality_signal = {
+            "valid": data_valid,
+            "data_valid": data_valid,
+            "direction_valid": direction_valid,
+            "macro_valid": macro_valid,
+            "pullback_valid": pullback_valid,
+            "trigger_valid": trigger_valid,
+            "rs_confirm_valid": rs_confirm_valid,
+            "btc_entry_valid": btc_entry_valid,
+            "market_structure_valid": market_structure_valid,
+            "volume_valid": bool(market_structure["volume_valid"]),
+            "chop_valid": bool(market_structure["chop_valid"]),
+            "score": score,
+            "rs30": rs30,
+            "rs60": rs60,
+            "btc_return_30m": btc_return_30m,
+            "volume_reason": market_structure["volume_reason"],
+            "chop_reason": market_structure["chop_reason"],
+        }
+        entry_quality = self._entry_signal_quality_context(entry_quality_signal, external_bonus=0.0)
+        entry_valid = bool(entry_quality["passed"])
+        entry_quality_budget_multiplier = self._safe_float(entry_quality.get("quality_budget_multiplier"), 1.0)
+        budget_multiplier = (
+            signal_budget_multiplier
+            * btc_budget_multiplier
+            * macro_budget_multiplier
+            * entry_quality_budget_multiplier
+        )
         ladder_multiplier = volatility_multiplier * btc_ladder_multiplier * macro_ladder_multiplier
         reason = (
             f"strategy=ema_pullback;macro_tf={timeframes['macro']};pullback_tf={timeframes['pullback']};trigger_tf={timeframes['trigger']};"
@@ -1353,8 +1502,13 @@ class SignalMixin:
             f"chop_valid={int(bool(market_structure['chop_valid']))};"
             f"chop={market_structure['chop']:.6f};"
             f"chop_reason={market_structure['chop_reason']};"
+            f"raw_entry_valid={int(raw_entry_valid)};"
             f"entry_valid={int(entry_valid)};"
             f"add_valid={int(add_valid)};score={score:.6f};"
+            f"entry_weighted_score={entry_quality['weighted_score']:.6f};"
+            f"entry_weighted_min={entry_quality['min_score']:.6f};"
+            f"entry_penalty_total={entry_quality['penalty_total']:.6f};"
+            f"entry_quality_budget_multiplier={entry_quality_budget_multiplier:.3f};"
             f"atr_rate={atr_rate:.6f};"
             f"signal_budget_multiplier={signal_budget_multiplier:.3f};"
             f"btc_budget_multiplier={btc_budget_multiplier:.3f};"
@@ -1419,6 +1573,7 @@ class SignalMixin:
             "trend_valid": macro_valid,
             "recent_valid": pullback_valid,
             "btc_entry_valid": btc_entry_valid,
+            "raw_entry_valid": raw_entry_valid,
             "market_structure_valid": market_structure_valid,
             "volume_valid": bool(market_structure["volume_valid"]),
             "volume_average_valid": bool(market_structure.get("volume_average_valid", False)),
@@ -1451,6 +1606,11 @@ class SignalMixin:
             "daily_volatility_multiplier": daily_volatility["daily_volatility_multiplier"],
             "volatility_budget_multiplier": daily_volatility["volatility_budget_multiplier"],
             "signal_budget_multiplier": signal_budget_multiplier,
+            "entry_weighted_score": entry_quality["weighted_score"],
+            "entry_weighted_score_min": entry_quality["min_score"],
+            "entry_weighted_penalty_total": entry_quality["penalty_total"],
+            "entry_weighted_penalties": dict(entry_quality["penalties"]),
+            "entry_quality_budget_multiplier": entry_quality_budget_multiplier,
             "btc_budget_multiplier": btc_budget_multiplier,
             "macro_budget_multiplier": macro_budget_multiplier,
             "macro_ladder_multiplier": macro_ladder_multiplier,
@@ -1462,7 +1622,7 @@ class SignalMixin:
             "budget_multiplier": budget_multiplier,
             "ladder_multiplier": ladder_multiplier,
             "btc_risk_reason": btc_risk.get("reason", "ema_filter"),
-            "valid": direction_valid,
+            "valid": data_valid,
             "entry_valid": entry_valid,
             "add_valid": add_valid,
             "reason": reason,
