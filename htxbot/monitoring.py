@@ -362,10 +362,13 @@ class MonitoringMixin:
     def _signal_block_reason(self, signal: Optional[dict]) -> str:
         if not signal:
             return "signal_missing"
-        if not signal.get("valid"):
-            return "signal_invalid"
         if signal.get("entry_valid"):
             return ""
+        detailed_reason = getattr(self, "_entry_raw_signal_block_reason", None)
+        if callable(detailed_reason):
+            return detailed_reason(signal)
+        if not signal.get("valid"):
+            return "signal_invalid"
         for key in (
             "macro_valid",
             "pullback_valid",

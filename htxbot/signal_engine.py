@@ -176,6 +176,37 @@ class SignalMixin:
             f"chop_reason={signal.get('chop_reason', '')}"
         )
 
+    def _entry_raw_signal_block_reason(self, signal: Optional[dict], prefix: str = "entry_signal_invalid") -> str:
+        if not signal:
+            return f"{prefix};signal_missing=1"
+        if self._signal_direction_valid(signal) and not bool(signal.get("market_structure_valid", True)):
+            return self._signal_market_structure_block_reason(signal)
+
+        def flag(name: str, default: bool = True) -> int:
+            return int(bool(signal.get(name, default)))
+
+        data_default = bool(signal.get("valid", False))
+        return (
+            f"{prefix};"
+            f"valid={flag('valid', False)};"
+            f"data_valid={flag('data_valid', data_default)};"
+            f"direction_valid={flag('direction_valid', data_default)};"
+            f"entry_valid={flag('entry_valid', False)};"
+            f"macro_valid={flag('macro_valid')};"
+            f"pullback_valid={flag('pullback_valid')};"
+            f"trigger_valid={flag('trigger_valid')};"
+            f"rs_confirm_valid={flag('rs_confirm_valid')};"
+            f"btc_entry_valid={flag('btc_entry_valid')};"
+            f"market_structure_valid={flag('market_structure_valid')};"
+            f"volume_valid={flag('volume_valid')};"
+            f"chop_valid={flag('chop_valid')};"
+            f"score={self._safe_float(signal.get('score'), 0.0):.6f};"
+            f"rs30={self._safe_float(signal.get('rs30'), 0.0):.6f};"
+            f"rs60={self._safe_float(signal.get('rs60'), 0.0):.6f};"
+            f"volume_reason={signal.get('volume_reason', '')};"
+            f"chop_reason={signal.get('chop_reason', '')}"
+        )
+
     def _signal_score(self, rs30: float, rs60: float, ema50: float, ema100: float, price: float) -> float:
         return signal_score(
             rs30,
@@ -248,7 +279,7 @@ class SignalMixin:
         if signal and self._signal_direction_valid(signal) and not bool(signal.get("market_structure_valid", True)):
             return self._signal_market_structure_block_reason(signal)
         if not self._is_raw_entry_signal_valid(signal):
-            return "entry_signal_invalid"
+            return self._entry_raw_signal_block_reason(signal)
 
         thresholds = self._entry_thresholds(crowded=crowded)
         raw_score = self._safe_float(signal.get("score"), 0.0)

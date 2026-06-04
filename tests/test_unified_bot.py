@@ -3657,8 +3657,43 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertFalse(signal["volume_valid"])
                 self.assertFalse(signal["market_structure_valid"])
                 self.assertFalse(signal["entry_valid"])
-                self.assertEqual(bot._signal_block_reason(signal), "volume_valid")
+                block_reason = bot._signal_block_reason(signal)
+                self.assertIn("entry_market_structure_invalid", block_reason)
+                self.assertIn("volume_reason=volume_ratio_below_min", block_reason)
                 self.assertIn("volume_reason=volume_ratio_below_min", signal["reason"])
+
+    def test_entry_signal_quality_logs_raw_signal_components(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signal = self.entry_signal()
+            signal.update(
+                {
+                    "entry_valid": False,
+                    "pullback_valid": False,
+                    "rs_confirm_valid": False,
+                    "score": 0.0123,
+                    "rs30": -0.0045,
+                    "rs60": 0.0012,
+                    "volume_reason": "volume_confirmed",
+                    "chop_reason": "disabled",
+                }
+            )
+
+            block_reason = bot._entry_signal_quality_block_reason(signal)
+
+            self.assertTrue(block_reason.startswith("entry_signal_invalid;"))
+            self.assertIn("entry_valid=0", block_reason)
+            self.assertIn("pullback_valid=0", block_reason)
+            self.assertIn("rs_confirm_valid=0", block_reason)
+            self.assertIn("score=0.012300", block_reason)
+
+            bot._record_signal_analytics("entry_gate_checked", symbol=SYMBOL, signal=signal)
+            with (Path(raw_tmp) / "signal_analytics.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertTrue(rows)
+            self.assertIn("pullback_valid=0", rows[-1]["block_reason"])
+            self.assertIn("rs_confirm_valid=0", rows[-1]["block_reason"])
 
     def test_ema_entry_signal_accepts_aligned_volume_spike_confirmation(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
