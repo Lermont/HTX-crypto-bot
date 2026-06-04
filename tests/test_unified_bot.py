@@ -2893,6 +2893,74 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.exit_runner_contracts, 65.0)
                 self.assertFalse(state.exit_runner_active)
 
+    def test_ensure_sell_ladder_rebuilds_missing_fixed_exit_with_matching_runner_signature(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 100.0
+                state.position_available = 100.0
+                state.entry_price = 100.0
+                state.initial_entry_notional = 10000.0
+                state.sell_ladder_orders = []
+                state.exit_runner_contracts = 65.0
+                state.sell_ladder_signature = bot._exit_ladder_signature("normal", SYMBOL, state)
+
+                bot._ensure_sell_ladder(SYMBOL)
+
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                self.assertEqual(bot.exchange.created_orders[0]["amount"], 35.0)
+                self.assertTrue(bot.exchange.created_orders[0]["params"].get("reduceOnly"))
+                self.assertEqual([ref["amount"] for ref in state.sell_ladder_orders], [35.0])
+                self.assertEqual(state.exit_runner_contracts, 65.0)
+
+    def test_short_ensure_sell_ladder_rebuilds_missing_fixed_exit_with_matching_runner_signature(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 100.0
+                state.position_available = 100.0
+                state.entry_price = 100.0
+                state.initial_entry_notional = 10000.0
+                state.sell_ladder_orders = []
+                state.exit_runner_contracts = 65.0
+                state.sell_ladder_signature = bot._exit_ladder_signature("normal", SYMBOL, state)
+
+                bot._ensure_sell_ladder(SYMBOL)
+
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                self.assertEqual(bot.exchange.created_orders[0]["side"], "buy")
+                self.assertEqual(bot.exchange.created_orders[0]["amount"], 35.0)
+                self.assertTrue(bot.exchange.created_orders[0]["params"].get("reduceOnly"))
+                self.assertEqual([ref["amount"] for ref in state.sell_ladder_orders], [35.0])
+                self.assertEqual(state.exit_runner_contracts, 65.0)
+
+    def test_ensure_sell_ladder_keeps_runner_only_remainder_when_signature_matches(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 65.0
+                state.position_available = 65.0
+                state.entry_price = 100.0
+                state.initial_entry_notional = 10000.0
+                state.sell_ladder_orders = []
+                state.exit_runner_contracts = 65.0
+                state.sell_ladder_signature = bot._exit_ladder_signature("normal", SYMBOL, state)
+
+                bot._ensure_sell_ladder(SYMBOL)
+
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(state.exit_runner_contracts, 65.0)
+
     def test_exit_ladder_preflight_caps_to_position_and_blocks_duplicate_tracked_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)

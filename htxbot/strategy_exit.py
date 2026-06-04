@@ -3705,7 +3705,29 @@ class ExitStrategy:
                 return
         else:
             if state.sell_ladder_signature == desired_signature and state.exit_runner_contracts > 0:
-                return
+                eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+                runner_contracts = self._amount_to_precision(
+                    symbol,
+                    min(state.position_size, max(0.0, self._safe_float(state.exit_runner_contracts, 0.0))),
+                )
+                position_contracts = self._amount_to_precision(symbol, max(0.0, state.position_size))
+                if runner_contracts + eps >= position_contracts:
+                    return
+                self._log_event(
+                    "WARNING",
+                    f"{config.EXIT_SIDE} exit ladder missing fixed orders for {symbol}; rebuilding",
+                    event="state_exchange_mismatch",
+                    symbol=symbol,
+                    side=config.EXIT_SIDE,
+                    position_size=state.position_size,
+                    amount=runner_contracts,
+                    entry_price=state.entry_price,
+                    reason=(
+                        "exit_ladder_signature_without_fixed_orders_rebuild;"
+                        f"runner_contracts={runner_contracts:.12g};"
+                        f"position_size={position_contracts:.12g}"
+                    ),
+                )
             if self._is_exit_ladder_waiting_for_closeable(symbol, mode, state):
                 return
             had_sell_ladder = False
