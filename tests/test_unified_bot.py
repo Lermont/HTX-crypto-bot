@@ -130,11 +130,16 @@ class FakeExchange:
         self.fetch_open_orders_failures = []
         self.fetch_positions_failures = []
         self.fetch_ohlcv_failures = []
+        self.fetch_order_failures = []
         self.fetch_open_orders_calls = 0
         self.fetch_positions_calls = 0
+        self.fetch_order_calls = []
         self.fetch_positions_delay = 0.0
         self.fetch_funding_rate_calls = 0
         self.funding_rate_response = {"fundingRate": "0"}
+        self.fetch_order_responses = {}
+        self.fetch_my_trades_responses = {}
+        self.fetch_my_trades_calls = []
         self.ohlcv = {}
         self.ohlcv_calls = []
         self.reject_leverage_above = None
@@ -250,6 +255,22 @@ class FakeExchange:
         if not wanted:
             return list(self.positions)
         return [position for position in self.positions if position.get("symbol", SYMBOL) in wanted]
+
+    def fetch_order(self, order_id, symbol=None, params=None):
+        self.fetch_order_calls.append((str(order_id), symbol, params or {}))
+        if self.fetch_order_failures:
+            raise self.fetch_order_failures.pop(0)
+        if str(order_id) in self.fetch_order_responses:
+            return dict(self.fetch_order_responses[str(order_id)])
+        for order in self.created_orders:
+            if str(order.get("id")) == str(order_id):
+                return dict(order)
+        raise ccxt.OrderNotFound(str(order_id))
+
+    def fetch_my_trades(self, symbol=None, since=None, limit=None, params=None):
+        self.fetch_my_trades_calls.append((symbol, since, limit, params or {}))
+        rows = self.fetch_my_trades_responses.get(symbol, [])
+        return [dict(row) for row in rows]
 
     def fetch_funding_rate(self, symbol, params=None):
         self.fetch_funding_rate_calls += 1
@@ -4655,7 +4676,6 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(state.frozen_no_more_buys)
                 self.assertEqual(state.sell_ladder_mode, "hard_stop_loss")
                 self.assertEqual(state.sell_ladder_orders, [])
-                self.assertEqual(state.hard_stop_order, {})
                 self.assertIn(("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 order = bot.exchange.created_orders[0]
@@ -4664,6 +4684,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(order["amount"], 10.0)
                 self.assertTrue(order["params"].get("reduceOnly"))
                 self.assertNotIn("stopLossPrice", order["params"])
+                self.assertEqual(state.hard_stop_order["id"], order["id"])
+                self.assertTrue(state.hard_stop_order["market_close"])
+                self.assertEqual(state.hard_stop_order["reason"], "hard_stop_loss_market_close")
 
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
@@ -4702,6 +4725,40 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(order["amount"], 7.0)
                 self.assertTrue(order["params"].get("reduceOnly"))
                 self.assertNotIn("stopLossPrice", order["params"])
+                self.assertEqual(state.hard_stop_order["id"], order["id"])
+                self.assertTrue(state.hard_stop_order["market_close"])
+
+    def test_pending_hard_stop_market_close_is_not_duplicated_before_position_sync(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True, poll_interval_sec=5.0)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_atr_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 0.0
+                state.position_frozen = 10.0
+                state.entry_price = 100.0
+                bot.exchange.reject_stop_loss_trigger_crossed = True
+
+                first = bot._ensure_hard_stop_loss(SYMBOL)
+                second = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(first)
+                self.assertTrue(second)
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                self.assertEqual(bot.exchange.create_order_calls, 2)
+                self.assertTrue(state.hard_stop_order["market_close"])
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertTrue(
+                    any(row["event"] == "hard_stop_loss_market_close_pending" for row in rows)
+                )
 
     def test_hard_stop_loss_market_close_retries_after_closeable_rejection(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7667,6 +7724,69 @@ class UnifiedBotTests(unittest.TestCase):
                 cycle_rows = list(csv.DictReader(handle))
             self.assertTrue(cycle_rows)
             self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), 100.0)
+
+    def test_position_gone_uses_pending_hard_stop_market_close_fill_price(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, fetch_fill_details_on_sync=True)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 0.0
+                state.position_frozen = 5.0
+                state.position_side = "long"
+                state.entry_price = 100.0
+                state.total_bought_amount = 5.0
+                state.total_bought_quote = 500.0
+                state.hard_stop_order = {
+                    "id": "market_close_1",
+                    "side": "sell",
+                    "amount": 5.0,
+                    "created_at": time.time() - 5.0,
+                    "hard_stop_loss": True,
+                    "market_close": True,
+                    "reduce_only": True,
+                    "reason": "hard_stop_loss_market_close",
+                }
+                bot.exchange.has["fetchOrder"] = True
+                bot.exchange.fetch_order_responses["market_close_1"] = {
+                    "id": "market_close_1",
+                    "symbol": SYMBOL,
+                    "side": "sell",
+                    "status": "closed",
+                    "amount": 5.0,
+                    "filled": 5.0,
+                    "remaining": 0.0,
+                    "average": 95.0,
+                    "cost": 475.0,
+                    "fee": {"cost": 0.2, "currency": "USDT"},
+                }
+
+                status = bot._sync_state_with_position(
+                    SYMBOL,
+                    {
+                        "long_size": 0.0,
+                        "long_available": 0.0,
+                        "short_size": 0.0,
+                        "short_available": 0.0,
+                    },
+                    open_orders=[],
+                )
+
+                self.assertEqual(status, "closed")
+                self.assertEqual(bot.exchange.fetch_order_calls[-1][0], "market_close_1")
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    trade_rows = list(csv.DictReader(handle))
+                fills = [row for row in trade_rows if row["event"] == "sell_order_filled"]
+                self.assertTrue(fills)
+                self.assertEqual(fills[-1]["order_id"], "market_close_1")
+                self.assertAlmostEqual(float(fills[-1]["price"]), 95.0)
+                self.assertEqual(fills[-1]["fill_source"], "order")
+                with bot.cycle_stats_path.open(newline="", encoding="utf-8") as handle:
+                    cycle_rows = list(csv.DictReader(handle))
+                self.assertTrue(cycle_rows)
+                self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), 95.0)
+                self.assertLess(float(cycle_rows[-1]["realized_pnl_quote"]), 0.0)
 
     def test_combined_reserved_symbols_include_exchange_side_opposite_profile_activity(self):
         class ReservationBot:

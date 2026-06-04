@@ -1935,6 +1935,12 @@ class ExchangeMixin:
         ref = dict(state.hard_stop_order or {})
         if not ref:
             return
+        if ref.get("market_close"):
+            state.hard_stop_order = {}
+            state.hard_stop_signature = ""
+            self._refresh_active_side(state)
+            self._save_state()
+            return
         side = str(ref.get("side") or config.EXIT_SIDE).lower()
         if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
             return

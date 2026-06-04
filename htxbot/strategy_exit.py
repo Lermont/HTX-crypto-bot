@@ -58,6 +58,23 @@ class ExitStrategy:
             f"trigger={trigger_price:.12f}"
         )
 
+    def _hard_stop_market_close_wait_sec(self) -> float:
+        return max(
+            10.0,
+            self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 0.0), 0.0) * 2.0,
+        )
+
+    def _hard_stop_market_close_pending(self, state: TradeState) -> bool:
+        ref = state.hard_stop_order if isinstance(state.hard_stop_order, dict) else {}
+        return bool(ref and ref.get("market_close") and ref.get("reason") == "hard_stop_loss_market_close")
+
+    def _hard_stop_market_close_signature(self, symbol: str, state: TradeState, amount: float, trigger_price: float) -> str:
+        return (
+            f"hard_stop_market_close|direction={config.POSITION_SIDE}|side={config.EXIT_SIDE}|"
+            f"amount={amount:.12f}|entry={state.entry_price:.12f}|"
+            f"trigger={trigger_price:.12f}"
+        )
+
     def _create_hard_stop_loss_order(self, symbol: str, amount: float, trigger_price: float) -> dict:
         return self._create_one_way_order(
             symbol=symbol,
@@ -85,6 +102,37 @@ class ExitStrategy:
         state.hard_stop_signature = ""
         self._refresh_active_side(state)
         self._save_state()
+
+        if self._hard_stop_market_close_pending(state):
+            pending_since = self._safe_float(state.hard_stop_order.get("created_at"), 0.0)
+            pending_age = max(0.0, time.time() - pending_since) if pending_since > 0 else 0.0
+            wait_sec = self._hard_stop_market_close_wait_sec()
+            if pending_age < wait_sec:
+                self._log_event(
+                    "DEBUG",
+                    f"Hard stop-loss market close already pending for {symbol}; waiting for exchange position sync",
+                    event="hard_stop_loss_market_close_pending",
+                    symbol=symbol,
+                    side=config.EXIT_SIDE,
+                    order_id=str(state.hard_stop_order.get("id") or ""),
+                    amount=self._safe_float(state.hard_stop_order.get("amount"), 0.0),
+                    price=trigger_price,
+                    position_size=state.position_size,
+                    entry_price=state.entry_price,
+                    reason=(
+                        "hard_stop_loss_market_close_pending;"
+                        f"elapsed={pending_age:.1f};wait={wait_sec:.1f};{loss_rate_reason}"
+                    ),
+                )
+                return True
+            self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_market_close_retry")
+            state = self._get_state(symbol)
+            state.frozen_no_more_buys = True
+            state.sell_ladder_mode = "hard_stop_loss"
+            state.sell_ladder_signature = ""
+            state.hard_stop_signature = ""
+            self._refresh_active_side(state)
+            self._save_state()
 
         if first_breach:
             self._log_event(
@@ -211,6 +259,25 @@ class ExitStrategy:
             entry_price=state.entry_price,
             reason=f"hard_stop_loss_trigger_crossed;loss_rate={loss_rate:.6f};{loss_rate_reason}",
         )
+        state = self._get_state(symbol)
+        state.hard_stop_order = {
+            "id": order_id,
+            "side": config.EXIT_SIDE,
+            "price": 0.0,
+            "trigger_price": trigger_price,
+            "amount": amount,
+            "created_at": time.time(),
+            "hard_stop_loss": True,
+            "market_close": True,
+            "reduce_only": True,
+            "loss_rate": loss_rate,
+            "reason": "hard_stop_loss_market_close",
+        }
+        state.hard_stop_signature = self._hard_stop_market_close_signature(symbol, state, amount, trigger_price)
+        state.frozen_no_more_buys = True
+        state.sell_ladder_mode = "hard_stop_loss"
+        self._refresh_active_side(state)
+        self._save_state()
         return True
 
     def _ensure_hard_stop_loss(self, symbol: str, signal: Optional[dict] = None) -> bool:

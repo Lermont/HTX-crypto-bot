@@ -835,7 +835,9 @@ class StateMixin:
         if side == config.ENTRY_SIDE:
             refs = state.entry_orders
         elif side == config.EXIT_SIDE:
-            refs = state.sell_ladder_orders
+            refs = list(state.sell_ladder_orders or [])
+            if state.hard_stop_order:
+                refs.append(state.hard_stop_order)
         else:
             refs = []
         open_lookup = {str(order.get("id")): order for order in (open_orders or []) if order.get("id") is not None}
