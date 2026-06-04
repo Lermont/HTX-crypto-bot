@@ -18,6 +18,23 @@ class RunnerMixin:
             retryable=is_transient,
         )
 
+    def _post_sync_order_hygiene(self, symbol: str, reason: str):
+        reset_private_caches = getattr(self, "_reset_private_caches", None)
+        if reset_private_caches:
+            reset_private_caches()
+        open_orders = self._fetch_open_orders(symbol)
+        if open_orders is None:
+            self._log_event(
+                "WARNING",
+                f"Skipping post-sync order hygiene for {symbol}: open orders are unavailable",
+                event="state_exchange_mismatch",
+                symbol=symbol,
+                reason=f"{reason}_open_orders_unavailable",
+            )
+            return
+        self._validate_sell_orders(symbol, open_orders)
+        self._validate_entry_orders(symbol, open_orders)
+
     def setup(self):
         self._log_event("INFO", "Initializing HTX futures bot", event="futures_setup", reason="startup")
         self._load_markets_with_retry()
@@ -133,6 +150,7 @@ class RunnerMixin:
 
     def step_symbol(self, symbol: str):
         state = self._get_state(symbol)
+        had_tracked_exit_orders = bool(state.sell_ladder_orders or state.hard_stop_order)
         snapshot = self._fetch_position_snapshot(symbol)
         if not snapshot.get("ok", False):
             return
@@ -148,9 +166,14 @@ class RunnerMixin:
             )
             return
         sync_status = self._sync_state_with_position(symbol, snapshot, open_orders=open_orders)
-        if sync_status in {"disabled", "closed", "reserved"}:
+        if sync_status in {"disabled", "reserved"}:
             return
         if sync_status == "position_changed":
+            if not had_tracked_exit_orders:
+                self._post_sync_order_hygiene(symbol, reason="post_position_change")
+            return
+        if sync_status == "closed":
+            self._post_sync_order_hygiene(symbol, reason="post_position_closed")
             return
         if self._maybe_close_dust_position(symbol, open_orders):
             return

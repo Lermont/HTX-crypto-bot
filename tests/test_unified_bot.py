@@ -2648,6 +2648,116 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(len(state.entry_orders), 1)
                 self.assertEqual(state.entry_orders[0]["id"], order["id"])
 
+    def test_step_symbol_post_close_cleans_unknown_flat_orders_before_return(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            state.position_size = 5.0
+            state.position_available = 5.0
+            state.position_side = "long"
+            state.entry_price = 100.0
+            state.total_bought_amount = 5.0
+            state.total_bought_quote = 500.0
+            bot.exchange.open_orders = [
+                {
+                    "id": "orphan_close",
+                    "symbol": SYMBOL,
+                    "side": "sell",
+                    "price": 101.0,
+                    "amount": 1.0,
+                    "remaining": 1.0,
+                    "reduceOnly": True,
+                },
+                {
+                    "id": "orphan_entry",
+                    "symbol": SYMBOL,
+                    "side": "buy",
+                    "price": 99.0,
+                    "amount": 1.0,
+                    "remaining": 1.0,
+                },
+            ]
+
+            bot.step_symbol(SYMBOL)
+
+            self.assertIn(("orphan_close", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+            self.assertIn(("orphan_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+            self.assertEqual(bot._get_state(SYMBOL).position_size, 0.0)
+
+    def test_step_symbol_adopts_unknown_reduce_only_exit_when_position_appears(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.positions = [
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 5.0,
+                    "available": 0.0,
+                    "frozen": 5.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                    "leverage": config.RISK.leverage,
+                }
+            ]
+            bot.exchange.open_orders = [
+                {
+                    "id": "orphan_reduce_only_exit",
+                    "symbol": SYMBOL,
+                    "side": "sell",
+                    "price": 101.0,
+                    "amount": 5.0,
+                    "remaining": 5.0,
+                    "reduceOnly": True,
+                }
+            ]
+
+            bot.step_symbol(SYMBOL)
+
+            state = bot._get_state(SYMBOL)
+            self.assertEqual(state.position_size, 5.0)
+            self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["orphan_reduce_only_exit"])
+            self.assertEqual(bot.exchange.created_orders, [])
+
+    def test_step_symbol_does_not_readopt_stale_tracked_exit_after_position_change(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            state.position_size = 5.0
+            state.position_available = 5.0
+            state.position_side = "long"
+            state.entry_price = 100.0
+            state.sell_ladder_orders = [
+                {"id": "old_exit", "side": "sell", "price": 101.0, "amount": 5.0}
+            ]
+            bot.exchange.positions = [
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 6.0,
+                    "available": 6.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                    "leverage": config.RISK.leverage,
+                }
+            ]
+            bot.exchange.open_orders = [
+                {
+                    "id": "old_exit",
+                    "symbol": SYMBOL,
+                    "side": "sell",
+                    "price": 101.0,
+                    "amount": 5.0,
+                    "remaining": 5.0,
+                    "reduceOnly": True,
+                }
+            ]
+
+            bot.step_symbol(SYMBOL)
+
+            self.assertIn(("old_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+            self.assertEqual(state.sell_ladder_orders, [])
+            self.assertEqual(state.sell_ladder_signature, "")
+
     def test_profile_reads_legacy_risk_setting_aliases(self):
         env = {
             "ALIAS_POSITION_BUDGET_FRACTION": "0.04",
