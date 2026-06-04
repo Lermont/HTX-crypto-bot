@@ -81,7 +81,7 @@ class EntryStrategy:
             self._reset_state(symbol)
             return 0
 
-        sizing_leverage = min(configured_leverage, max(account_leverage, 1.0))
+        sizing_leverage = max(account_leverage, 1.0)
         notional_budget = margin_budget * sizing_leverage
         if state.position_size <= 0 and state.initial_entry_notional <= 0:
             state.initial_entry_notional = notional_budget

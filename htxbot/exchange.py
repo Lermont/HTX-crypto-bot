@@ -1616,11 +1616,21 @@ class ExchangeMixin:
 
     def _create_one_way_order(
         self,
-        req: OrderRequest,
+        req: Optional[OrderRequest] = None,
+        **kwargs,
     ) -> dict:
+        if req is None:
+            req = OrderRequest(**kwargs)
+        elif kwargs:
+            raise TypeError("_create_one_way_order accepts either OrderRequest or keyword arguments, not both")
+        elif not isinstance(req, OrderRequest):
+            raise TypeError(f"_create_one_way_order expected OrderRequest, got {type(req).__name__}")
+
         if req.leverage is None:
             req.leverage = self._fetch_account_order_leverage(req.symbol)
         params = self._order_params(reduce_only=req.reduce_only, post_only=req.post_only, leverage=req.leverage)
+        if req.extra_params:
+            params.update(dict(req.extra_params))
         try:
             return self.exchange.create_order(
                 symbol=req.symbol,

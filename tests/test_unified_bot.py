@@ -24,7 +24,7 @@ from htxbot.exchange import UnexpectedExchangeResponse
 from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
 from htxbot.indicators import average_true_range, calculate_rsi, compute_log_return, realized_volatility
-from htxbot.models import PositionLifecycle, SellLadderParams, SignalContext
+from htxbot.models import OrderRequest, PositionLifecycle, SellLadderParams, SignalContext
 from htxbot.shared_exchange import CachedMarketDataExchange, ThreadSafeExchange
 from tests.config_overrides import override_config
 
@@ -885,6 +885,26 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(bot.exchange.create_order_calls, 1)
             self.assertTrue(canceled)
             self.assertEqual(bot.exchange.canceled_orders, [(order["id"], SYMBOL, {"marginMode": config.RISK.margin_mode})])
+
+    def test_one_way_order_accepts_order_request_with_extra_params(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+
+            order = bot._create_one_way_order(
+                OrderRequest(
+                    symbol=SYMBOL,
+                    order_type="market",
+                    side=config.EXIT_SIDE,
+                    amount=1.0,
+                    reduce_only=True,
+                    leverage=50,
+                    extra_params={"stopLossPrice": 9.0},
+                )
+            )
+
+            self.assertEqual(order["params"]["leverRate"], 50)
+            self.assertTrue(order["params"]["reduceOnly"])
+            self.assertEqual(order["params"]["stopLossPrice"], 9.0)
 
     def test_runtime_lock_replaces_stale_lock_and_releases(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -2607,6 +2627,26 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state_order["leverage"], 5.0)
                 self.assertEqual(state_order["sizing_leverage"], 5.0)
                 self.assertEqual(state_order["amount"], 5.0)
+
+    def test_step_symbol_places_initial_entry_ladder_when_flat_signal_valid(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, post_only_enabled=False)
+            buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
+            with override_config(RUNTIME=runtime, BUYING=buying):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.signal_cache["symbols"] = {SYMBOL: self.entry_signal(ts=2000)}
+                bot._prepare_new_entry_gate()
+
+                bot.step_symbol(SYMBOL)
+
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["type"], "limit")
+                self.assertEqual(order["side"], "buy")
+                self.assertFalse(order["params"].get("reduceOnly", False))
+                state = bot._get_state(SYMBOL)
+                self.assertEqual(len(state.entry_orders), 1)
+                self.assertEqual(state.entry_orders[0]["id"], order["id"])
 
     def test_profile_reads_legacy_risk_setting_aliases(self):
         env = {
