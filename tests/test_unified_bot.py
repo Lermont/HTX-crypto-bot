@@ -25,7 +25,7 @@ from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
 from htxbot.indicators import average_true_range, calculate_rsi, compute_log_return, realized_volatility
 from htxbot.models import OrderRequest, PositionLifecycle, SellLadderParams, SignalContext
-from htxbot.shared_exchange import CachedMarketDataExchange, ThreadSafeExchange
+from htxbot.shared_exchange import CachedMarketDataExchange, MultiAccountExchange, ThreadSafeExchange
 from tests.config_overrides import override_config
 
 
@@ -107,7 +107,8 @@ class FakeMexcClient:
 
 
 class FakeExchange:
-    def __init__(self):
+    def __init__(self, name="primary"):
+        self.name = name
         self.markets = {SYMBOL: MARKET, SECOND_SYMBOL: SECOND_MARKET, BTC_SYMBOL: BTC_MARKET}
         self.urls = {"hostnames": {}}
         self.has = {
@@ -7461,6 +7462,100 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(exchange.calls.count("fetch_positions"), 3)
         self.assertEqual(exchange.calls.count("create_order"), 3)
 
+    def test_multi_account_exchange_routes_symbol_private_calls(self):
+        primary = FakeExchange("primary")
+        secondary = FakeExchange("secondary")
+        primary.balance_free = primary.balance_total = 100.0
+        secondary.balance_free = secondary.balance_total = 250.0
+        primary.positions = [{"symbol": SYMBOL, "side": "long", "contracts": 1.0}]
+        secondary.positions = [{"symbol": SECOND_SYMBOL, "side": "long", "contracts": 2.0}]
+        secondary.open_orders = [{"id": "alt_open", "symbol": SECOND_SYMBOL, "side": "buy", "amount": 1.0}]
+
+        exchange = MultiAccountExchange(
+            {"primary": primary, "secondary": secondary},
+            {"alt2": "secondary"},
+        )
+
+        exchange.create_order(SECOND_SYMBOL, "limit", "buy", 2.0, 10.0, params={"reduceOnly": False})
+        exchange.create_order(SYMBOL, "limit", "buy", 1.0, 10.0, params={})
+        positions = exchange.fetch_positions([SYMBOL, SECOND_SYMBOL], params={})
+        orders = exchange.fetch_open_orders(SECOND_SYMBOL, params={})
+        exchange.cancel_order("alt_open", SECOND_SYMBOL, params={})
+        exchange.set_leverage(9, SECOND_SYMBOL, params={})
+        exchange.set_position_mode(False, None, params={})
+        secondary_balance = exchange.fetch_balance_for_symbol(SECOND_SYMBOL, params={})
+        merged_balance = exchange.fetch_balance(params={})
+
+        self.assertEqual([order["symbol"] for order in primary.created_orders], [SYMBOL])
+        self.assertEqual([order["symbol"] for order in secondary.created_orders], [SECOND_SYMBOL])
+        self.assertEqual({position["symbol"] for position in positions}, {SYMBOL, SECOND_SYMBOL})
+        self.assertEqual([order["id"] for order in orders], ["alt_open"])
+        self.assertEqual(primary.fetch_positions_calls, 1)
+        self.assertEqual(secondary.fetch_positions_calls, 1)
+        self.assertEqual(primary.fetch_open_orders_calls, 0)
+        self.assertEqual(secondary.fetch_open_orders_calls, 1)
+        self.assertEqual(secondary.canceled_orders, [("alt_open", SECOND_SYMBOL, {})])
+        self.assertEqual(secondary.set_leverage_calls, [(9, SECOND_SYMBOL, {})])
+        self.assertEqual(len(primary.set_position_mode_calls), 1)
+        self.assertEqual(len(secondary.set_position_mode_calls), 1)
+        self.assertEqual(secondary_balance["free"][config.EXCHANGE.quote_currency], 100.0)
+        self.assertEqual(merged_balance["free"][config.EXCHANGE.quote_currency], 100.0)
+        self.assertEqual(primary.fetch_balance_calls, 2)
+        self.assertEqual(secondary.fetch_balance_calls, 0)
+
+    def test_multi_account_exchange_deduplicates_aggregate_private_reads(self):
+        primary = FakeExchange("primary")
+        secondary = FakeExchange("secondary")
+        duplicate_order = {"id": "same_order", "symbol": SYMBOL, "side": "sell", "amount": 1.0}
+        duplicate_position = {"symbol": SYMBOL, "side": "long", "contracts": 1.0}
+        primary.open_orders = [dict(duplicate_order)]
+        secondary.open_orders = [dict(duplicate_order)]
+        primary.positions = [dict(duplicate_position)]
+        secondary.positions = [dict(duplicate_position)]
+        exchange = MultiAccountExchange(
+            {"primary": primary, "secondary": secondary},
+            {"alt2": "secondary"},
+        )
+
+        orders = exchange.fetch_open_orders(None, params={})
+        positions = exchange.fetch_positions(None, params={})
+
+        self.assertEqual(orders, [duplicate_order])
+        self.assertEqual(positions, [duplicate_position])
+
+    def test_bot_orders_and_balance_use_routed_api_account_for_symbol(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            primary = FakeExchange("primary")
+            secondary = FakeExchange("secondary")
+            primary.balance_free = primary.balance_total = 100.0
+            secondary.balance_free = secondary.balance_total = 300.0
+            bot.exchange = MultiAccountExchange(
+                {"primary": primary, "secondary": secondary},
+                {"alt2": "secondary"},
+            )
+            bot.market_by_symbol = {SYMBOL: MARKET, SECOND_SYMBOL: SECOND_MARKET}
+            bot.symbols = [SYMBOL, SECOND_SYMBOL]
+            bot._reset_private_caches()
+
+            primary_snapshot = bot._account_snapshot(SYMBOL)
+            secondary_snapshot = bot._account_snapshot(SECOND_SYMBOL)
+            bot._create_one_way_order(
+                symbol=SECOND_SYMBOL,
+                order_type="limit",
+                side=config.ENTRY_SIDE,
+                amount=2.0,
+                price=10.0,
+                leverage=5,
+            )
+
+            self.assertEqual(primary_snapshot["free"], 100.0)
+            self.assertEqual(secondary_snapshot["free"], 100.0)
+            self.assertEqual(primary.fetch_balance_calls, 1)
+            self.assertEqual(secondary.fetch_balance_calls, 0)
+            self.assertEqual(primary.created_orders, [])
+            self.assertEqual(secondary.created_orders[-1]["symbol"], SECOND_SYMBOL)
+
     def test_public_ohlcv_fetch_retries_transient_gateway_failure(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             exchange_config = replace(
@@ -8289,7 +8384,28 @@ class UnifiedBotTests(unittest.TestCase):
         combined = object.__new__(CombinedHtxFuturesBot)
         combined.profiles = [long_profile, short_profile]
 
-        with self.assertRaisesRegex(RuntimeError, "same HTX API credentials"):
+        with self.assertRaisesRegex(RuntimeError, "same primary HTX API credentials"):
+            CombinedHtxFuturesBot._validate_shared_exchange_profiles(combined)
+
+    def test_combined_rejects_mismatched_api_account_routing(self):
+        credentials = config.resolve_profile("long").api_credentials
+        long_profile = replace(
+            config.resolve_profile("long"),
+            api_accounts=(
+                config.ApiAccountSettings("primary", credentials, ("test",)),
+                config.ApiAccountSettings("secondary", credentials, ("alt2",)),
+            ),
+        )
+        short_profile = replace(
+            config.resolve_profile("short"),
+            api_accounts=(
+                config.ApiAccountSettings("primary", credentials, ("test", "alt2")),
+            ),
+        )
+        combined = object.__new__(CombinedHtxFuturesBot)
+        combined.profiles = [long_profile, short_profile]
+
+        with self.assertRaisesRegex(RuntimeError, "same HTX API account routing"):
             CombinedHtxFuturesBot._validate_shared_exchange_profiles(combined)
 
     def test_combined_uses_separate_external_feeds_for_different_profile_settings(self):
@@ -8329,15 +8445,21 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(combined.bots[0].external_price_feed.settings.rest_timeout_sec, 1.0)
             self.assertEqual(combined.bots[1].external_price_feed.settings.rest_timeout_sec, 9.0)
 
-    def test_short_profile_excludes_filtered_illiquid_and_unstable_coins(self):
-        short_coins = {coin.lower() for coin in config.resolve_profile("short").coins}
+    def test_secondary_api_coin_universe_is_loaded_from_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "COINS": "doge,bonk",
+                "HTXBOT_COINS": "doge,bonk",
+                "COINS_2": "1inch,aixbt,zro",
+                "HTXBOT_COINS_2": "1inch,aixbt,zro",
+            },
+            clear=False,
+        ):
+            profile = config._make_profile("alias", "short", ())
 
-        self.assertIn("doge", short_coins)
-        self.assertIn("bonk", short_coins)
-        self.assertIn("pengu", short_coins)
-        self.assertNotIn("fartcoin", short_coins)
-        self.assertNotIn("space", short_coins)
-        self.assertNotIn("enj", short_coins)
+        self.assertEqual(profile.coins, ("doge", "bonk", "1inch", "aixbt", "zro"))
+        self.assertEqual(profile.api_accounts[1].coins, ("1inch", "aixbt", "zro"))
 
 
 if __name__ == "__main__":

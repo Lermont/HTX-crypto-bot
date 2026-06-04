@@ -1517,7 +1517,7 @@ class StateMixin:
                 # Use current equity and config budget as a better guess for initial notional
                 # if we have no state, as it helps averaging ratio logic stay conservative.
                 leverage = max(self._safe_float(state.leverage, 0.0), self._safe_float(config.RISK.leverage, 1.0), 1.0)
-                account = self._account_snapshot()
+                account = self._account_snapshot(symbol)
                 equity = account.get("total") or account.get("free", 0.0)
                 planned_margin = equity * config.BUYING.position_budget_fraction
                 state.initial_entry_notional = max(planned_margin * leverage, self._contracts_to_notional(symbol, new_size, new_entry))

@@ -14,7 +14,7 @@ import config
 from .models import OrderRequest
 
 from .concurrency import instance_rlock
-from .shared_exchange import ThreadSafeExchange
+from .shared_exchange import MultiAccountExchange, ThreadSafeExchange
 
 
 class UnexpectedExchangeResponse(RuntimeError):
@@ -46,12 +46,16 @@ class ExchangeMixin:
                 return lock
         return instance_rlock(self.exchange, "_thread_safe_exchange_lock")
 
-    def _create_exchange(self):
-        if config.RUNTIME.dry_run:
-            return None
-        if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
-            raise ValueError("HTX API credentials are required")
+    def _exchange_account_id_for_symbol(self, symbol: str = "") -> str:
+        resolver = getattr(self.exchange, "account_id_for_symbol", None)
+        if callable(resolver) and symbol:
+            try:
+                return str(resolver(symbol) or "primary")
+            except Exception:
+                return "primary"
+        return "primary" if symbol else "__all__"
 
+    def _exchange_config_for_credentials(self, credentials):
         exchange_config = {
             "enableRateLimit": config.EXCHANGE.enable_rate_limit,
             "timeout": config.EXCHANGE.timeout_ms,
@@ -67,14 +71,45 @@ class ExchangeMixin:
                 },
             },
         }
-        if config.API_CREDENTIALS.api_key and config.API_CREDENTIALS.api_secret:
-            exchange_config["apiKey"] = config.API_CREDENTIALS.api_key
-            exchange_config["secret"] = config.API_CREDENTIALS.api_secret
+        if credentials.api_key and credentials.api_secret:
+            exchange_config["apiKey"] = credentials.api_key
+            exchange_config["secret"] = credentials.api_secret
+        return exchange_config
 
+    def _create_account_exchange(self, credentials):
+        exchange_config = self._exchange_config_for_credentials(credentials)
         exchange = ccxt.htx(exchange_config)
         exchange.has["fetchCurrencies"] = False
         self._set_contract_hostname(exchange, self._contract_hostnames()[0])
         return ThreadSafeExchange(exchange)
+
+    def _create_exchange(self):
+        if config.RUNTIME.dry_run:
+            return None
+
+        api_accounts = tuple(getattr(config, "API_ACCOUNTS", ()) or ())
+        if not api_accounts:
+            api_accounts = (
+                config.ApiAccountSettings(
+                    name="primary",
+                    api_credentials=config.API_CREDENTIALS,
+                    coins=tuple(getattr(config, "COINS", ()) or ()),
+                ),
+            )
+
+        exchanges = {}
+        coin_accounts = {}
+        for account in api_accounts:
+            credentials = account.api_credentials
+            if not credentials.api_key or not credentials.api_secret:
+                raise ValueError(f"HTX API credentials are required for account {account.name}")
+            exchanges[account.name] = self._create_account_exchange(credentials)
+            for coin in account.coins:
+                coin_accounts[str(coin).strip().lower()] = account.name
+
+        if len(exchanges) == 1:
+            return next(iter(exchanges.values()))
+        return MultiAccountExchange(exchanges, coin_accounts, default_account=api_accounts[0].name)
 
     def _timeframe_to_seconds(self, timeframe: str) -> int:
         try:
@@ -87,6 +122,10 @@ class ExchangeMixin:
 
     def _set_contract_hostname(self, exchange, hostname: str):
         if not hostname:
+            return
+        setter = getattr(exchange, "set_contract_hostname", None)
+        if callable(setter):
+            setter(hostname)
             return
         urls = exchange.urls.setdefault("hostnames", {})
         urls["contract"] = hostname
@@ -664,17 +703,29 @@ class ExchangeMixin:
                     return rate
         return None
 
-    def _account_snapshot(self) -> dict:
+    def _account_snapshot_cache_key(self, symbol: str = "") -> str:
+        return "__all__"
+
+    def _account_snapshot(self, symbol: str = "") -> dict:
+        cache_key = self._account_snapshot_cache_key(symbol)
         entry = None
         owner = False
         with self._private_cache_runtime_lock():
-            cached = getattr(self, "_account_snapshot_cache", None)
+            cache_by_key = getattr(self, "_account_snapshot_cache_by_key", None)
+            if not isinstance(cache_by_key, dict):
+                cache_by_key = {}
+                self._account_snapshot_cache_by_key = cache_by_key
+            cached = cache_by_key.get(cache_key)
             if isinstance(cached, dict):
                 return dict(cached)
-            entry = getattr(self, "_account_snapshot_inflight", None)
+            inflight_by_key = getattr(self, "_account_snapshot_inflight_by_key", None)
+            if not isinstance(inflight_by_key, dict):
+                inflight_by_key = {}
+                self._account_snapshot_inflight_by_key = inflight_by_key
+            entry = inflight_by_key.get(cache_key)
             if not isinstance(entry, dict):
                 entry = {"event": threading.Event(), "value": None, "exception": None}
-                self._account_snapshot_inflight = entry
+                inflight_by_key[cache_key] = entry
                 owner = True
 
         if not owner:
@@ -686,9 +737,11 @@ class ExchangeMixin:
 
         value = None
         try:
-            value = self._fetch_account_snapshot_uncached()
+            value = self._fetch_account_snapshot_uncached(symbol=symbol)
             with self._private_cache_runtime_lock():
-                self._account_snapshot_cache = dict(value)
+                self._account_snapshot_cache_by_key[cache_key] = dict(value)
+                if cache_key == "__all__":
+                    self._account_snapshot_cache = dict(value)
             return dict(value)
         except Exception as exc:
             entry["exception"] = exc
@@ -697,18 +750,20 @@ class ExchangeMixin:
             if entry.get("exception") is None:
                 entry["value"] = dict(value) if isinstance(value, dict) else value
             with self._private_cache_runtime_lock():
-                if getattr(self, "_account_snapshot_inflight", None) is entry:
+                inflight_by_key = getattr(self, "_account_snapshot_inflight_by_key", None)
+                if isinstance(inflight_by_key, dict) and inflight_by_key.get(cache_key) is entry:
+                    inflight_by_key.pop(cache_key, None)
+                if cache_key == "__all__" and getattr(self, "_account_snapshot_inflight", None) is entry:
                     self._account_snapshot_inflight = None
                 entry["event"].set()
 
-    def _fetch_account_snapshot_uncached(self) -> dict:
+    def _fetch_account_snapshot_uncached(self, symbol: str = "") -> dict:
+        params = {
+            "type": config.EXCHANGE.default_type,
+            "marginMode": config.RISK.margin_mode,
+        }
         try:
-            balance = self.exchange.fetch_balance(
-                {
-                    "type": config.EXCHANGE.default_type,
-                    "marginMode": config.RISK.margin_mode,
-                }
-            )
+            balance = self.exchange.fetch_balance(params)
         except Exception as exc:
             self._log_event(
                 "ERROR",
@@ -719,7 +774,7 @@ class ExchangeMixin:
             )
             return {"free": 0.0, "total": 0.0}
 
-        if not self._ensure_cross_margin_response(balance, context="futures_balance"):
+        if not self._ensure_cross_margin_response(balance, context="futures_balance", symbol=symbol):
             return {"free": 0.0, "total": 0.0}
 
         quote = config.EXCHANGE.quote_currency
@@ -783,6 +838,8 @@ class ExchangeMixin:
             self._private_tickers_by_symbol = None
             self._account_snapshot_cache = None
             self._account_snapshot_inflight = None
+            self._account_snapshot_cache_by_key = {}
+            self._account_snapshot_inflight_by_key = {}
             self._private_positions_bulk_failed = False
             self._private_open_orders_bulk_failed = False
             self._private_tickers_bulk_failed = False

@@ -4,7 +4,7 @@
 
 Python bot for HTX USDT-M futures. The active trading route is an EMA Pullback strategy with separate `long` and `short` profiles that can run together in one process, share market data, and avoid opening opposite exposure on the same symbol.
 
-The bot is a live-ordering application: startup requires explicit HTX API credentials, matching credentials for both profiles in combined mode, and an account leverage that the bot can read from HTX or that you define via `ACCOUNT_LEVERAGE`.
+The bot is a live-ordering application: startup requires explicit HTX API credentials, matching API-account routing for both profiles in combined mode, and an account leverage that the bot can read from HTX or that you define via `ACCOUNT_LEVERAGE`.
 
 Trading futures is risky. This repository is software, not financial advice. Audit the code and run the unit tests plus mock/stub exchange checks before sending live orders.
 
@@ -75,6 +75,11 @@ Fill at least:
 ```dotenv
 HTX_API_KEY=
 HTX_API_SECRET=
+COINS=aave,ada,...
+# Optional second key for symbols enabled on another HTX API key:
+HTX_API_KEY_2=
+HTX_API_SECRET_2=
+COINS_2=1inch,aixbt,...
 BOT_PROFILES=long,short
 ```
 
@@ -287,7 +292,7 @@ Each profile writes state and logs into its own directory:
 - `external_price_feed.csv`
 - `bot_futures_macro.csv`
 
-These runtime CSV/JSONL artifacts are local audit output and are ignored by git. Local secrets live in `.env`, `long/.env`, or `short/.env`; these files are also ignored by git.
+These runtime CSV/JSONL artifacts are local audit output and are ignored by git. Local secrets live in `.env` or `htxbot/.env`; these files are also ignored by git.
 
 ## Live Launch Checklist
 
@@ -295,7 +300,7 @@ These runtime CSV/JSONL artifacts are local audit output and are ignored by git.
 2. Combined mode requires identical API credentials across enabled profiles.
 3. Confirm HTX account leverage or set `ACCOUNT_LEVERAGE`.
 4. Keep conservative caps first: `EMA_POSITION_BUDGET_FRACTION=0.02`, `EMA_MAX_POSITION_MARGIN_FRACTION=0.03`, `EMA_MAX_TOTAL_MARGIN_FRACTION=0.50`.
-5. Check `long/.env` and `short/.env` for profile-specific overrides.
+5. Check `.env` or `htxbot/.env` for profile-specific overrides.
 6. Confirm HTX position mode is one-way and margin mode is cross.
 7. Confirm runtime diagnostics/log artifacts are not staged or committed. If old signed HTX diagnostics were ever shared, rotate the affected HTX API key before live start.
 8. Start with small budgets and watch the first cycles closely.

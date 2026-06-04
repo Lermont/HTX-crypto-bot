@@ -11,13 +11,14 @@ from htxbot.config import CONFIG_WARNINGS, _add_config_warning
 from tests.config_overrides import override_frozen_config_fields
 
 
-EXPECTED_CONFIG_COINS = (
+EXPECTED_PRIMARY_COINS = (
     "aave", "ada", "algo", "apt", "arb", "atom", "avax", "bch", "bnb", "bonk",
     "btc", "cake", "comp", "doge", "dot", "ena", "etc", "eth", "hbar", "htx",
     "hype", "icp", "inj", "jup", "kas", "ldo", "link", "ltc", "near", "ondo",
     "orca", "pendle", "pengu", "people", "pepe", "pol", "sei", "shib", "sol", "ssv",
     "sui", "sushi", "ton", "trx", "uni", "xaut", "xlm", "xmr", "xrp", "zec",
 )
+EXPECTED_SECONDARY_COINS = ("1inch", "aixbt", "akt")
 
 
 @contextmanager
@@ -60,11 +61,32 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(cache_path.endswith("/short/bot_futures_short_markets_cache.json"))
         self.assertNotIn("short_state_markets_cache", cache_path)
 
-    def test_long_and_short_profiles_use_configured_coin_universe(self):
-        self.assertEqual(config.LONG_COINS, EXPECTED_CONFIG_COINS)
-        self.assertEqual(config.SHORT_COINS, EXPECTED_CONFIG_COINS)
-        self.assertEqual(config.resolve_profile("long").coins, EXPECTED_CONFIG_COINS)
-        self.assertEqual(config.resolve_profile("short").coins, EXPECTED_CONFIG_COINS)
+    def test_default_coin_universe_is_env_driven(self):
+        self.assertEqual(config.LONG_COINS, ())
+        self.assertEqual(config.SHORT_COINS, ())
+
+    def test_profile_reads_coin_universe_and_api_accounts_from_env(self):
+        with temporary_env(
+            COINS=",".join(EXPECTED_PRIMARY_COINS),
+            COINS_2=",".join(EXPECTED_SECONDARY_COINS),
+            HTX_API_KEY="primary_key",
+            HTX_API_SECRET="primary_secret",
+            HTX_API_KEY_2="secondary_key",
+            HTX_API_SECRET_2="secondary_secret",
+        ):
+            profile = config._make_profile("long", "long", ())
+
+        self.assertEqual(profile.coins, EXPECTED_PRIMARY_COINS + EXPECTED_SECONDARY_COINS)
+        self.assertEqual(profile.api_accounts[0].name, "primary")
+        self.assertEqual(profile.api_accounts[0].coins, EXPECTED_PRIMARY_COINS)
+        self.assertEqual(profile.api_accounts[1].name, "secondary")
+        self.assertEqual(profile.api_accounts[1].coins, EXPECTED_SECONDARY_COINS)
+        self.assertEqual(profile.api_accounts[1].api_credentials.api_key, "secondary_key")
+
+    def test_duplicate_coin_across_api_accounts_is_rejected(self):
+        with temporary_env(COINS="doge,ada", COINS_2="1inch,doge"):
+            with self.assertRaisesRegex(ValueError, "assigned to multiple HTX API accounts"):
+                config._make_profile("long", "long", ())
 
     def test_market_data_max_workers_is_profile_runtime_setting(self):
         with temporary_env(
@@ -73,7 +95,7 @@ class ConfigTests(unittest.TestCase):
             LONG_MARKET_DATA_MAX_WORKERS=None,
             HTXBOT_LONG_MARKET_DATA_MAX_WORKERS=None,
         ):
-            profile = config._make_profile("long", "long", config.LONG_COINS)
+            profile = config._make_profile("long", "long", ("test",))
 
         self.assertEqual(profile.runtime.market_data_max_workers, 3)
 
@@ -111,7 +133,7 @@ class ConfigTests(unittest.TestCase):
             HTXBOT_LONG_EMA_MAX_AVERAGING_STAGES=None,
         ):
             try:
-                profile = config._make_profile("long", "long", config.LONG_COINS)
+                profile = config._make_profile("long", "long", ("test",))
             finally:
                 config.CONFIG_WARNINGS[:] = initial_warnings
 

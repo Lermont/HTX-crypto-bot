@@ -145,7 +145,9 @@ class CombinedHtxFuturesBot:
         first = self.profiles[0]
         for profile in self.profiles[1:]:
             if profile.api_credentials != first.api_credentials:
-                raise RuntimeError("Combined live profiles must use the same HTX API credentials")
+                raise RuntimeError("Combined live profiles must use the same primary HTX API credentials")
+            if tuple(getattr(profile, "api_accounts", ()) or ()) != tuple(getattr(first, "api_accounts", ()) or ()):
+                raise RuntimeError("Combined live profiles must use the same HTX API account routing")
             if profile.runtime.dry_run != first.runtime.dry_run:
                 raise RuntimeError("Combined profiles must all have the same DRY_RUN setting")
 

@@ -31,8 +31,7 @@ def _load_dotenv_if_present(path: Path, profile: str = "") -> None:
 
 
 _load_dotenv_if_present(BASE_DIR / ".env")
-_load_dotenv_if_present(BASE_DIR / "long" / ".env", profile="long")
-_load_dotenv_if_present(BASE_DIR / "short" / ".env", profile="short")
+_load_dotenv_if_present(BASE_DIR / "htxbot" / ".env")
 
 
 def _env(name: str, profile: str = "") -> str:
@@ -95,6 +94,58 @@ def _env_csv(name: str, default: Tuple[str, ...], profile: str = "") -> Tuple[st
     return items or default
 
 
+def _env_csv_optional(*names: str, profile: str = "") -> Optional[Tuple[str, ...]]:
+    for name in names:
+        value = _env(name, profile=profile)
+        if not value:
+            continue
+        return tuple(item.strip() for item in value.split(",") if item.strip())
+    return None
+
+
+def _normalize_coin(coin: str) -> str:
+    return str(coin or "").strip().lower()
+
+
+def _normalize_coins(coins: Tuple[str, ...]) -> Tuple[str, ...]:
+    seen = set()
+    normalized = []
+    for coin in coins or ():
+        item = _normalize_coin(coin)
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return tuple(normalized)
+
+
+def _account_coin_env_names(suffix: str = "") -> Tuple[str, ...]:
+    suffix = str(suffix or "").strip()
+    if not suffix:
+        return ("HTX_COINS", "COINS")
+    return (
+        f"HTX_COINS_{suffix}",
+        f"COINS_{suffix}",
+        f"HTX_API_{suffix}_COINS",
+        f"API_{suffix}_COINS",
+        f"HTX_{suffix}_COINS",
+    )
+
+
+def _configured_account_coins(profile: str, suffix: str = "", default: Tuple[str, ...] = ()) -> Tuple[str, ...]:
+    configured = _env_csv_optional(*_account_coin_env_names(suffix), profile=profile)
+    if configured is None:
+        return _normalize_coins(default)
+    return _normalize_coins(configured)
+
+
+def _configured_profile_coins(profile: str) -> Tuple[str, ...]:
+    return _normalize_coins(
+        _configured_account_coins(profile, "", ())
+        + _configured_account_coins(profile, "2", ())
+    )
+
+
 def _env_float_tuple(name: str, default: Tuple[float, ...], profile: str = "") -> Tuple[float, ...]:
     value = _env(name, profile=profile)
     if not value:
@@ -134,27 +185,22 @@ def _add_config_warning(message: str) -> None:
     if message not in CONFIG_WARNINGS:
         CONFIG_WARNINGS.append(message)
 
-LONG_COINS = (
-    "aave", "ada", "algo", "apt", "arb", "atom", "avax", "bch", "bnb", "bonk",
-    "btc", "cake", "comp", "doge", "dot", "ena", "etc", "eth", "hbar", "htx",
-    "hype", "icp", "inj", "jup", "kas", "ldo", "link", "ltc", "near", "ondo",
-    "orca", "pendle", "pengu", "people", "pepe", "pol", "sei", "shib", "sol", "ssv",
-    "sui", "sushi", "ton", "trx", "uni", "xaut", "xlm", "xmr", "xrp", "zec",
-)
+LONG_COINS = _configured_profile_coins("long")
 
-SHORT_COINS = (
-    "aave", "ada", "algo", "apt", "arb", "atom", "avax", "bch", "bnb", "bonk",
-    "btc", "cake", "comp", "doge", "dot", "ena", "etc", "eth", "hbar", "htx",
-    "hype", "icp", "inj", "jup", "kas", "ldo", "link", "ltc", "near", "ondo",
-    "orca", "pendle", "pengu", "people", "pepe", "pol", "sei", "shib", "sol", "ssv",
-    "sui", "sushi", "ton", "trx", "uni", "xaut", "xlm", "xmr", "xrp", "zec",
-)
+SHORT_COINS = _configured_profile_coins("short")
 
 
 @dataclass(frozen=True)
 class ApiCredentials:
     api_key: str
     api_secret: str
+
+
+@dataclass(frozen=True)
+class ApiAccountSettings:
+    name: str
+    api_credentials: ApiCredentials
+    coins: Tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -557,6 +603,7 @@ class BotProfile:
     entry_side: str
     exit_side: str
     api_credentials: ApiCredentials
+    api_accounts: Tuple[ApiAccountSettings, ...]
     exchange: ExchangeSettings
     signals: SignalSettings
     buying: BuySettings
@@ -595,6 +642,10 @@ class BotProfile:
     @property
     def API_CREDENTIALS(self) -> ApiCredentials:
         return self.api_credentials
+
+    @property
+    def API_ACCOUNTS(self) -> Tuple[ApiAccountSettings, ...]:
+        return self.api_accounts
 
     @property
     def EXCHANGE(self) -> ExchangeSettings:
@@ -792,20 +843,97 @@ def _validate_profile(profile: "BotProfile") -> None:
         )
 
 
+def _api_credentials_for_account(profile: str, suffix: str = "") -> ApiCredentials:
+    suffix = str(suffix or "").strip()
+    if not suffix:
+        return ApiCredentials(
+            api_key=_first_env("HTX_API_KEY", "API_KEY", profile=profile),
+            api_secret=_first_env("HTX_API_SECRET", "API_SECRET", profile=profile),
+        )
+
+    return ApiCredentials(
+        api_key=_first_env(
+            f"HTX_API_KEY_{suffix}",
+            f"HTX_API{suffix}_KEY",
+            f"HTX_API_{suffix}_KEY",
+            f"HTX_{suffix}_API_KEY",
+            f"HTX_SECONDARY_API_KEY",
+            f"API_KEY_{suffix}",
+            f"SECONDARY_API_KEY",
+            profile=profile,
+        ),
+        api_secret=_first_env(
+            f"HTX_API_SECRET_{suffix}",
+            f"HTX_API{suffix}_SECRET",
+            f"HTX_API_{suffix}_SECRET",
+            f"HTX_{suffix}_API_SECRET",
+            f"HTX_SECONDARY_API_SECRET",
+            f"API_SECRET_{suffix}",
+            f"SECONDARY_API_SECRET",
+            profile=profile,
+        ),
+    )
+
+
+def _validate_api_account_coins(accounts: Tuple[ApiAccountSettings, ...], profile: str) -> None:
+    owners = {}
+    for account in accounts:
+        for coin in account.coins:
+            previous = owners.get(coin)
+            if previous and previous != account.name:
+                raise ValueError(
+                    f"{profile}: coin {coin!r} is assigned to multiple HTX API accounts "
+                    f"({previous}, {account.name})"
+                )
+            owners[coin] = account.name
+
+
+def _make_api_accounts(profile: str, primary_credentials: ApiCredentials, fallback_coins: Tuple[str, ...]) -> Tuple[ApiAccountSettings, ...]:
+    primary_coins = _configured_account_coins(profile, "", fallback_coins)
+    accounts = [
+        ApiAccountSettings(
+            name="primary",
+            api_credentials=primary_credentials,
+            coins=primary_coins,
+        )
+    ]
+
+    secondary_credentials = _api_credentials_for_account(profile, "2")
+    secondary_coins = _configured_account_coins(profile, "2", ())
+    if secondary_coins or secondary_credentials.api_key or secondary_credentials.api_secret:
+        accounts.append(
+            ApiAccountSettings(
+                name="secondary",
+                api_credentials=secondary_credentials,
+                coins=secondary_coins,
+            )
+        )
+
+    resolved = tuple(accounts)
+    _validate_api_account_coins(resolved, profile)
+    return resolved
+
+
+def _coins_from_api_accounts(accounts: Tuple[ApiAccountSettings, ...]) -> Tuple[str, ...]:
+    return _normalize_coins(tuple(coin for account in accounts for coin in account.coins))
+
+
 def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfile:
     direction = direction.lower()
     if direction not in {"long", "short"}:
         raise ValueError(f"Unsupported trade direction: {direction}")
+    coins = _normalize_coins(coins)
 
     position_side = direction
     opposite_position_side = "short" if position_side == "long" else "long"
     entry_side = "buy" if position_side == "long" else "sell"
     exit_side = "sell" if position_side == "long" else "buy"
 
-    api_credentials = ApiCredentials(
-        api_key=_first_env("HTX_API_KEY", "API_KEY", profile=name),
-        api_secret=_first_env("HTX_API_SECRET", "API_SECRET", profile=name),
-    )
+    api_credentials = _api_credentials_for_account(name)
+    api_accounts = _make_api_accounts(name, api_credentials, coins)
+    account_coins = _coins_from_api_accounts(api_accounts)
+    if account_coins:
+        coins = account_coins
     exchange = ExchangeSettings(
         quote_currency="USDT",
         enable_rate_limit=True,
@@ -1303,6 +1431,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         entry_side=entry_side,
         exit_side=exit_side,
         api_credentials=api_credentials,
+        api_accounts=api_accounts,
         exchange=exchange,
         signals=signals,
         buying=buying,

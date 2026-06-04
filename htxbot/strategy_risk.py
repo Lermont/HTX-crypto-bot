@@ -711,7 +711,7 @@ class RiskManager:
         signal: Optional[dict] = None,
         budget_scale: float = 1.0,
     ) -> Tuple[float, str]:
-        account = self._account_snapshot()
+        account = self._account_snapshot(symbol)
         free = account["free"]
         equity = account["total"] or free
         if free <= config.RISK.min_quote_reserve:
