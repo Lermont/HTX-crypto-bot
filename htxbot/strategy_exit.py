@@ -1410,11 +1410,16 @@ class ExitStrategy:
                 reason="existing_exit_ladder_not_canceled",
             )
 
+        raw_closeable = requested
         closeable = requested
         if closeable_contracts is not None:
-            closeable = min(requested, max(0.0, self._safe_float(closeable_contracts, 0.0)))
+            raw_closeable = max(0.0, self._safe_float(closeable_contracts, 0.0))
+            closeable = min(requested, raw_closeable)
         planned = self._amount_to_precision(symbol, closeable)
         if planned <= 0:
+            reason = "no_closeable_position_available"
+            if closeable_contracts is not None and requested > 0 and raw_closeable <= 0:
+                reason = "closeable_amount_reserved_by_existing_exit_orders"
             return ExitLadderPreflight(
                 ok=False,
                 requested_contracts=requested,
@@ -1422,7 +1427,7 @@ class ExitStrategy:
                 closeable_contracts=max(0.0, closeable),
                 planned_contracts=0.0,
                 existing_tracked_contracts=existing_tracked,
-                reason="no_closeable_position_available",
+                reason=reason,
             )
 
         if position_contracts > 0 and planned > position_contracts:
@@ -2911,27 +2916,43 @@ class ExitStrategy:
 
     def _closeable_contracts_for_exit_ladder(self, symbol: str, had_sell_ladder: bool) -> float:
         state = self._get_state(symbol)
-        closeable = state.position_available
-        if had_sell_ladder and closeable <= 0:
-            closeable = state.position_size
-        if closeable <= 0:
-            closeable = state.position_size
-            reason = (
-                "stale_frozen_position_fallback"
-                if state.position_frozen > 0
-                else "closeable_missing_no_frozen_fallback"
-            )
+        position_size = max(0.0, self._safe_float(state.position_size, 0.0))
+        closeable = max(0.0, min(position_size, self._safe_float(state.position_available, 0.0)))
+        if closeable > 0:
+            return closeable
+
+        frozen = max(0.0, self._safe_float(state.position_frozen, 0.0))
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+        if frozen > eps:
             self._log_event(
                 "WARNING",
-                f"Using full {config.POSITION_SIDE} position for {config.EXIT_SIDE} exit ladder on {symbol}: no closeable/frozen amount reported",
-                event="state_exchange_mismatch",
+                f"Delaying {config.EXIT_SIDE} exit ladder for {symbol}: HTX reports the position as fully reserved",
+                event="reduce_only_violation_prevented",
                 symbol=symbol,
                 side=config.EXIT_SIDE,
-                position_size=state.position_size,
+                position_size=position_size,
                 entry_price=state.entry_price,
-                reason=reason,
+                reason=(
+                    "closeable_amount_reserved_by_existing_exit_orders;"
+                    f"available={closeable:.12f};frozen={frozen:.12f}"
+                ),
             )
-        return closeable
+            return 0.0
+
+        if had_sell_ladder:
+            return position_size
+
+        self._log_event(
+            "WARNING",
+            f"Using full {config.POSITION_SIDE} position for {config.EXIT_SIDE} exit ladder on {symbol}: no closeable/frozen amount reported",
+            event="state_exchange_mismatch",
+            symbol=symbol,
+            side=config.EXIT_SIDE,
+            position_size=position_size,
+            entry_price=state.entry_price,
+            reason="closeable_missing_no_frozen_fallback",
+        )
+        return position_size
 
     def _controlled_loss_current_move_fraction(self, state: TradeState) -> float:
         values = [
@@ -3036,6 +3057,30 @@ class ExitStrategy:
         had_sell_ladder = bool(state.sell_ladder_orders)
         close_contracts = self._controlled_loss_contracts(symbol, state, reference_price, had_sell_ladder=had_sell_ladder)
         if close_contracts <= 0:
+            eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+            wants_controlled_close = (
+                self._hard_time_exit_elapsed(state)
+                or self._clamp(config.STRATEGY.controlled_loss_max_position_fraction, 0.0, 1.0) > 0.0
+            )
+            if (
+                wants_controlled_close
+                and state.position_size > eps
+                and self._safe_float(state.position_available, 0.0) <= eps
+                and self._safe_float(state.position_frozen, 0.0) > eps
+            ):
+                state.sell_ladder_mode = "controlled_loss_exit"
+                state.sell_ladder_signature = ""
+                state.frozen_no_more_buys = True
+                if not state.time_exit_activated_at:
+                    state.time_exit_activated_at = time.time()
+                self._refresh_active_side(state)
+                self._save_state()
+                self._mark_exit_ladder_waiting_for_closeable(
+                    symbol,
+                    "controlled_loss_exit",
+                    "closeable_amount_reserved_by_existing_exit_orders",
+                )
+                return True
             return False
 
         if state.sell_ladder_orders:
@@ -3555,15 +3600,15 @@ class ExitStrategy:
         closeable = min(max(0.0, closeable), max(0.0, state.position_size))
         close_amount = self._amount_to_precision(symbol, closeable)
         if close_amount <= 0:
-            self._log_event(
-                "WARNING",
-                f"Absolute force exit delayed for {symbol}: no closeable amount",
-                event="reduce_only_violation_prevented",
-                symbol=symbol,
-                side=config.EXIT_SIDE,
-                position_size=state.position_size,
-                entry_price=state.entry_price,
-                reason=f"absolute_force_exit_no_closeable;held_minutes={held_minutes:.1f};available={state.position_available:.12f};frozen={state.position_frozen:.12f}",
+            self._mark_exit_ladder_waiting_for_closeable(
+                symbol,
+                "absolute_force_exit",
+                (
+                    "absolute_force_exit_no_closeable;"
+                    f"held_minutes={held_minutes:.1f};"
+                    f"available={state.position_available:.12f};"
+                    f"frozen={state.position_frozen:.12f}"
+                ),
             )
             return True
 

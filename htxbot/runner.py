@@ -31,9 +31,12 @@ class RunnerMixin:
                 symbol=symbol,
                 reason=f"{reason}_open_orders_unavailable",
             )
-            return
-        self._validate_sell_orders(symbol, open_orders)
-        self._validate_entry_orders(symbol, open_orders)
+            return None
+        sell_orders_valid = self._validate_sell_orders(symbol, open_orders)
+        entry_orders_valid = self._validate_entry_orders(symbol, open_orders)
+        if not sell_orders_valid or not entry_orders_valid:
+            return None
+        return open_orders
 
     def setup(self):
         self._log_event("INFO", "Initializing HTX futures bot", event="futures_setup", reason="startup")
@@ -170,9 +173,16 @@ class RunnerMixin:
             return
         if sync_status == "position_changed":
             if not had_tracked_exit_orders:
-                self._post_sync_order_hygiene(symbol, reason="post_position_change")
-            return
-        if sync_status == "closed":
+                post_sync_open_orders = self._post_sync_order_hygiene(symbol, reason="post_position_change")
+                if post_sync_open_orders is None:
+                    return
+                open_orders = post_sync_open_orders
+                post_sync_state = self._get_state(symbol)
+                if post_sync_state.sell_ladder_orders or post_sync_state.hard_stop_order:
+                    return
+            else:
+                return
+        elif sync_status == "closed":
             self._post_sync_order_hygiene(symbol, reason="post_position_closed")
             return
         if self._maybe_close_dust_position(symbol, open_orders):

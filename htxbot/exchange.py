@@ -1526,8 +1526,12 @@ class ExchangeMixin:
 
     def _is_hard_stop_loss_trigger_reached_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
-        has_code = '"err_code":1407' in text or '"err-code":1407' in text
-        has_message = "stop-loss price" in text or "stop loss price" in text
+        has_code = bool(re.search(r'"err[_-]?code"\s*:\s*"?1407"?', text))
+        has_message = (
+            "stop-loss price" in text
+            or "stop loss price" in text
+            or ("stop" in text and "loss" in text and "shall not be" in text)
+        )
         return has_code and has_message
 
     def _is_position_mode_locked_error(self, exc: Exception) -> bool:

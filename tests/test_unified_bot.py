@@ -2770,6 +2770,33 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["orphan_reduce_only_exit"])
             self.assertEqual(bot.exchange.created_orders, [])
 
+    def test_step_symbol_builds_exit_ladder_same_cycle_after_adopting_position(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(config.STRATEGY, hard_stop_loss_enabled=False)
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.positions = [
+                    {
+                        "symbol": SYMBOL,
+                        "side": "long",
+                        "contracts": 5.0,
+                        "available": 5.0,
+                        "frozen": 0.0,
+                        "entryPrice": 100.0,
+                        "marginMode": config.RISK.margin_mode,
+                        "leverage": config.RISK.leverage,
+                    }
+                ]
+                bot.exchange.open_orders = []
+
+                bot.step_symbol(SYMBOL)
+
+                state = bot._get_state(SYMBOL)
+                self.assertEqual(state.position_size, 5.0)
+                self.assertTrue(state.sell_ladder_orders)
+                self.assertEqual(sum(ref["amount"] for ref in state.sell_ladder_orders), 5.0)
+                self.assertTrue(all(order["params"].get("reduceOnly") for order in bot.exchange.created_orders))
+
     def test_step_symbol_does_not_readopt_stale_tracked_exit_after_position_change(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -4848,6 +4875,47 @@ class UnifiedBotTests(unittest.TestCase):
                     any(row["reason"].startswith("hard_stop_loss_order_rejected") for row in rows)
                 )
 
+    def test_hard_stop_loss_spaced_htx_1407_switches_to_reduce_only_market_close(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_atr_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 4.0
+                state.position_available = 4.0
+                state.entry_price = 100.0
+                original_create_order = bot.exchange.create_order
+
+                def reject_stop_with_spaced_code(symbol, type, side, amount, price, params=None):
+                    params = params or {}
+                    if "stopLossPrice" in params:
+                        raise RuntimeError(
+                            'htx {"status":"error","err_code": 1407,'
+                            '"err_msg":"The stop loss price shall not be >= 98USDT"}'
+                        )
+                    return original_create_order(symbol, type, side, amount, price, params=params)
+
+                bot.exchange.create_order = reject_stop_with_spaced_code
+
+                placed = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(placed)
+                self.assertEqual(state.sell_ladder_mode, "hard_stop_loss")
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["type"], "market")
+                self.assertEqual(order["side"], "sell")
+                self.assertEqual(order["amount"], 4.0)
+                self.assertTrue(order["params"].get("reduceOnly"))
+                self.assertNotIn("stopLossPrice", order["params"])
+                self.assertTrue(state.hard_stop_order["market_close"])
+
     def test_hard_stop_loss_crossed_trigger_market_close_mirrors_short_side(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
@@ -5605,7 +5673,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertAlmostEqual(price, 98.80)
 
-    def test_absolute_force_exit_ignores_stale_frozen_state(self):
+    def test_absolute_force_exit_waits_on_frozen_position_without_closeable(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = replace(
                 config.STRATEGY,
@@ -5625,13 +5693,12 @@ class UnifiedBotTests(unittest.TestCase):
                 applied = bot._maybe_apply_absolute_force_exit(SYMBOL, reason="test_force_exit")
 
                 self.assertTrue(applied)
-                self.assertEqual(len(bot.exchange.created_orders), 1)
-                self.assertEqual(bot.exchange.created_orders[0]["type"], "market")
-                self.assertEqual(bot.exchange.created_orders[0]["amount"], 10.0)
-                self.assertTrue(bot.exchange.created_orders[0]["params"].get("reduceOnly"))
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(bot.exchange.create_order_calls, 0)
                 self.assertTrue(state.zombie_position)
                 self.assertEqual(state.sell_ladder_mode, "absolute_force_exit")
-                self.assertEqual(state.sell_ladder_signature, "")
+                self.assertTrue(state.sell_ladder_signature.startswith("pending_closeable:absolute_force_exit|"))
+                self.assertIn("absolute_force_exit_no_closeable", state.pending_exit_ladder_reason)
 
     def test_absolute_force_exit_market_order_is_capped_to_available_amount(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6310,7 +6377,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(exposure["open_exit_orders"], [])
                 self.assertEqual(exposure["unknown_remaining"], 0.0)
 
-    def test_exit_ladder_rebuild_ignores_stale_frozen_state_without_tracked_orders(self):
+    def test_exit_ladder_waits_on_frozen_position_without_closeable(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
@@ -6322,11 +6389,14 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._ensure_sell_ladder(SYMBOL)
 
-                self.assertEqual(len(bot.exchange.created_orders), 4)
-                self.assertTrue(all(order["side"] == "sell" for order in bot.exchange.created_orders))
-                self.assertEqual(sum(order["amount"] for order in bot.exchange.created_orders), 5.0)
-                self.assertTrue(all(order["params"].get("reduceOnly") for order in bot.exchange.created_orders))
-                self.assertEqual(len(state.sell_ladder_orders), 4)
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(bot.exchange.create_order_calls, 0)
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(
+                    state.sell_ladder_signature,
+                    bot._pending_exit_ladder_signature("normal"),
+                )
+                self.assertIn("closeable_amount_reserved", state.pending_exit_ladder_reason)
                 self.assertEqual(state.exit_runner_contracts, 0.0)
 
     def test_exit_ladder_waits_when_exchange_reports_closeable_reserved(self):
@@ -6344,7 +6414,7 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._ensure_sell_ladder(SYMBOL)
 
                 self.assertEqual(bot.exchange.created_orders, [])
-                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(bot.exchange.create_order_calls, 0)
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(
                     state.sell_ladder_signature,
@@ -6370,7 +6440,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._ensure_sell_ladder(SYMBOL)
                 self.assertEqual(bot.exchange.created_orders, [])
-                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(bot.exchange.create_order_calls, 0)
 
                 bot.exchange.reject_reduce_only_closeable_amount = False
                 state.position_available = 5.0
@@ -6378,7 +6448,7 @@ class UnifiedBotTests(unittest.TestCase):
                 state.pending_exit_ladder_since = time.time() - 5.0
                 bot._ensure_sell_ladder(SYMBOL)
 
-                self.assertGreaterEqual(bot.exchange.create_order_calls, 2)
+                self.assertGreaterEqual(bot.exchange.create_order_calls, 1)
                 self.assertTrue(bot.exchange.created_orders)
                 self.assertEqual(state.pending_exit_ladder_since, None)
                 self.assertEqual(state.pending_exit_ladder_reason, "")
@@ -6400,7 +6470,7 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._ensure_sell_ladder(SYMBOL)
 
                 self.assertEqual(bot.exchange.created_orders, [])
-                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(bot.exchange.create_order_calls, 0)
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(
                     state.sell_ladder_signature,
@@ -6427,7 +6497,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(bot._maybe_apply_time_based_exit(SYMBOL, None))
 
                 self.assertEqual(bot.exchange.created_orders, [])
-                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(bot.exchange.create_order_calls, 0)
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(
                     state.sell_ladder_signature,
@@ -6453,7 +6523,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(bot._maybe_apply_urgent_time_exit(SYMBOL, None))
 
                 self.assertEqual(bot.exchange.created_orders, [])
-                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(bot.exchange.create_order_calls, 0)
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(state.sell_ladder_mode, "urgent_time_exit")
                 self.assertEqual(
@@ -6491,7 +6561,7 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(bot._maybe_apply_controlled_loss_exit(SYMBOL, None))
 
                 self.assertEqual(bot.exchange.created_orders, [])
-                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(bot.exchange.create_order_calls, 0)
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(state.sell_ladder_mode, "controlled_loss_exit")
                 self.assertTrue(state.sell_ladder_signature.startswith("pending_closeable:controlled_loss_exit|"))
@@ -8090,6 +8160,7 @@ class UnifiedBotTests(unittest.TestCase):
         )
         combined = object.__new__(CombinedHtxFuturesBot)
         combined.bots = [long_bot, short_bot]
+        short_bot.symbols = []
 
         reserved = CombinedHtxFuturesBot._reserved_symbols(combined, exclude=long_bot)
         self.assertIn(SYMBOL, reserved)

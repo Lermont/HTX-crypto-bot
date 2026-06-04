@@ -184,7 +184,6 @@ class CombinedHtxFuturesBot:
 
     def _exchange_reserved_symbols(self, bot: HtxFuturesBot) -> set:
         reserved = set()
-        symbols = set(getattr(bot, "symbols", []) or [])
         min_contracts = getattr(bot, "_get_min_contracts", None)
 
         positions_by_symbol = None
@@ -205,8 +204,6 @@ class CombinedHtxFuturesBot:
                 positions_by_symbol = None
 
         for symbol, positions in (positions_by_symbol or {}).items():
-            if symbols and symbol not in symbols:
-                continue
             epsilon = 1e-12
             if min_contracts:
                 try:
@@ -239,8 +236,6 @@ class CombinedHtxFuturesBot:
 
         reserved_order_sides = {bot.profile.entry_side, bot.profile.exit_side}
         for symbol, orders in (orders_by_symbol or {}).items():
-            if symbols and symbol not in symbols:
-                continue
             epsilon = 1e-12
             if min_contracts:
                 try:
