@@ -580,7 +580,7 @@ class RuntimeSettings:
 
 def _make_hedge_settings() -> HedgeSettings:
     return HedgeSettings(
-        btc_hedge_enabled=_env_bool("BTC_HEDGE_ENABLED", True),
+        btc_hedge_enabled=_env_bool("BTC_HEDGE_ENABLED", False),
         btc_hedge_coin=(_env("BTC_HEDGE_COIN") or "btc").strip().lower(),
         btc_hedge_ratio=max(0.0, _env_float("BTC_HEDGE_RATIO", 1.0)),
         btc_hedge_min_rebalance_notional=max(0.0, _env_float("BTC_HEDGE_MIN_REBALANCE_NOTIONAL", 10.0)),

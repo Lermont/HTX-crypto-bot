@@ -45,15 +45,15 @@ class ConfigTests(unittest.TestCase):
         self.assertIs(package_config.CONFIG_WARNINGS, config.CONFIG_WARNINGS)
         self.assertIs(package_config.resolve_profile("long"), config.resolve_profile("long"))
 
-    def test_btc_hedge_enabled_by_default(self):
+    def test_btc_hedge_disabled_by_default(self):
         with temporary_env(BTC_HEDGE_ENABLED=None, HTXBOT_BTC_HEDGE_ENABLED=None):
             hedge = config._make_hedge_settings()
-            self.assertTrue(hedge.btc_hedge_enabled)
+            self.assertFalse(hedge.btc_hedge_enabled)
             self.assertEqual(hedge.btc_hedge_max_spread_bps, 30.0)
 
-    def test_btc_hedge_can_be_disabled_by_env(self):
-        with temporary_env(BTC_HEDGE_ENABLED="false", HTXBOT_BTC_HEDGE_ENABLED=None):
-            self.assertFalse(config._make_hedge_settings().btc_hedge_enabled)
+    def test_btc_hedge_can_be_enabled_by_env(self):
+        with temporary_env(BTC_HEDGE_ENABLED="true", HTXBOT_BTC_HEDGE_ENABLED=None):
+            self.assertTrue(config._make_hedge_settings().btc_hedge_enabled)
 
     def test_short_profile_markets_cache_filename_matches_profile(self):
         cache_path = config.resolve_profile("short").runtime.markets_cache_file.replace("\\", "/")
