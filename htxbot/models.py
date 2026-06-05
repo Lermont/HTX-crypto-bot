@@ -162,6 +162,11 @@ class TradeState:
     exit_runner_peak_price: float = 0.0
     exit_runner_bottom_price: float = 0.0
     exit_runner_contracts: float = 0.0
+    soft_defensive_last_signal_timestamp: Optional[float] = None
+    soft_defensive_consecutive_signals: int = 0
+    soft_defensive_exit_activated_at: Optional[float] = None
+    soft_defensive_exit_last_rebuild_at: Optional[float] = None
+    soft_defensive_exit_fraction: float = 0.0
     last_account_unload_at: Optional[float] = None
     account_unload_count: int = 0
     entry_rs30: float = 0.0

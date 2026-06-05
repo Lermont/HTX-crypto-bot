@@ -409,9 +409,18 @@ class StrategySettings:
     hard_time_exit_bypass_profit_bank: bool
     hard_stop_loss_enabled: bool
     hard_stop_loss_pct: float
+    hard_stop_loss_min_emergency_pct: float
     hard_stop_loss_atr_enabled: bool
     hard_stop_loss_atr_multiplier: float
     hard_stop_loss_atr_max_pct: float
+    soft_defensive_exit_enabled: bool
+    soft_defensive_exit_min_drawdown: float
+    soft_defensive_exit_btc_against_return: float
+    soft_defensive_exit_confirmations: int
+    soft_defensive_exit_initial_fraction: float
+    soft_defensive_exit_step_fraction: float
+    soft_defensive_exit_max_fraction: float
+    soft_defensive_exit_reprice_minutes: float
     enable_absolute_force_exit: bool
     absolute_force_exit_after_minutes: float
     enable_controlled_loss_exit: bool
@@ -795,7 +804,13 @@ def _validate_profile(profile: "BotProfile") -> None:
         "account_averaging_falling_guard_fraction",
         "account_averaging_budget_scale",
         "hard_stop_loss_pct",
+        "hard_stop_loss_min_emergency_pct",
         "hard_stop_loss_atr_max_pct",
+        "soft_defensive_exit_min_drawdown",
+        "soft_defensive_exit_btc_against_return",
+        "soft_defensive_exit_initial_fraction",
+        "soft_defensive_exit_step_fraction",
+        "soft_defensive_exit_max_fraction",
         "controlled_loss_max_position_fraction",
         "controlled_loss_min_move_fraction",
         "controlled_loss_volatility_reprice_min_move_delta",
@@ -815,6 +830,8 @@ def _validate_profile(profile: "BotProfile") -> None:
         )
     if profile.strategy.hard_stop_loss_enabled and profile.strategy.hard_stop_loss_pct <= 0:
         raise ValueError(f"{profile.name}.STRATEGY.hard_stop_loss_pct must be positive when hard stop is enabled")
+    if profile.strategy.soft_defensive_exit_confirmations < 1:
+        raise ValueError(f"{profile.name}.STRATEGY.soft_defensive_exit_confirmations must be at least 1")
     if profile.strategy.hard_stop_loss_atr_multiplier < 0:
         raise ValueError(f"{profile.name}.STRATEGY.hard_stop_loss_atr_multiplier must be non-negative")
     if profile.strategy.controlled_loss_volatility_reference < 0:
@@ -1057,6 +1074,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         )
     ema_max_averaging_stages = min(max(0, configured_ema_max_averaging_stages), 2)
     averaging_stage_count = max(0, ema_max_averaging_stages)
+    hard_stop_loss_pct = _env_float("HARD_STOP_LOSS_PCT", 0.02, profile=name)
     strategy = StrategySettings(
         ema_strategy_enabled=_env_bool("EMA_STRATEGY_ENABLED", True, profile=name),
         ema_macro_timeframe=ema_macro_timeframe,
@@ -1265,10 +1283,19 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         hard_time_exit_max_loss_on_notional=_env_float("HARD_TIME_EXIT_MAX_LOSS_ON_NOTIONAL", 0.03, profile=name),
         hard_time_exit_bypass_profit_bank=_env_bool("HARD_TIME_EXIT_BYPASS_PROFIT_BANK", True, profile=name),
         hard_stop_loss_enabled=_env_bool("HARD_STOP_LOSS_ENABLED", True, profile=name),
-        hard_stop_loss_pct=_env_float("HARD_STOP_LOSS_PCT", 0.02, profile=name),
+        hard_stop_loss_pct=hard_stop_loss_pct,
+        hard_stop_loss_min_emergency_pct=_env_float("HARD_STOP_LOSS_MIN_EMERGENCY_PCT", 0.04, profile=name),
         hard_stop_loss_atr_enabled=_env_bool("HARD_STOP_LOSS_ATR_ENABLED", True, profile=name),
         hard_stop_loss_atr_multiplier=max(0.0, _env_float("HARD_STOP_LOSS_ATR_MULTIPLIER", 2.0, profile=name)),
         hard_stop_loss_atr_max_pct=_env_float("HARD_STOP_LOSS_ATR_MAX_PCT", 0.03, profile=name),
+        soft_defensive_exit_enabled=_env_bool("SOFT_DEFENSIVE_EXIT_ENABLED", True, profile=name),
+        soft_defensive_exit_min_drawdown=_env_float("SOFT_DEFENSIVE_EXIT_MIN_DRAWDOWN", hard_stop_loss_pct, profile=name),
+        soft_defensive_exit_btc_against_return=_env_float("SOFT_DEFENSIVE_EXIT_BTC_AGAINST_RETURN", 0.003, profile=name),
+        soft_defensive_exit_confirmations=max(1, _env_int("SOFT_DEFENSIVE_EXIT_CONFIRMATIONS", 2, profile=name)),
+        soft_defensive_exit_initial_fraction=_env_float("SOFT_DEFENSIVE_EXIT_INITIAL_FRACTION", 0.33, profile=name),
+        soft_defensive_exit_step_fraction=_env_float("SOFT_DEFENSIVE_EXIT_STEP_FRACTION", 0.33, profile=name),
+        soft_defensive_exit_max_fraction=_env_float("SOFT_DEFENSIVE_EXIT_MAX_FRACTION", 1.0, profile=name),
+        soft_defensive_exit_reprice_minutes=_env_float("SOFT_DEFENSIVE_EXIT_REPRICE_MINUTES", 6.0, profile=name),
         enable_absolute_force_exit=False,
         absolute_force_exit_after_minutes=0.0,
         enable_controlled_loss_exit=False,

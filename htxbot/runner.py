@@ -217,6 +217,8 @@ class RunnerMixin:
             state = self._get_state(symbol)
             if state.sell_ladder_mode == "hard_stop_loss":
                 return
+            if self._maybe_apply_soft_defensive_exit(symbol, signal):
+                return
             if self._maybe_apply_controlled_loss_exit(symbol, signal):
                 return
             if self._maybe_apply_urgent_time_exit(symbol, signal):

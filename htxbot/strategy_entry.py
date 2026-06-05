@@ -633,7 +633,7 @@ class EntryStrategy:
             )
         return ""
 
-    def _averaging_signal_block_reason(self, signal: Optional[dict]) -> str:
+    def _averaging_signal_block_reason(self, signal: Optional[dict], state: Optional[TradeState] = None) -> str:
         if not signal:
             return "signal_missing"
         if not self.signal_cache.get("benchmark_ok"):
@@ -650,6 +650,10 @@ class EntryStrategy:
         if not signal.get("add_valid", False):
             return "ema_add_signal_invalid"
         if config.STRATEGY.ema_averaging_require_pullback_recovery and not signal.get("pullback_valid", False):
+            if state and state.average_stage <= 0 and signal.get("trigger_valid", False):
+                btc_context = self._soft_defensive_btc_against_context(signal)
+                if not btc_context.get("against") and str(btc_context.get("reason") or "") != "btc_return_unavailable":
+                    return ""
             return (
                 "ema_averaging_pullback_recovery_required;"
                 f"pullback_gap={self._safe_float(signal.get('pullback_recovery_gap'), 0.0):.6f};"
@@ -749,7 +753,7 @@ class EntryStrategy:
             return
         signal_for_quality = dict(signal or {})
         signal_for_quality["symbol"] = symbol
-        signal_block_reason = self._averaging_signal_block_reason(signal_for_quality)
+        signal_block_reason = self._averaging_signal_block_reason(signal_for_quality, state=state)
         if signal_block_reason:
             self._record_signal_analytics(
                 "averaging_checked",

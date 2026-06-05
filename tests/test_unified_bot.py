@@ -1244,6 +1244,11 @@ class UnifiedBotTests(unittest.TestCase):
                 "reason": "dust_position_close",
             }
             state.pending_close_reason = "dust_position_close"
+            state.soft_defensive_last_signal_timestamp = 1700000010.0
+            state.soft_defensive_consecutive_signals = 2
+            state.soft_defensive_exit_activated_at = 1700000020.0
+            state.soft_defensive_exit_last_rebuild_at = 1700000030.0
+            state.soft_defensive_exit_fraction = 0.33
 
             bot._save_state()
             reloaded = bot._load_state()[SYMBOL]
@@ -1251,6 +1256,11 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(reloaded.pending_close_order["id"], "12345")
             self.assertEqual(reloaded.pending_close_order["amount"], 2.0)
             self.assertEqual(reloaded.pending_close_reason, "dust_position_close")
+            self.assertAlmostEqual(reloaded.soft_defensive_last_signal_timestamp, 1700000010.0)
+            self.assertEqual(reloaded.soft_defensive_consecutive_signals, 2)
+            self.assertAlmostEqual(reloaded.soft_defensive_exit_activated_at, 1700000020.0)
+            self.assertAlmostEqual(reloaded.soft_defensive_exit_last_rebuild_at, 1700000030.0)
+            self.assertAlmostEqual(reloaded.soft_defensive_exit_fraction, 0.33)
             self.assertEqual(reloaded.lifecycle, PositionLifecycle.EXITING.value)
 
     def test_trade_state_lifecycle_is_derived_from_runtime_flags(self):
@@ -4442,6 +4452,7 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.2
+                state.average_stage = 1
                 state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
                 bot.exchange.ticker = {"bid": 9.75, "ask": 9.77, "last": 9.76}
                 signal = self.entry_signal(ts=1000)
@@ -4451,6 +4462,65 @@ class UnifiedBotTests(unittest.TestCase):
                 signal["pullback_valid"] = False
                 signal["pullback_recovery_gap"] = -0.002
                 signal["pullback_recovery_min_gap"] = 0.001
+
+                bot._maybe_place_average_buy(SYMBOL, signal)
+
+                self.assertFalse(state.entry_orders)
+                self.assertEqual(state.average_stage, 1)
+                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertIn("ema_averaging_pullback_recovery_required", rows[-1]["block_reason"])
+
+    def test_first_ema_averaging_can_bypass_pullback_when_btc_not_against(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(
+                config.STRATEGY,
+                ema_averaging_interval_hours=0.0,
+                ema_averaging_require_pullback_recovery=True,
+                averaging_drawdown_steps=(0.01, 0.02),
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 20.0
+                state.position_available = 20.0
+                state.entry_price = 10.2
+                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                bot.exchange.ticker = {"bid": 9.75, "ask": 9.77, "last": 9.76}
+                signal = self.entry_signal(ts=1000)
+                signal["entry_valid"] = False
+                signal["add_valid"] = True
+                signal["trigger_valid"] = True
+                signal["pullback_valid"] = False
+                signal["btc_return_30m"] = 0.0
+
+                bot._maybe_place_average_buy(SYMBOL, signal)
+
+                self.assertTrue(state.entry_orders)
+                self.assertEqual(state.average_stage, 1)
+
+    def test_first_ema_averaging_still_requires_pullback_when_btc_against(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(
+                config.STRATEGY,
+                ema_averaging_interval_hours=0.0,
+                ema_averaging_require_pullback_recovery=True,
+                averaging_drawdown_steps=(0.01, 0.02),
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 20.0
+                state.position_available = 20.0
+                state.entry_price = 10.2
+                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                bot.exchange.ticker = {"bid": 9.75, "ask": 9.77, "last": 9.76}
+                signal = self.entry_signal(ts=1000)
+                signal["entry_valid"] = False
+                signal["add_valid"] = True
+                signal["trigger_valid"] = True
+                signal["pullback_valid"] = False
+                signal["btc_return_30m"] = -0.005
 
                 bot._maybe_place_average_buy(SYMBOL, signal)
 
@@ -4947,6 +5017,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.05,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
@@ -4979,6 +5050,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=True,
                 hard_stop_loss_atr_multiplier=2.0,
                 hard_stop_loss_atr_max_pct=0.03,
@@ -4996,6 +5068,215 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(order["params"].get("stopLossPrice"), 97.0)
                 self.assertAlmostEqual(state.hard_stop_order["loss_rate"], 0.03)
 
+    def test_hard_stop_loss_uses_wider_emergency_floor(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.04,
+                hard_stop_loss_atr_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+
+                placed = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(placed)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["params"].get("stopLossPrice"), 96.0)
+                self.assertAlmostEqual(state.hard_stop_order["loss_rate"], 0.04)
+
+    def test_emergency_hard_stop_full_closes_only_after_wider_floor_is_crossed(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.04,
+                hard_stop_loss_atr_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+                bot.exchange.ticker = {"bid": 95.9, "ask": 96.0, "last": 95.95}
+                bot.exchange.reject_stop_loss_trigger_crossed = True
+
+                placed = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(placed)
+                self.assertEqual(state.sell_ladder_mode, "hard_stop_loss")
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["type"], "market")
+                self.assertEqual(order["side"], "sell")
+                self.assertEqual(order["amount"], 10.0)
+                self.assertTrue(order["params"].get("reduceOnly"))
+                self.assertNotIn("stopLossPrice", order["params"])
+
+    def test_soft_defensive_exit_waits_when_short_signal_is_alive_and_btc_not_against(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                soft_defensive_exit_enabled=True,
+                soft_defensive_exit_min_drawdown=0.02,
+                soft_defensive_exit_btc_against_return=0.003,
+                soft_defensive_exit_confirmations=2,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.position_side = "short"
+                state.entry_price = 10.0
+                state.sell_ladder_orders = [{"id": "tp", "side": "buy", "price": 9.9, "amount": 10.0}]
+                bot.exchange.ticker = {"bid": 10.29, "ask": 10.31, "last": 10.30}
+                signal = self.entry_signal(ts=1000)
+                signal["pullback_valid"] = False
+                signal["pullback_recovery_gap"] = 0.013
+                signal["btc_return_30m"] = -0.001
+
+                applied = bot._maybe_apply_soft_defensive_exit(SYMBOL, signal)
+
+                self.assertFalse(applied)
+                self.assertEqual(state.sell_ladder_mode, "normal")
+                self.assertEqual(state.sell_ladder_orders[0]["id"], "tp")
+                self.assertEqual(bot.exchange.created_orders, [])
+
+    def test_soft_defensive_exit_places_partial_after_signal_and_btc_confirm(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                soft_defensive_exit_enabled=True,
+                soft_defensive_exit_min_drawdown=0.02,
+                soft_defensive_exit_btc_against_return=0.003,
+                soft_defensive_exit_confirmations=2,
+                soft_defensive_exit_initial_fraction=0.33,
+                soft_defensive_exit_step_fraction=0.33,
+                soft_defensive_exit_max_fraction=1.0,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.position_side = "short"
+                state.entry_price = 10.0
+                state.sell_ladder_orders = [{"id": "tp", "side": "buy", "price": 9.9, "amount": 10.0}]
+                bot.exchange.ticker = {"bid": 10.29, "ask": 10.31, "last": 10.30}
+                signal = self.entry_signal(ts=1000)
+                signal["trigger_valid"] = False
+                signal["btc_return_30m"] = 0.006
+
+                waiting = bot._maybe_apply_soft_defensive_exit(SYMBOL, signal)
+                self.assertTrue(waiting)
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(state.soft_defensive_consecutive_signals, 1)
+
+                signal["ts"] = 1001
+                placed = bot._maybe_apply_soft_defensive_exit(SYMBOL, signal)
+
+                self.assertTrue(placed)
+                self.assertIn(("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertEqual(state.sell_ladder_mode, "soft_defensive_exit")
+                self.assertEqual(state.soft_defensive_consecutive_signals, 2)
+                self.assertAlmostEqual(state.soft_defensive_exit_fraction, 0.33)
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["type"], "limit")
+                self.assertEqual(order["side"], "buy")
+                self.assertEqual(order["amount"], 3.0)
+                self.assertTrue(order["params"].get("reduceOnly"))
+                self.assertEqual(state.sell_ladder_orders[0]["reason"], "soft_defensive_exit_partial")
+
+    def test_soft_defensive_wait_clears_freeze_when_signal_recovers_before_order(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                soft_defensive_exit_enabled=True,
+                soft_defensive_exit_min_drawdown=0.02,
+                soft_defensive_exit_btc_against_return=0.003,
+                soft_defensive_exit_confirmations=2,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.position_side = "short"
+                state.entry_price = 10.0
+                bot.exchange.ticker = {"bid": 10.29, "ask": 10.31, "last": 10.30}
+                signal = self.entry_signal(ts=1000)
+                signal["trigger_valid"] = False
+                signal["btc_return_30m"] = 0.006
+
+                waiting = bot._maybe_apply_soft_defensive_exit(SYMBOL, signal)
+
+                self.assertTrue(waiting)
+                self.assertTrue(state.frozen_no_more_buys)
+                self.assertEqual(state.soft_defensive_consecutive_signals, 1)
+
+                signal["ts"] = 1001
+                signal["trigger_valid"] = True
+                signal["btc_return_30m"] = -0.001
+                recovered = bot._maybe_apply_soft_defensive_exit(SYMBOL, signal)
+
+                self.assertFalse(recovered)
+                self.assertFalse(state.frozen_no_more_buys)
+                self.assertEqual(state.soft_defensive_consecutive_signals, 0)
+                self.assertEqual(bot.exchange.created_orders, [])
+
+    def test_soft_defensive_exit_clears_when_confluence_recovers(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                soft_defensive_exit_enabled=True,
+                soft_defensive_exit_min_drawdown=0.02,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.position_side = "short"
+                state.entry_price = 10.0
+                state.sell_ladder_mode = "soft_defensive_exit"
+                state.sell_ladder_orders = [
+                    {
+                        "id": "soft_exit",
+                        "side": "buy",
+                        "price": 10.3,
+                        "amount": 3.0,
+                        "mode": "soft_defensive_exit",
+                        "reason": "soft_defensive_exit_partial",
+                    }
+                ]
+                state.frozen_no_more_buys = True
+                bot.exchange.ticker = {"bid": 10.29, "ask": 10.31, "last": 10.30}
+                signal = self.entry_signal(ts=1002)
+                signal["btc_return_30m"] = -0.001
+
+                cleared = bot._maybe_apply_soft_defensive_exit(SYMBOL, signal)
+
+                self.assertTrue(cleared)
+                self.assertEqual(state.sell_ladder_mode, "normal")
+                self.assertFalse(state.sell_ladder_orders)
+                self.assertFalse(state.frozen_no_more_buys)
+                self.assertIn(("soft_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+
     def test_hard_stop_loss_mirrors_trigger_for_short_position(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
@@ -5003,6 +5284,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.05,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
@@ -5025,6 +5307,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
@@ -5064,6 +5347,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
@@ -5111,6 +5395,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
@@ -5152,6 +5437,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
@@ -5182,6 +5468,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
@@ -5214,6 +5501,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
@@ -5248,6 +5536,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
@@ -5336,9 +5625,18 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.controlled_loss_volatility_reprice_min_move_delta, 0.05)
             self.assertTrue(config.STRATEGY.hard_stop_loss_enabled)
             self.assertEqual(config.STRATEGY.hard_stop_loss_pct, 0.02)
+            self.assertEqual(config.STRATEGY.hard_stop_loss_min_emergency_pct, 0.04)
             self.assertTrue(config.STRATEGY.hard_stop_loss_atr_enabled)
             self.assertEqual(config.STRATEGY.hard_stop_loss_atr_multiplier, 2.0)
             self.assertEqual(config.STRATEGY.hard_stop_loss_atr_max_pct, 0.03)
+            self.assertTrue(config.STRATEGY.soft_defensive_exit_enabled)
+            self.assertEqual(config.STRATEGY.soft_defensive_exit_min_drawdown, 0.02)
+            self.assertEqual(config.STRATEGY.soft_defensive_exit_btc_against_return, 0.003)
+            self.assertEqual(config.STRATEGY.soft_defensive_exit_confirmations, 2)
+            self.assertEqual(config.STRATEGY.soft_defensive_exit_initial_fraction, 0.33)
+            self.assertEqual(config.STRATEGY.soft_defensive_exit_step_fraction, 0.33)
+            self.assertEqual(config.STRATEGY.soft_defensive_exit_max_fraction, 1.0)
+            self.assertEqual(config.STRATEGY.soft_defensive_exit_reprice_minutes, 6.0)
             self.assertFalse(config.EXTERNAL_PRICE_FEED.exit_adjustment_enabled)
 
     def test_ema_large_periods_convert_to_configured_timeframes(self):
@@ -6038,6 +6336,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
                 hard_stop_loss_pct=0.02,
+                hard_stop_loss_min_emergency_pct=0.0,
                 hard_stop_loss_atr_enabled=False,
                 enable_absolute_force_exit=False,
                 enable_controlled_loss_exit=False,

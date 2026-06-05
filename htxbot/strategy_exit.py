@@ -23,9 +23,11 @@ class ExitStrategy:
 
     def _hard_stop_loss_rate(self, signal: Optional[dict] = None) -> Tuple[float, str]:
         strategy = config.STRATEGY
-        fixed_pct = max(0.0, self._safe_float(strategy.hard_stop_loss_pct, 0.0))
+        configured_pct = max(0.0, self._safe_float(strategy.hard_stop_loss_pct, 0.0))
+        emergency_floor = max(0.0, self._safe_float(getattr(strategy, "hard_stop_loss_min_emergency_pct", 0.0), 0.0))
+        fixed_pct = max(configured_pct, emergency_floor)
         effective_pct = fixed_pct
-        parts = [f"fixed_pct={fixed_pct:.6f}"]
+        parts = [f"fixed_pct={fixed_pct:.6f};configured_pct={configured_pct:.6f};emergency_floor={emergency_floor:.6f}"]
         if strategy.hard_stop_loss_atr_enabled:
             atr_rate = max(0.0, self._safe_float((signal or {}).get("atr_rate"), 0.0))
             atr_multiplier = max(0.0, self._safe_float(strategy.hard_stop_loss_atr_multiplier, 0.0))
@@ -287,8 +289,15 @@ class ExitStrategy:
                 self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_flat_position")
             return False
 
+        if not config.STRATEGY.hard_stop_loss_enabled:
+            if state.hard_stop_order:
+                self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_disabled")
+            return False
+
         loss_rate, loss_rate_reason = self._hard_stop_loss_rate(signal)
         trigger_price = self._hard_stop_loss_trigger_price(symbol, state, loss_rate)
+        if state.sell_ladder_mode == "soft_defensive_exit" and state.sell_ladder_orders:
+            return False
         if state.sell_ladder_mode == "hard_stop_loss":
             return self._force_hard_stop_loss_market_close(
                 symbol,
@@ -296,11 +305,6 @@ class ExitStrategy:
                 loss_rate,
                 loss_rate_reason,
             )
-
-        if not config.STRATEGY.hard_stop_loss_enabled:
-            if state.hard_stop_order:
-                self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_disabled")
-            return False
 
         if not config.RUNTIME.reduce_only_enabled:
             self._log_event(
@@ -448,6 +452,401 @@ class ExitStrategy:
         )
         return True
 
+    def _soft_defensive_signal_broken_reason(self, signal: Optional[dict]) -> str:
+        if not signal:
+            return ""
+        if signal.get("stale"):
+            return ""
+        if not bool(signal.get("data_valid", signal.get("valid", False))):
+            return "signal_data_invalid"
+        if not self.signal_cache.get("benchmark_ok"):
+            return ""
+        if not self._signal_direction_valid(signal):
+            return "signal_direction_invalid"
+        if signal.get("macro_valid") is False:
+            return "signal_macro_invalid"
+        if signal.get("trigger_valid") is False:
+            return "signal_trigger_invalid"
+        return ""
+
+    def _soft_defensive_btc_against_context(self, signal: Optional[dict]) -> dict:
+        threshold = max(0.0, self._safe_float(config.STRATEGY.soft_defensive_exit_btc_against_return, 0.0))
+        if threshold <= 0:
+            return {"against": True, "btc_return": 0.0, "threshold": threshold, "reason": "threshold_disabled"}
+
+        btc_return = None
+        source = "missing"
+        if isinstance(signal, dict) and signal.get("btc_return_30m") is not None:
+            btc_return = self._safe_float(signal.get("btc_return_30m"), 0.0)
+            source = "signal_btc_return_30m"
+        else:
+            macro_context = self._macro_guard_context()
+            if macro_context.get("btc_return") is not None:
+                btc_return = self._safe_float(macro_context.get("btc_return"), 0.0)
+                source = "macro_btc_return"
+
+        if btc_return is None:
+            return {"against": False, "btc_return": 0.0, "threshold": threshold, "reason": "btc_return_unavailable"}
+
+        if config.POSITION_SIDE == "short":
+            against = btc_return >= threshold
+        else:
+            against = btc_return <= -threshold
+        reason = "btc_against_position" if against else "btc_not_against_position"
+        return {
+            "against": against,
+            "btc_return": btc_return,
+            "threshold": threshold,
+            "reason": f"{reason};source={source}",
+        }
+
+    def _soft_defensive_exit_context(
+        self,
+        symbol: str,
+        signal: Optional[dict],
+        reference_price: float = 0.0,
+    ) -> dict:
+        strategy = config.STRATEGY
+        state = self._get_state(symbol)
+        if not strategy.soft_defensive_exit_enabled:
+            return {"ok": False, "block_reason": "soft_defensive_exit_disabled"}
+        if state.position_size <= 0 or state.entry_price <= 0:
+            return {"ok": False, "block_reason": "no_position"}
+        if state.entry_orders:
+            return {"ok": False, "block_reason": "entry_orders_active"}
+        if state.sell_ladder_mode in {"hard_stop_loss", "absolute_force_exit", "controlled_loss_exit", "urgent_time_exit"}:
+            return {"ok": False, "block_reason": f"managed_exit_active:{state.sell_ladder_mode}"}
+
+        if reference_price <= 0:
+            reference_price, _ = self._fetch_reference_price(symbol)
+        if reference_price <= 0:
+            return {"ok": False, "block_reason": "reference_price_unavailable"}
+
+        drawdown = self._position_drawdown(state, reference_price)
+        min_drawdown = max(0.0, self._safe_float(strategy.soft_defensive_exit_min_drawdown, 0.0))
+        if drawdown + 1e-12 < min_drawdown:
+            return {
+                "ok": False,
+                "block_reason": f"drawdown_below_threshold;drawdown={drawdown:.6f};threshold={min_drawdown:.6f}",
+                "drawdown": drawdown,
+                "min_drawdown": min_drawdown,
+                "reference_price": reference_price,
+            }
+
+        signal_reason = self._soft_defensive_signal_broken_reason(signal)
+        if not signal_reason:
+            return {
+                "ok": False,
+                "block_reason": "core_signal_still_alive",
+                "drawdown": drawdown,
+                "min_drawdown": min_drawdown,
+                "reference_price": reference_price,
+            }
+
+        btc_context = self._soft_defensive_btc_against_context(signal)
+        if not btc_context.get("against"):
+            return {
+                "ok": False,
+                "block_reason": str(btc_context.get("reason") or "btc_not_against_position"),
+                "drawdown": drawdown,
+                "min_drawdown": min_drawdown,
+                "reference_price": reference_price,
+                "btc_return": self._safe_float(btc_context.get("btc_return"), 0.0),
+                "btc_threshold": self._safe_float(btc_context.get("threshold"), 0.0),
+            }
+
+        return {
+            "ok": True,
+            "signal_reason": signal_reason,
+            "btc_reason": str(btc_context.get("reason") or "btc_against_position"),
+            "drawdown": drawdown,
+            "min_drawdown": min_drawdown,
+            "reference_price": reference_price,
+            "btc_return": self._safe_float(btc_context.get("btc_return"), 0.0),
+            "btc_threshold": self._safe_float(btc_context.get("threshold"), 0.0),
+        }
+
+    def _reset_soft_defensive_state(self, state: TradeState):
+        state.soft_defensive_last_signal_timestamp = None
+        state.soft_defensive_consecutive_signals = 0
+        state.soft_defensive_exit_activated_at = None
+        state.soft_defensive_exit_last_rebuild_at = None
+        state.soft_defensive_exit_fraction = 0.0
+
+    def _update_soft_defensive_confirmation(self, state: TradeState, signal: Optional[dict], active: bool) -> int:
+        if not active:
+            state.soft_defensive_last_signal_timestamp = None
+            state.soft_defensive_consecutive_signals = 0
+            return 0
+
+        signal_ts = self._safe_float((signal or {}).get("ts"), 0.0)
+        if signal_ts <= 0:
+            required = max(1, int(config.STRATEGY.soft_defensive_exit_confirmations))
+            state.soft_defensive_consecutive_signals = max(state.soft_defensive_consecutive_signals, required)
+            return state.soft_defensive_consecutive_signals
+
+        previous_ts = self._safe_float(state.soft_defensive_last_signal_timestamp, 0.0)
+        if previous_ts <= 0:
+            state.soft_defensive_consecutive_signals = 1
+        elif abs(previous_ts - signal_ts) > 1e-9:
+            state.soft_defensive_consecutive_signals += 1
+        state.soft_defensive_last_signal_timestamp = signal_ts
+        return state.soft_defensive_consecutive_signals
+
+    def _soft_defensive_target_fraction(self, state: TradeState) -> float:
+        strategy = config.STRATEGY
+        max_fraction = self._clamp(strategy.soft_defensive_exit_max_fraction, 0.0, 1.0)
+        initial = self._clamp(strategy.soft_defensive_exit_initial_fraction, 0.0, max_fraction)
+        step = self._clamp(strategy.soft_defensive_exit_step_fraction, 0.0, max_fraction)
+        current = self._safe_float(state.soft_defensive_exit_fraction, 0.0)
+        if current <= 0:
+            return initial
+
+        reprice_minutes = max(0.0, self._safe_float(strategy.soft_defensive_exit_reprice_minutes, 0.0))
+        last_rebuild = self._safe_float(state.soft_defensive_exit_last_rebuild_at, 0.0)
+        if reprice_minutes > 0 and last_rebuild > 0 and time.time() - last_rebuild < reprice_minutes * 60.0:
+            return current
+        return min(max_fraction, current + step)
+
+    def _soft_defensive_close_contracts(self, symbol: str, state: TradeState, target_fraction: float, had_sell_ladder: bool) -> float:
+        closeable = self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder)
+        closeable = min(max(0.0, closeable), max(0.0, state.position_size))
+        if closeable <= 0:
+            return 0.0
+        target = max(0.0, state.position_size * self._clamp(target_fraction, 0.0, 1.0))
+        return self._amount_to_precision(symbol, min(closeable, target))
+
+    def _place_soft_defensive_exit_order(self, symbol: str, context: dict, target_fraction: float, rebuild: bool) -> bool:
+        state = self._get_state(symbol)
+        if not config.RUNTIME.reduce_only_enabled:
+            self._log_event(
+                "ERROR",
+                f"Soft defensive exit blocked for {symbol}: reduce-only disabled",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason="soft_defensive_exit_reduce_only_disabled",
+            )
+            return True
+
+        if state.entry_orders:
+            self._cancel_entry_orders(symbol, reason="soft_defensive_exit")
+            state = self._get_state(symbol)
+            if state.entry_orders:
+                return True
+
+        had_sell_ladder = bool(state.sell_ladder_orders)
+        if state.sell_ladder_orders:
+            self._cancel_sell_orders(symbol, reason="soft_defensive_exit_rebuild" if rebuild else "soft_defensive_exit")
+            state = self._get_state(symbol)
+            if state.sell_ladder_orders:
+                return True
+        if state.hard_stop_order:
+            self._cancel_hard_stop_order(symbol, reason="soft_defensive_exit")
+            state = self._get_state(symbol)
+            if state.hard_stop_order:
+                return True
+
+        contracts = self._soft_defensive_close_contracts(symbol, state, target_fraction, had_sell_ladder=had_sell_ladder)
+        if contracts <= 0:
+            self._mark_exit_ladder_waiting_for_closeable(
+                symbol,
+                "soft_defensive_exit",
+                (
+                    "soft_defensive_exit_no_closeable;"
+                    f"fraction={target_fraction:.4f};drawdown={self._safe_float(context.get('drawdown'), 0.0):.6f}"
+                ),
+            )
+            return True
+
+        price = self._aggressive_exit_limit_price(symbol)
+        if price <= 0:
+            self._log_event(
+                "WARNING",
+                f"Soft defensive exit delayed for {symbol}: reference price unavailable",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                amount=contracts,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason="soft_defensive_exit_price_unavailable",
+            )
+            return True
+
+        try:
+            order = self._create_one_way_order(
+                symbol=symbol,
+                order_type="limit",
+                side=config.EXIT_SIDE,
+                amount=contracts,
+                price=price,
+                reduce_only=True,
+            )
+            order_id = str(order.get("id") or "")
+        except Exception as exc:
+            self._log_event(
+                "ERROR",
+                f"Soft defensive reduce-only exit failed for {symbol}: {exc}",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                price=price,
+                amount=contracts,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=(
+                    "soft_defensive_exit_order_rejected;"
+                    f"fraction={target_fraction:.4f};"
+                    f"drawdown={self._safe_float(context.get('drawdown'), 0.0):.6f};"
+                    f"btc_return={self._safe_float(context.get('btc_return'), 0.0):.6f}"
+                ),
+                exception=exc,
+            )
+            return True
+
+        now = time.time()
+        state.sell_ladder_orders = [
+            {
+                "id": order_id,
+                "side": config.EXIT_SIDE,
+                "price": price,
+                "amount": contracts,
+                "created_at": now,
+                "stage": 1,
+                "mode": "soft_defensive_exit",
+                "soft_defensive": True,
+                "exit_scope": "position",
+                "reason": "soft_defensive_exit_partial",
+                "soft_defensive_fraction": target_fraction,
+                "soft_defensive_drawdown": self._safe_float(context.get("drawdown"), 0.0),
+                "soft_defensive_btc_return": self._safe_float(context.get("btc_return"), 0.0),
+            }
+        ]
+        state.sell_ladder_mode = "soft_defensive_exit"
+        state.sell_ladder_signature = (
+            f"soft_defensive_exit|direction={config.POSITION_SIDE}|side={config.EXIT_SIDE}|"
+            f"fraction={target_fraction:.8f}|amount={contracts:.12f}|price={price:.12f}|"
+            f"signal={context.get('signal_reason', '')}|btc={context.get('btc_reason', '')}"
+        )
+        state.soft_defensive_exit_fraction = target_fraction
+        state.soft_defensive_exit_activated_at = state.soft_defensive_exit_activated_at or now
+        state.soft_defensive_exit_last_rebuild_at = now
+        state.frozen_no_more_buys = True
+        self._refresh_active_side(state)
+        self._save_state()
+        self._log_event(
+            "WARNING",
+            f"Soft defensive partial exit placed for {symbol}: contracts={contracts} price={price}",
+            event="soft_defensive_exit_placed" if not rebuild else "soft_defensive_exit_rebuilt",
+            symbol=symbol,
+            side=config.EXIT_SIDE,
+            order_id=order_id,
+            price=price,
+            amount=contracts,
+            position_size=state.position_size,
+            entry_price=state.entry_price,
+            reason=(
+                "soft_defensive_exit_partial;"
+                f"fraction={target_fraction:.4f};"
+                f"confirmations={state.soft_defensive_consecutive_signals};"
+                f"drawdown={self._safe_float(context.get('drawdown'), 0.0):.6f};"
+                f"min_drawdown={self._safe_float(context.get('min_drawdown'), 0.0):.6f};"
+                f"btc_return={self._safe_float(context.get('btc_return'), 0.0):.6f};"
+                f"btc_threshold={self._safe_float(context.get('btc_threshold'), 0.0):.6f};"
+                f"signal={context.get('signal_reason', '')};"
+                f"btc_reason={context.get('btc_reason', '')}"
+            ),
+        )
+        return True
+
+    def _maybe_apply_soft_defensive_exit(self, symbol: str, signal: Optional[dict] = None) -> bool:
+        state = self._get_state(symbol)
+        if state.position_size <= 0 or state.entry_price <= 0:
+            return False
+
+        had_soft_defensive_wait = bool(
+            state.soft_defensive_consecutive_signals
+            or state.soft_defensive_last_signal_timestamp is not None
+            or state.soft_defensive_exit_fraction > 0
+        )
+        reference_price, _ = self._fetch_reference_price(symbol)
+        context = self._soft_defensive_exit_context(symbol, signal, reference_price=reference_price)
+        active = bool(context.get("ok"))
+        confirmations = self._update_soft_defensive_confirmation(state, signal, active)
+        required = max(1, int(config.STRATEGY.soft_defensive_exit_confirmations))
+
+        if not active:
+            if state.sell_ladder_mode == "soft_defensive_exit":
+                if state.sell_ladder_orders:
+                    self._cancel_sell_orders(symbol, reason="soft_defensive_exit_recovered")
+                    state = self._get_state(symbol)
+                    if state.sell_ladder_orders:
+                        return True
+                state.sell_ladder_mode = "normal"
+                state.sell_ladder_signature = ""
+                state.frozen_no_more_buys = False
+                self._reset_soft_defensive_state(state)
+                self._refresh_active_side(state)
+                self._save_state()
+                self._log_event(
+                    "INFO",
+                    f"Soft defensive exit cleared for {symbol}: signal/BTC confluence recovered",
+                    event="soft_defensive_exit_cleared",
+                    symbol=symbol,
+                    side=config.EXIT_SIDE,
+                    position_size=state.position_size,
+                    entry_price=state.entry_price,
+                    reason=str(context.get("block_reason") or "soft_defensive_exit_recovered"),
+                )
+                return True
+            if had_soft_defensive_wait:
+                signal_valid = bool(signal and signal.get("valid") and self.signal_cache.get("benchmark_ok"))
+                if signal_valid and not self._is_managed_exit_mode(state.sell_ladder_mode) and not state.hard_stop_order:
+                    state.frozen_no_more_buys = False
+                self._reset_soft_defensive_state(state)
+                self._refresh_active_side(state)
+                self._save_state()
+            return False
+
+        if confirmations < required:
+            state.frozen_no_more_buys = True
+            self._refresh_active_side(state)
+            self._save_state()
+            self._log_event(
+                "DEBUG",
+                f"Soft defensive exit waiting for confirmation for {symbol}: {confirmations}/{required}",
+                event="soft_defensive_exit_wait",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason=(
+                    "soft_defensive_exit_wait_confirmation;"
+                    f"confirmations={confirmations};required={required};"
+                    f"drawdown={self._safe_float(context.get('drawdown'), 0.0):.6f};"
+                    f"btc_return={self._safe_float(context.get('btc_return'), 0.0):.6f};"
+                    f"signal={context.get('signal_reason', '')};"
+                    f"btc_reason={context.get('btc_reason', '')}"
+                ),
+            )
+            return True
+
+        if state.sell_ladder_mode == "soft_defensive_exit" and state.sell_ladder_orders:
+            desired_fraction = self._soft_defensive_target_fraction(state)
+            current_fraction = self._safe_float(state.soft_defensive_exit_fraction, 0.0)
+            if desired_fraction <= current_fraction + 1e-12:
+                self._save_state()
+                return True
+            return self._place_soft_defensive_exit_order(symbol, context, desired_fraction, rebuild=True)
+
+        target_fraction = self._soft_defensive_target_fraction(state)
+        if target_fraction <= 0:
+            return False
+        return self._place_soft_defensive_exit_order(symbol, context, target_fraction, rebuild=False)
+
     def _sell_ladder_markups(self, mode: str = "normal") -> Tuple[float, ...]:
         if mode == "breakeven":
             return tuple(0.0 for _ in config.STRATEGY.ema_breakeven_exit_fractions)
@@ -464,7 +863,7 @@ class ExitStrategy:
         return mode == "breakeven"
 
     def _is_managed_exit_mode(self, mode: str) -> bool:
-        return self._is_time_exit_mode(mode) or mode in {"account_unload", "controlled_loss_exit", "urgent_time_exit"}
+        return self._is_time_exit_mode(mode) or mode in {"account_unload", "controlled_loss_exit", "urgent_time_exit", "soft_defensive_exit"}
 
     def _position_initial_notional(self, symbol: str, state: Optional[TradeState], fallback_contracts: float, fallback_price: float) -> float:
         if not state:
@@ -813,6 +1212,10 @@ class ExitStrategy:
 
         if mode == "account_unload":
             context["ladder_name"] = "account_unload"
+            return [{"fraction": 1.0, "markup": 0.0, "runner": False}], context
+
+        if mode == "soft_defensive_exit":
+            context["ladder_name"] = "soft_defensive_exit"
             return [{"fraction": 1.0, "markup": 0.0, "runner": False}], context
 
         if mode == "controlled_loss_exit":

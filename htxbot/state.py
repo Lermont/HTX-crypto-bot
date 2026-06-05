@@ -63,6 +63,7 @@ class StateMixin:
         "exit_runner_peak_price",
         "exit_runner_bottom_price",
         "exit_runner_contracts",
+        "soft_defensive_exit_fraction",
         "entry_rs30",
         "entry_rs60",
         "entry_ema30",
@@ -88,11 +89,15 @@ class StateMixin:
         "last_ema_strategy_signal_timestamp",
         "breakeven_activated_at",
         "exit_runner_activated_at",
+        "soft_defensive_last_signal_timestamp",
+        "soft_defensive_exit_activated_at",
+        "soft_defensive_exit_last_rebuild_at",
         "last_account_unload_at",
     }
     _STATE_INT_FIELDS = {
         "buy_stage",
         "average_stage",
+        "soft_defensive_consecutive_signals",
         "account_unload_count",
     }
     _STATE_BOOL_FIELDS = {
@@ -539,7 +544,7 @@ class StateMixin:
             return PositionLifecycle.BREAKEVEN.value
         if getattr(state, "pending_close_order", None):
             return PositionLifecycle.EXITING.value
-        if mode in {"account_unload", "controlled_loss_exit", "urgent_time_exit"}:
+        if mode in {"account_unload", "controlled_loss_exit", "urgent_time_exit", "soft_defensive_exit"}:
             return PositionLifecycle.EXITING.value
         return PositionLifecycle.OPEN.value
 
