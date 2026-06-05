@@ -288,6 +288,14 @@ def relative_strength_context(
     return {"rs30": rs30, "rs60": rs60, "btc_return_30m": btc_return}
 
 
+def ema_pair_side(fast: float, slow: float) -> str:
+    if fast > slow:
+        return "long"
+    if fast < slow:
+        return "short"
+    return "neutral"
+
+
 def ema_signal_direction_metrics(
     position_side: str,
     current_close: float,
@@ -307,8 +315,17 @@ def ema_signal_direction_metrics(
     btc_long_min_return_30m: float,
     btc_short_max_return_30m: float,
 ) -> dict:
+    profile_side = str(position_side).lower()
+    macro_side = ema_pair_side(ema_macro_fast, ema_macro_slow)
+    trigger_side = ema_pair_side(ema_trigger_fast, ema_trigger_slow)
+    ema_side = macro_side if macro_side == trigger_side else "neutral"
+
     if current_close <= 0:
         return {
+            "ema_macro_side": macro_side,
+            "ema_trigger_side": trigger_side,
+            "ema_side": "neutral",
+            "ema_side_valid": False,
             "macro_valid": False,
             "pullback_valid": bool(pullback_valid),
             "trigger_valid": False,
@@ -323,7 +340,7 @@ def ema_signal_direction_metrics(
             "add_valid": False,
         }
 
-    if str(position_side).lower() == "short":
+    if profile_side == "short":
         macro_valid = ema_macro_fast < ema_macro_slow
         trigger_valid = ema_trigger_fast < ema_trigger_slow
         rs_confirm_valid = (not use_rs_confirmation) or rs60 <= short_max_rs60
@@ -351,6 +368,10 @@ def ema_signal_direction_metrics(
     entry_valid = bool(macro_valid and pullback_valid and trigger_valid and rs_confirm_valid and btc_entry_valid)
     add_valid = bool(macro_valid and (trigger_valid or pullback_valid))
     return {
+        "ema_macro_side": macro_side,
+        "ema_trigger_side": trigger_side,
+        "ema_side": ema_side,
+        "ema_side_valid": bool(ema_side == profile_side),
         "macro_valid": macro_valid,
         "pullback_valid": bool(pullback_valid),
         "trigger_valid": trigger_valid,
@@ -652,6 +673,7 @@ __all__ = [
     "btc_risk_context",
     "choppiness_context",
     "daily_volatility_context",
+    "ema_pair_side",
     "ema_pullback_recovery_context",
     "ema_signal_direction_metrics",
     "gold_btc_ratio_return",

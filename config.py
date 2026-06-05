@@ -269,6 +269,7 @@ class StrategySettings:
     ema_pullback_recovery_lookback_minutes: int
     ema_pullback_recovery_max_cross_age_minutes: int
     ema_pullback_recovery_gap: float
+    ema_entry_require_pullback_recovery: bool
     ema_chop_filter_enabled: bool
     ema_chop_period: int
     ema_chop_max: float
@@ -944,9 +945,9 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         market_load_retries=_env_int("MARKET_LOAD_RETRIES", 4, profile=name),
         markets_cache_max_age_sec=_env_int("MARKETS_CACHE_MAX_AGE_SEC", 7 * 24 * 60 * 60, profile=name),
     )
-    ema_trigger_timeframe = _env("EMA_TRIGGER_TIMEFRAME", profile=name) or "1m"
-    ema_macro_timeframe = _env("EMA_MACRO_TIMEFRAME", profile=name) or "1d"
-    ema_pullback_timeframe = _env("EMA_PULLBACK_TIMEFRAME", profile=name) or "4h"
+    ema_trigger_timeframe = _env("EMA_TRIGGER_TIMEFRAME", profile=name) or "5m"
+    ema_macro_timeframe = _env("EMA_MACRO_TIMEFRAME", profile=name) or "1h"
+    ema_pullback_timeframe = _env("EMA_PULLBACK_TIMEFRAME", profile=name) or ema_trigger_timeframe
 
     signals = SignalSettings(
         timeframe=ema_trigger_timeframe,
@@ -1061,13 +1062,14 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_macro_timeframe=ema_macro_timeframe,
         ema_pullback_timeframe=ema_pullback_timeframe,
         ema_trigger_timeframe=ema_trigger_timeframe,
-        ema_macro_fast_minutes=_env_int("EMA_MACRO_FAST_MINUTES", 36000, profile=name),
-        ema_macro_slow_minutes=_env_int("EMA_MACRO_SLOW_MINUTES", 72000, profile=name),
-        ema_pullback_fast_minutes=_env_int("EMA_PULLBACK_FAST_MINUTES", 1440, profile=name),
-        ema_pullback_slow_minutes=_env_int("EMA_PULLBACK_SLOW_MINUTES", 2880, profile=name),
-        ema_pullback_recovery_lookback_minutes=_env_int("EMA_PULLBACK_RECOVERY_LOOKBACK_MINUTES", 2880, profile=name),
-        ema_pullback_recovery_max_cross_age_minutes=_env_int("EMA_PULLBACK_RECOVERY_MAX_CROSS_AGE_MINUTES", 1440, profile=name),
+        ema_macro_fast_minutes=_env_int("EMA_MACRO_FAST_MINUTES", 2880, profile=name),
+        ema_macro_slow_minutes=_env_int("EMA_MACRO_SLOW_MINUTES", 7200, profile=name),
+        ema_pullback_fast_minutes=_env_int("EMA_PULLBACK_FAST_MINUTES", 120, profile=name),
+        ema_pullback_slow_minutes=_env_int("EMA_PULLBACK_SLOW_MINUTES", 360, profile=name),
+        ema_pullback_recovery_lookback_minutes=_env_int("EMA_PULLBACK_RECOVERY_LOOKBACK_MINUTES", 720, profile=name),
+        ema_pullback_recovery_max_cross_age_minutes=_env_int("EMA_PULLBACK_RECOVERY_MAX_CROSS_AGE_MINUTES", 180, profile=name),
         ema_pullback_recovery_gap=_env_float("EMA_PULLBACK_RECOVERY_GAP", 0.001, profile=name),
+        ema_entry_require_pullback_recovery=_env_bool("EMA_ENTRY_REQUIRE_PULLBACK_RECOVERY", False, profile=name),
         ema_chop_filter_enabled=_env_bool("EMA_CHOP_FILTER_ENABLED", True, profile=name),
         ema_chop_period=max(2, _env_int("EMA_CHOP_PERIOD", 14, profile=name)),
         ema_chop_max=_env_float("EMA_CHOP_MAX", 61.8, profile=name),
@@ -1090,8 +1092,8 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
             0.10,
             min(1.0, _env_float("EMA_VOLUME_PROFILE_VALUE_AREA", 0.70, profile=name)),
         ),
-        ema_trigger_fast_minutes=_env_int("EMA_TRIGGER_FAST_MINUTES", 50, profile=name),
-        ema_trigger_slow_minutes=_env_int("EMA_TRIGGER_SLOW_MINUTES", 100, profile=name),
+        ema_trigger_fast_minutes=_env_int("EMA_TRIGGER_FAST_MINUTES", 120, profile=name),
+        ema_trigger_slow_minutes=_env_int("EMA_TRIGGER_SLOW_MINUTES", 360, profile=name),
         ema_use_rs_confirmation=_env_bool("EMA_USE_RS_CONFIRMATION", True, profile=name),
         ema_long_min_rs60=_env_float("EMA_LONG_MIN_RS60", 0.0, profile=name),
         ema_short_max_rs60=_env_float("EMA_SHORT_MAX_RS60", 0.0, profile=name),

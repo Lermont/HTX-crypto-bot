@@ -628,6 +628,9 @@ class UnifiedBotTests(unittest.TestCase):
 
     def ema_test_strategy(self, **overrides):
         defaults = {
+            "ema_macro_timeframe": "1m",
+            "ema_pullback_timeframe": "1m",
+            "ema_trigger_timeframe": "1m",
             "ema_macro_fast_minutes": 10,
             "ema_macro_slow_minutes": 20,
             "ema_pullback_fast_minutes": 3,
@@ -3725,6 +3728,17 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertIn("pullback_valid=0", rows[-1]["block_reason"])
             self.assertIn("rs_confirm_valid=0", rows[-1]["block_reason"])
 
+    def test_entry_quality_cannot_override_raw_entry_invalid(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signal = self.entry_signal(score=0.50, rs30=0.10, rs60=0.20)
+            signal["entry_valid"] = False
+
+            block_reason = bot._entry_signal_quality_block_reason(signal)
+
+            self.assertIn("penalty_ema_entry", block_reason)
+            self.assertFalse(bot._is_entry_signal_valid(signal))
+
     def test_ema_entry_signal_accepts_aligned_volume_spike_confirmation(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = self.ema_test_strategy(
@@ -3876,9 +3890,40 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(signal["direction_valid"])
                 self.assertTrue(signal["valid"])
                 self.assertFalse(signal["pullback_valid"])
-                self.assertFalse(signal["raw_entry_valid"])
+                self.assertFalse(signal["entry_pullback_required"])
+                self.assertTrue(signal["entry_pullback_gate_valid"])
+                self.assertTrue(signal["raw_entry_valid"])
                 self.assertTrue(signal["entry_valid"])
                 self.assertLess(signal["entry_quality_budget_multiplier"], 1.0)
+
+    def test_ema_pullback_recovery_can_be_required_for_initial_entry(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy(
+                ema_pullback_recovery_max_cross_age_minutes=2,
+                ema_entry_require_pullback_recovery=True,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                closes = (
+                    list(range(100, 201, 2))
+                    + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196, 198, 200]
+                )
+                benchmark_closes = [100.0] * len(closes)
+
+                signal = bot._build_signal_from_closes(
+                    closes,
+                    benchmark_closes,
+                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    latest_ts=1000,
+                )
+
+                self.assertIsNotNone(signal)
+                self.assertTrue(signal["entry_pullback_required"])
+                self.assertFalse(signal["pullback_valid"])
+                self.assertFalse(signal["entry_pullback_gate_valid"])
+                self.assertFalse(signal["raw_entry_valid"])
+                self.assertFalse(signal["entry_valid"])
+                self.assertIn("penalty_ema_entry", bot._entry_signal_quality_block_reason(signal))
 
     def test_signal_build_applies_macro_budget_and_ladder_multipliers(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -4013,6 +4058,46 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertIsNotNone(signal)
                 self.assertFalse(signal["macro_valid"])
                 self.assertFalse(signal["entry_valid"])
+
+    def test_ema_router_routes_same_market_to_one_profile_side(self):
+        closes = list(range(200, 99, -2)) + [102, 105, 108, 111, 114, 117, 120, 116, 112, 108, 104]
+        benchmark_closes = [100.0] * len(closes)
+
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy()
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+
+                long_signal = bot._build_signal_from_closes(
+                    closes,
+                    benchmark_closes,
+                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    latest_ts=1000,
+                )
+
+                self.assertIsNotNone(long_signal)
+                self.assertEqual(long_signal["ema_side"], "short")
+                self.assertFalse(long_signal["ema_side_valid"])
+                self.assertFalse(long_signal["direction_valid"])
+                self.assertFalse(long_signal["entry_valid"])
+
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            strategy = self.ema_test_strategy()
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+
+                short_signal = bot._build_signal_from_closes(
+                    closes,
+                    benchmark_closes,
+                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    latest_ts=1000,
+                )
+
+                self.assertIsNotNone(short_signal)
+                self.assertEqual(short_signal["ema_side"], "short")
+                self.assertTrue(short_signal["ema_side_valid"])
+                self.assertTrue(short_signal["direction_valid"])
+                self.assertTrue(short_signal["entry_valid"])
 
     def test_daily_volatility_falls_back_to_neutral_without_history(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5045,9 +5130,12 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(errors[-1]["error_code"], "1492")
                 self.assertIn("Amount of Reduce Only order exceeds", errors[-1]["message"])
 
-    def test_ema_2d_default_is_2880_minutes(self):
+    def test_ema_pullback_default_matches_fast_trigger_router(self):
         with config.use_profile("long"):
-            self.assertEqual(config.STRATEGY.ema_pullback_slow_minutes, 2880)
+            self.assertEqual(config.STRATEGY.ema_pullback_timeframe, "5m")
+            self.assertEqual(config.STRATEGY.ema_pullback_fast_minutes, 120)
+            self.assertEqual(config.STRATEGY.ema_pullback_slow_minutes, 360)
+            self.assertFalse(config.STRATEGY.ema_entry_require_pullback_recovery)
 
     def test_ema_live_launch_averaging_defaults_are_conservative(self):
         with config.use_profile("long"):
@@ -5114,16 +5202,18 @@ class UnifiedBotTests(unittest.TestCase):
             bot = self.make_bot(Path(raw_tmp))
             periods = bot._ema_periods(converted=True)
 
-            self.assertEqual(config.STRATEGY.ema_macro_timeframe, "1d")
-            self.assertEqual(config.STRATEGY.ema_pullback_timeframe, "4h")
-            self.assertEqual(periods["ema_macro_fast"], 25)
-            self.assertEqual(periods["ema_macro_slow"], 50)
-            self.assertEqual(periods["ema_pullback_fast"], 6)
-            self.assertEqual(periods["ema_pullback_slow"], 12)
-            self.assertEqual(periods["ema_trigger_fast"], 50)
-            self.assertEqual(periods["ema_trigger_slow"], 100)
-            self.assertEqual(bot._ema_pullback_recovery_windows(converted=True), (12, 6))
-            self.assertEqual(bot._ema_required_history("pullback", converted=True), 24)
+            self.assertEqual(config.STRATEGY.ema_macro_timeframe, "1h")
+            self.assertEqual(config.STRATEGY.ema_pullback_timeframe, "5m")
+            self.assertEqual(config.STRATEGY.ema_trigger_timeframe, "5m")
+            self.assertFalse(config.STRATEGY.ema_entry_require_pullback_recovery)
+            self.assertEqual(periods["ema_macro_fast"], 48)
+            self.assertEqual(periods["ema_macro_slow"], 120)
+            self.assertEqual(periods["ema_pullback_fast"], 24)
+            self.assertEqual(periods["ema_pullback_slow"], 72)
+            self.assertEqual(periods["ema_trigger_fast"], 24)
+            self.assertEqual(periods["ema_trigger_slow"], 72)
+            self.assertEqual(bot._ema_pullback_recovery_windows(converted=True), (144, 36))
+            self.assertEqual(bot._ema_required_history("pullback", converted=True), 216)
 
     def test_rs_windows_convert_to_trigger_timeframe(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5196,41 +5286,41 @@ class UnifiedBotTests(unittest.TestCase):
     def test_signal_update_fetches_higher_timeframe_ema_history(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
-            trigger_closes = [100.0 + index * 0.1 for index in range(120)]
-            macro_closes = [100.0 + index for index in range(60)]
-            pullback_closes = [100.0 + index for index in range(18)] + [116.0, 113.0, 110.0, 107.0, 104.0, 101.0, 98.0, 102.0, 106.0, 110.0, 114.0, 118.0]
+            trigger_closes = (
+                [100.0 + index * 0.20 for index in range(220)]
+                + [144.0 - index * 0.60 for index in range(35)]
+                + [123.0 + index * 1.00 for index in range(45)]
+            )
+            macro_closes = [100.0 + index for index in range(140)]
 
             trigger_start = 1_760_000_000_000
-            trigger_latest = trigger_start + (len(trigger_closes) - 1) * 60 * 1000
-            macro_start = trigger_latest - (len(macro_closes) - 1) * 24 * 60 * 60 * 1000
-            pullback_start = trigger_latest - (len(pullback_closes) - 1) * 4 * 60 * 60 * 1000
+            trigger_latest = trigger_start + (len(trigger_closes) - 1) * 5 * 60 * 1000
+            macro_start = trigger_latest - (len(macro_closes) - 1) * 60 * 60 * 1000
 
             trigger_volumes = [1.0] * (len(trigger_closes) - 5) + [3.0] * 5
-            bot.exchange.ohlcv[(SYMBOL, "1m")] = ohlcv_series(
+            bot.exchange.ohlcv[(SYMBOL, "5m")] = ohlcv_series(
                 trigger_closes,
-                60,
+                5 * 60,
                 trigger_start,
                 volumes=trigger_volumes,
             )
-            bot.exchange.ohlcv[(SYMBOL, "1d")] = ohlcv_series(macro_closes, 24 * 60 * 60, macro_start)
-            bot.exchange.ohlcv[(SYMBOL, "4h")] = ohlcv_series(pullback_closes, 4 * 60 * 60, pullback_start)
+            bot.exchange.ohlcv[(SYMBOL, "1h")] = ohlcv_series(macro_closes, 60 * 60, macro_start)
 
             updated = bot._update_signal_cache_if_needed()
 
             self.assertTrue(updated)
             signal = bot.signal_cache["symbols"][SYMBOL]
             self.assertTrue(signal["entry_valid"])
-            self.assertTrue(signal["pullback_valid"])
-            self.assertLessEqual(signal["pullback_cross_age_candles"], 6)
-            self.assertEqual(signal["ema_macro_timeframe"], "1d")
-            self.assertEqual(signal["ema_pullback_timeframe"], "4h")
+            self.assertEqual(signal["ema_side"], "long")
+            self.assertEqual(signal["ema_macro_timeframe"], "1h")
+            self.assertEqual(signal["ema_pullback_timeframe"], "5m")
+            self.assertEqual(signal["ema_trigger_timeframe"], "5m")
             limits = {}
             for call in bot.exchange.ohlcv_calls:
                 timeframe = call["timeframe"]
                 limits[timeframe] = max(limits.get(timeframe, 0), int(call["limit"] or 0))
-            self.assertLess(limits["1d"], 100)
-            self.assertLess(limits["4h"], 30)
-            self.assertLess(limits["1m"], 2000)
+            self.assertLess(limits["1h"], 200)
+            self.assertLessEqual(limits["5m"], 1500)
 
     def test_signal_update_fetches_volume_profile_history(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

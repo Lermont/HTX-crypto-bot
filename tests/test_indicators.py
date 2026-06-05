@@ -200,6 +200,10 @@ class SignalMathTests(unittest.TestCase):
 
         self.assertTrue(long_metrics["entry_valid"])
         self.assertTrue(short_metrics["entry_valid"])
+        self.assertEqual(long_metrics["ema_side"], "long")
+        self.assertEqual(short_metrics["ema_side"], "short")
+        self.assertTrue(long_metrics["ema_side_valid"])
+        self.assertTrue(short_metrics["ema_side_valid"])
 
         # Multiplicative score logic:
         # Long base_trend = 0.05 (macro gap) + 0.02 (trigger gap) = 0.07
@@ -218,6 +222,33 @@ class SignalMathTests(unittest.TestCase):
 
         self.assertTrue(long_metrics["add_valid"])
         self.assertTrue(short_metrics["add_valid"])
+
+    def test_ema_signal_direction_metrics_return_neutral_on_timeframe_conflict(self):
+        metrics = ema_signal_direction_metrics(
+            "long",
+            current_close=100.0,
+            ema_macro_fast=105.0,
+            ema_macro_slow=100.0,
+            ema_pullback_fast=102.0,
+            ema_pullback_slow=101.0,
+            ema_trigger_fast=97.0,
+            ema_trigger_slow=101.0,
+            pullback_valid=True,
+            rs60=0.02,
+            btc_return_30m=0.0,
+            use_rs_confirmation=False,
+            long_min_rs60=0.0,
+            short_max_rs60=0.0,
+            use_btc_risk_filter=False,
+            btc_long_min_return_30m=0.0,
+            btc_short_max_return_30m=0.0,
+        )
+
+        self.assertEqual(metrics["ema_macro_side"], "long")
+        self.assertEqual(metrics["ema_trigger_side"], "short")
+        self.assertEqual(metrics["ema_side"], "neutral")
+        self.assertFalse(metrics["ema_side_valid"])
+        self.assertFalse(metrics["entry_valid"])
 
     def test_ema_signal_direction_metrics_block_invalid_filters(self):
         metrics = ema_signal_direction_metrics(

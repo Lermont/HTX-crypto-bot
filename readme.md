@@ -30,16 +30,16 @@ Default EMA map:
 
 | Layer | Config | Timeframe | Effective EMA |
 |---|---:|---:|---:|
-| Macro fast | `EMA_MACRO_FAST_MINUTES=36000` | `1d` | EMA25 |
-| Macro slow | `EMA_MACRO_SLOW_MINUTES=72000` | `1d` | EMA50 |
-| Pullback fast | `EMA_PULLBACK_FAST_MINUTES=1440` | `4h` | EMA6 |
-| Pullback slow | `EMA_PULLBACK_SLOW_MINUTES=2880` | `4h` | EMA12 |
-| Trigger fast | `EMA_TRIGGER_FAST_MINUTES=50` | `1m` | EMA50 |
-| Trigger slow | `EMA_TRIGGER_SLOW_MINUTES=100` | `1m` | EMA100 |
+| Macro fast | `EMA_MACRO_FAST_MINUTES=2880` | `1h` | EMA48 |
+| Macro slow | `EMA_MACRO_SLOW_MINUTES=7200` | `1h` | EMA120 |
+| Pullback fast | `EMA_PULLBACK_FAST_MINUTES=120` | `5m` | EMA24 |
+| Pullback slow | `EMA_PULLBACK_SLOW_MINUTES=360` | `5m` | EMA72 |
+| Trigger fast | `EMA_TRIGGER_FAST_MINUTES=120` | `5m` | EMA24 |
+| Trigger slow | `EMA_TRIGGER_SLOW_MINUTES=360` | `5m` | EMA72 |
 
-Long entry requires the macro and trigger EMAs to point up, the pullback layer to recover upward after a recent pullback, optional RS confirmation, and a BTC 30m filter that is not too negative.
+Long entry requires the macro and trigger EMAs to point up, optional RS confirmation, and a BTC 30m filter that is not too negative. Pullback recovery is a quality penalty by default; set `EMA_ENTRY_REQUIRE_PULLBACK_RECOVERY=true` to make it a hard entry gate again.
 
-Short entry mirrors the same logic downward: macro and trigger EMAs point down, pullback layer recovers downward after a recent bounce, optional RS confirmation, and BTC 30m is not too positive.
+Short entry mirrors the same logic downward: macro and trigger EMAs point down, optional RS confirmation, and BTC 30m is not too positive. The same pullback-recovery switch applies symmetrically.
 
 Signal flags are split by use: `valid` means the symbol has a coherent directional signal, `entry_valid` means a full new-entry gate passed, and `add_valid` is the stricter health gate used for averaging an already open position. The default EMA entry gate also requires non-choppy trigger candles and recent volume confirmation, so a late EMA cross alone no longer opens or averages a position. Signal scoring logic uses a multiplicative hybrid model where negative indicators apply penalty multipliers.
 
@@ -129,15 +129,18 @@ EMA_MAX_TOTAL_MARGIN_FRACTION=0.50
 Signal periods:
 
 ```dotenv
-EMA_MACRO_TIMEFRAME=1d
-EMA_PULLBACK_TIMEFRAME=4h
-EMA_TRIGGER_TIMEFRAME=1m
-EMA_MACRO_FAST_MINUTES=36000
-EMA_MACRO_SLOW_MINUTES=72000
-EMA_PULLBACK_FAST_MINUTES=1440
-EMA_PULLBACK_SLOW_MINUTES=2880
-EMA_TRIGGER_FAST_MINUTES=50
-EMA_TRIGGER_SLOW_MINUTES=100
+EMA_MACRO_TIMEFRAME=1h
+EMA_PULLBACK_TIMEFRAME=5m
+EMA_TRIGGER_TIMEFRAME=5m
+EMA_MACRO_FAST_MINUTES=2880
+EMA_MACRO_SLOW_MINUTES=7200
+EMA_PULLBACK_FAST_MINUTES=120
+EMA_PULLBACK_SLOW_MINUTES=360
+EMA_PULLBACK_RECOVERY_LOOKBACK_MINUTES=720
+EMA_PULLBACK_RECOVERY_MAX_CROSS_AGE_MINUTES=180
+EMA_ENTRY_REQUIRE_PULLBACK_RECOVERY=false
+EMA_TRIGGER_FAST_MINUTES=120
+EMA_TRIGGER_SLOW_MINUTES=360
 ```
 
 Entry ladder:

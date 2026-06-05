@@ -27,29 +27,29 @@ HTX Futures EMA Pullback Bot — Python-бот для автоматическо
 
 | Слой | Параметр | Таймфрейм | Фактическая EMA |
 |---|---:|---:|---:|
-| Macro fast | `EMA_MACRO_FAST_MINUTES=36000` | `1d` | EMA25 |
-| Macro slow | `EMA_MACRO_SLOW_MINUTES=72000` | `1d` | EMA50 |
-| Pullback fast | `EMA_PULLBACK_FAST_MINUTES=1440` | `4h` | EMA6 |
-| Pullback slow | `EMA_PULLBACK_SLOW_MINUTES=2880` | `4h` | EMA12 |
-| Trigger fast | `EMA_TRIGGER_FAST_MINUTES=50` | `1m` | EMA50 |
-| Trigger slow | `EMA_TRIGGER_SLOW_MINUTES=100` | `1m` | EMA100 |
+| Macro fast | `EMA_MACRO_FAST_MINUTES=2880` | `1h` | EMA48 |
+| Macro slow | `EMA_MACRO_SLOW_MINUTES=7200` | `1h` | EMA120 |
+| Pullback fast | `EMA_PULLBACK_FAST_MINUTES=120` | `5m` | EMA24 |
+| Pullback slow | `EMA_PULLBACK_SLOW_MINUTES=360` | `5m` | EMA72 |
+| Trigger fast | `EMA_TRIGGER_FAST_MINUTES=120` | `5m` | EMA24 |
+| Trigger slow | `EMA_TRIGGER_SLOW_MINUTES=360` | `5m` | EMA72 |
 
 Long-вход требует:
 
 ```text
-EMA25D > EMA50D
-EMA1D восстановилась выше EMA2D после недавнего отката
-EMA50 > EMA100
+EMA48H > EMA120H
+EMA24x5m > EMA72x5m
 rs60 >= EMA_LONG_MIN_RS60
 btc_return_30m >= EMA_BTC_LONG_MIN_RETURN_30M
 ```
 
+Pullback recovery по умолчанию работает как quality penalty. Чтобы снова сделать его обязательной третьей стадией входа, включите `EMA_ENTRY_REQUIRE_PULLBACK_RECOVERY=true`.
+
 Short-вход использует зеркальную логику:
 
 ```text
-EMA25D < EMA50D
-EMA1D восстановилась ниже EMA2D после недавнего отскока
-EMA50 < EMA100
+EMA48H < EMA120H
+EMA24x5m < EMA72x5m
 rs60 <= EMA_SHORT_MAX_RS60
 btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 ```
@@ -131,12 +131,13 @@ SHORT_LEVERAGE=30
 Примеры настройки стратегии:
 
 ```dotenv
-EMA_MACRO_TIMEFRAME=1d
-EMA_PULLBACK_TIMEFRAME=4h
-EMA_TRIGGER_TIMEFRAME=1m
-EMA_PULLBACK_RECOVERY_LOOKBACK_MINUTES=2880
-EMA_PULLBACK_RECOVERY_MAX_CROSS_AGE_MINUTES=1440
+EMA_MACRO_TIMEFRAME=1h
+EMA_PULLBACK_TIMEFRAME=5m
+EMA_TRIGGER_TIMEFRAME=5m
+EMA_PULLBACK_RECOVERY_LOOKBACK_MINUTES=720
+EMA_PULLBACK_RECOVERY_MAX_CROSS_AGE_MINUTES=180
 EMA_PULLBACK_RECOVERY_GAP=0.001
+EMA_ENTRY_REQUIRE_PULLBACK_RECOVERY=false
 EMA_VOLUME_SPIKE_FILTER_ENABLED=true
 EMA_VOLUME_SPIKE_MIN_RATIO=1.80
 EMA_VOLUME_ADVERSE_SPIKE_MIN_RATIO=2.00

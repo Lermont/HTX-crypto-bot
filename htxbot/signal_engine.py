@@ -291,6 +291,7 @@ class SignalMixin:
             "data_valid": bool(signal.get("data_valid", signal.get("valid", False))),
             "direction_valid": bool(signal.get("direction_valid", signal.get("valid", False))),
             "entry_valid": bool(signal.get("entry_valid", False)),
+            "ema_entry_valid": bool(signal.get("ema_entry_valid", signal.get("entry_valid", False))),
             "macro_valid": bool(signal.get("macro_valid", signal.get("direction_valid", False))),
             "pullback_valid": bool(signal.get("pullback_valid", True)),
             "trigger_valid": bool(signal.get("trigger_valid", True)),
@@ -309,6 +310,8 @@ class SignalMixin:
         has_data = bool(signal and self._signal_data_valid(signal))
         if not has_data:
             add_penalty("data", min_score + abs(base_score) + 1.0)
+        if not flags["ema_entry_valid"]:
+            add_penalty("ema_entry", min_score + abs(base_score) + 1.0)
 
         if not flags["macro_valid"]:
             add_penalty("macro", getattr(strategy, "entry_macro_invalid_penalty", 0.0))
@@ -1165,6 +1168,11 @@ class SignalMixin:
             "ema_pullback_slow": 0.0,
             "ema_trigger_fast": 0.0,
             "ema_trigger_slow": 0.0,
+            "ema_macro_side": "neutral",
+            "ema_trigger_side": "neutral",
+            "ema_side": "neutral",
+            "ema_side_valid": False,
+            "ema_entry_valid": False,
             "ema25d": 0.0,
             "ema50d": 0.0,
             "ema1d": 0.0,
@@ -1183,6 +1191,8 @@ class SignalMixin:
             "pullback_recovery_max_cross_age_candles": self._ema_pullback_recovery_windows(converted=True)[1],
             "pullback_recovery_gap": 0.0,
             "pullback_recovery_min_gap": max(0.0, self._safe_float(config.STRATEGY.ema_pullback_recovery_gap, 0.0)),
+            "entry_pullback_required": bool(getattr(config.STRATEGY, "ema_entry_require_pullback_recovery", False)),
+            "entry_pullback_gate_valid": False,
             "trigger_valid": False,
             "rs_confirm_valid": False,
             "btc_entry_valid": False,
@@ -1415,6 +1425,10 @@ class SignalMixin:
         trigger_valid = direction["trigger_valid"]
         rs_confirm_valid = direction["rs_confirm_valid"]
         btc_entry_valid = direction["btc_entry_valid"]
+        ema_macro_side = direction.get("ema_macro_side", "neutral")
+        ema_trigger_side = direction.get("ema_trigger_side", "neutral")
+        ema_side = direction.get("ema_side", "neutral")
+        ema_side_valid = bool(direction.get("ema_side_valid", False))
         macro_gap = direction["macro_gap"]
         trigger_gap = direction["trigger_gap"]
         pullback_depth = direction["pullback_depth"]
@@ -1424,9 +1438,16 @@ class SignalMixin:
         macro_context = self._macro_context_for_trading(macro_context)
         market_structure = self._ema_market_structure_context(candles)
         data_valid = True
-        direction_valid = bool(score > 0)
+        direction_valid = bool(ema_side_valid and score > 0)
         market_structure_valid = bool(market_structure["market_structure_valid"])
-        raw_entry_valid = bool(direction["entry_valid"])
+        entry_pullback_required = bool(getattr(strategy, "ema_entry_require_pullback_recovery", False))
+        entry_pullback_gate_valid = bool(pullback_valid or not entry_pullback_required)
+        ema_entry_valid = bool(macro_valid and trigger_valid and entry_pullback_gate_valid)
+        raw_entry_valid = bool(
+            ema_entry_valid
+            and rs_confirm_valid
+            and btc_entry_valid
+        )
         raw_add_valid = bool(direction["add_valid"])
         add_valid = bool(raw_add_valid and market_structure_valid)
         volatility = self._realized_volatility(closes, strategy.volatility_window)
@@ -1445,6 +1466,8 @@ class SignalMixin:
             "valid": data_valid,
             "data_valid": data_valid,
             "direction_valid": direction_valid,
+            "ema_entry_valid": ema_entry_valid,
+            "entry_valid": raw_entry_valid,
             "macro_valid": macro_valid,
             "pullback_valid": pullback_valid,
             "trigger_valid": trigger_valid,
@@ -1461,7 +1484,7 @@ class SignalMixin:
             "chop_reason": market_structure["chop_reason"],
         }
         entry_quality = self._entry_signal_quality_context(entry_quality_signal, external_bonus=0.0)
-        entry_valid = bool(entry_quality["passed"])
+        entry_valid = bool(ema_entry_valid and entry_quality["passed"])
         entry_quality_budget_multiplier = self._safe_float(entry_quality.get("quality_budget_multiplier"), 1.0)
         budget_multiplier = (
             signal_budget_multiplier
@@ -1472,6 +1495,8 @@ class SignalMixin:
         ladder_multiplier = volatility_multiplier * btc_ladder_multiplier * macro_ladder_multiplier
         reason = (
             f"strategy=ema_pullback;macro_tf={timeframes['macro']};pullback_tf={timeframes['pullback']};trigger_tf={timeframes['trigger']};"
+            f"ema_side={ema_side};ema_macro_side={ema_macro_side};ema_trigger_side={ema_trigger_side};"
+            f"ema_side_valid={int(ema_side_valid)};"
             f"ema25d={ema_macro_fast:.12f};ema50d={ema_macro_slow:.12f};"
             f"ema1d={ema_pullback_fast:.12f};ema2d={ema_pullback_slow:.12f};"
             f"ema50={ema_trigger_fast:.12f};ema100={ema_trigger_slow:.12f};"
@@ -1481,6 +1506,9 @@ class SignalMixin:
             f"pullback_cross_age={int(pullback_context['pullback_cross_age_candles'])};"
             f"pullback_gap={pullback_context['pullback_recovery_gap']:.6f};"
             f"pullback_min_gap={pullback_context['pullback_recovery_min_gap']:.6f};"
+            f"entry_pullback_required={int(entry_pullback_required)};"
+            f"entry_pullback_gate_valid={int(entry_pullback_gate_valid)};"
+            f"ema_entry_valid={int(ema_entry_valid)};"
             f"macro_valid={int(macro_valid)};pullback_valid={int(pullback_valid)};"
             f"trigger_valid={int(trigger_valid)};rs_confirm_valid={int(rs_confirm_valid)};"
             f"btc_entry_valid={int(btc_entry_valid)};"
@@ -1536,6 +1564,11 @@ class SignalMixin:
             "ema_pullback_slow": ema_pullback_slow,
             "ema_trigger_fast": ema_trigger_fast,
             "ema_trigger_slow": ema_trigger_slow,
+            "ema_macro_side": ema_macro_side,
+            "ema_trigger_side": ema_trigger_side,
+            "ema_side": ema_side,
+            "ema_side_valid": ema_side_valid,
+            "ema_entry_valid": ema_entry_valid,
             "ema25d": ema_macro_fast,
             "ema50d": ema_macro_slow,
             "ema1d": ema_pullback_fast,
@@ -1568,6 +1601,8 @@ class SignalMixin:
             "pullback_recovery_max_cross_age_candles": int(pullback_context["pullback_recovery_max_cross_age_candles"]),
             "pullback_recovery_gap": pullback_context["pullback_recovery_gap"],
             "pullback_recovery_min_gap": pullback_context["pullback_recovery_min_gap"],
+            "entry_pullback_required": entry_pullback_required,
+            "entry_pullback_gate_valid": entry_pullback_gate_valid,
             "trigger_valid": trigger_valid,
             "rs_confirm_valid": rs_confirm_valid,
             "trend_valid": macro_valid,
