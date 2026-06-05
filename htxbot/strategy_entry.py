@@ -23,7 +23,6 @@ class EntryStrategy:
         state = self._get_state(symbol)
         was_frozen_no_more_buys = bool(state.frozen_no_more_buys)
         state.entry_orders = []
-        state.planned_quote_budget = max(state.planned_quote_budget, margin_budget)
         state.frozen_no_more_buys = False
         state.last_entry_ladder_signal_timestamp = signal.get("ts")
         state.last_signal_timestamp = signal.get("ts")
@@ -81,10 +80,62 @@ class EntryStrategy:
             self._reset_state(symbol)
             return 0
 
+        fresh_account = self._fresh_account_snapshot(symbol)
+        fresh_free = self._safe_float(fresh_account.get("free"), 0.0)
+        fresh_equity = self._safe_float(fresh_account.get("total"), fresh_free)
+        reserve = self._safe_float(config.RISK.min_quote_reserve, 0.0)
+        available_after_reserve = max(0.0, fresh_free - reserve)
+        safe_margin_budget = min(max(0.0, margin_budget), available_after_reserve * 0.95)
+        if safe_margin_budget <= 0:
+            block_reason = (
+                "fresh_free_margin_below_reserve;"
+                f"free={fresh_free:.8f};equity={fresh_equity:.8f};reserve={reserve:.8f}"
+            )
+            self._record_signal_analytics(
+                "entry_ladder_rejected",
+                symbol=symbol,
+                signal=signal,
+                block_reason=block_reason,
+                planned_budget=margin_budget,
+                planned_orders=0,
+                planned_notional=0.0,
+                placed_orders=0,
+                operation_id=operation_id,
+                cycle_id=cycle_id,
+                context={"fresh_account": fresh_account, "reserve": reserve},
+            )
+            self._log_event(
+                "INFO",
+                f"{entry_label} entry ladder blocked for {symbol}: fresh free margin is below reserve",
+                event="margin_error",
+                symbol=symbol,
+                side=entry_side,
+                reason=block_reason,
+            )
+            self._reset_state(symbol)
+            self._save_state()
+            return 0
+        if safe_margin_budget + 1e-12 < margin_budget:
+            self._log_event(
+                "INFO",
+                f"{entry_label} entry ladder budget reduced for {symbol}: fresh free margin guard",
+                event="margin_error",
+                symbol=symbol,
+                side=entry_side,
+                reason=(
+                    "entry_budget_reduced_by_fresh_margin;"
+                    f"old_budget={margin_budget:.8f};new_budget={safe_margin_budget:.8f};"
+                    f"free={fresh_free:.8f};equity={fresh_equity:.8f};reserve={reserve:.8f}"
+                ),
+            )
+            margin_budget = safe_margin_budget
+
+        state.planned_quote_budget = max(state.planned_quote_budget, margin_budget)
         sizing_leverage = max(account_leverage, 1.0)
         notional_budget = margin_budget * sizing_leverage
         if state.position_size <= 0 and state.initial_entry_notional <= 0:
             state.initial_entry_notional = notional_budget
+        ladder_reject_reason = ""
 
         for index, (fraction, offset) in enumerate(zip(config.BUYING.ladder_fractions, config.BUYING.ladder_offsets), start=1):
             if entry_side == "sell":
@@ -165,6 +216,15 @@ class EntryStrategy:
                         reject_reason = "manual_account_leverage_rejected"
                     elif self._is_hedge_mode_error(exc):
                         reject_reason = "hedge_mode_error"
+                    elif self._is_insufficient_margin_error(exc):
+                        reject_reason = "entry_insufficient_margin"
+                        ladder_reject_reason = (
+                            "entry_insufficient_margin;"
+                            f"stage={index};stage_margin={notional / max(order_leverage, 1.0):.8f};"
+                            f"planned_budget={margin_budget:.8f};free={fresh_free:.8f};"
+                            f"equity={fresh_equity:.8f};reserve={reserve:.8f}"
+                        )
+                        self._invalidate_account_snapshot_cache(symbol)
                     else:
                         reject_reason = "entry_order_rejected"
                     self._log_event(
@@ -177,7 +237,18 @@ class EntryStrategy:
                         amount=contracts,
                         reason=reject_reason,
                         exception=exc,
+                        diagnostic_context={
+                            "stage": index,
+                            "stage_notional": notional,
+                            "stage_margin": notional / max(order_leverage, 1.0),
+                            "planned_budget": margin_budget,
+                            "account_leverage": order_leverage,
+                            "fresh_account": fresh_account,
+                            "reserve": reserve,
+                        },
                     )
+                    if reject_reason == "entry_insufficient_margin":
+                        break
                     continue
 
             ref = {
@@ -236,6 +307,7 @@ class EntryStrategy:
             )
 
         if not state.entry_orders:
+            block_reason = ladder_reject_reason or "no_valid_ladder_orders"
             last_ladder_ts = state.last_entry_ladder_signal_timestamp
             last_signal_ts = state.last_signal_timestamp
             last_rs30 = state.last_rs30
@@ -247,7 +319,7 @@ class EntryStrategy:
                 "entry_ladder_rejected",
                 symbol=symbol,
                 signal=signal,
-                block_reason="no_valid_ladder_orders",
+                block_reason=block_reason,
                 planned_budget=margin_budget,
                 planned_orders=planned_orders,
                 planned_notional=planned_notional,
@@ -261,7 +333,7 @@ class EntryStrategy:
                 event="entry_order_canceled",
                 symbol=symbol,
                 side=entry_side,
-                reason="no_valid_ladder_orders",
+                reason=block_reason,
             )
             if state.position_size > 0:
                 state.frozen_no_more_buys = was_frozen_no_more_buys or state.zombie_position
@@ -1043,7 +1115,11 @@ class EntryStrategy:
             signal=signal,
             budget_scale=1.0,
         )
-        planned_notional = budget * max(float(config.RISK.leverage), 1.0)
+        budget_context = dict(getattr(self, "_last_risk_budget_context", {}) or {})
+        planned_notional = self._safe_float(
+            budget_context.get("planned_notional"),
+            budget * max(float(config.RISK.leverage), 1.0),
+        )
         self._record_signal_analytics(
             "entry_budget_calculated" if budget > 0 else "entry_budget_blocked",
             symbol=symbol,
@@ -1052,7 +1128,11 @@ class EntryStrategy:
             external_context=self._external_context_from_cache(symbol),
             planned_budget=budget,
             planned_notional=planned_notional,
-            context={"reference_price": reference_price, "budget_reason": budget_reason},
+            context={
+                "reference_price": reference_price,
+                "budget_reason": budget_reason,
+                "budget_context": budget_context,
+            },
         )
         if budget <= 0:
             self._log_event(

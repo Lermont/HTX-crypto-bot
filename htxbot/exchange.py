@@ -757,6 +757,19 @@ class ExchangeMixin:
                     self._account_snapshot_inflight = None
                 entry["event"].set()
 
+    def _invalidate_account_snapshot_cache(self, symbol: str = ""):
+        cache_key = self._account_snapshot_cache_key(symbol)
+        with self._private_cache_runtime_lock():
+            cache_by_key = getattr(self, "_account_snapshot_cache_by_key", None)
+            if isinstance(cache_by_key, dict):
+                cache_by_key.pop(cache_key, None)
+            if cache_key == "__all__":
+                self._account_snapshot_cache = None
+
+    def _fresh_account_snapshot(self, symbol: str = "") -> dict:
+        self._invalidate_account_snapshot_cache(symbol)
+        return self._account_snapshot(symbol)
+
     def _fetch_account_snapshot_uncached(self, symbol: str = "") -> dict:
         params = {
             "type": config.EXCHANGE.default_type,
@@ -1514,6 +1527,15 @@ class ExchangeMixin:
             '"err_code":1206' in text
             or "high risk exposure" in text
             or "high leverage is not supported" in text
+        )
+
+    def _is_insufficient_margin_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            isinstance(exc, ccxt.InsufficientFunds)
+            or '"err_code":1047' in text
+            or "insufficient margin" in text
+            or "insufficient funds" in text
         )
 
     def _is_reduce_only_amount_exceeds_closeable_error(self, exc: Exception) -> bool:

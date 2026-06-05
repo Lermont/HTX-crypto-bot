@@ -714,11 +714,24 @@ class RiskManager:
         account = self._account_snapshot(symbol)
         free = account["free"]
         equity = account["total"] or free
+        context = {
+            "free": free,
+            "equity": equity,
+            "reserve": config.RISK.min_quote_reserve,
+            "is_new_position": bool(is_new_position),
+            "budget_scale": max(0.0, self._safe_float(budget_scale, 0.0)),
+        }
+
+        def finish(budget: float, reason: str, **extra) -> Tuple[float, str]:
+            context.update(extra)
+            self._last_risk_budget_context = dict(context)
+            return budget, reason
+
         if free <= config.RISK.min_quote_reserve:
-            return 0.0, "free_margin_below_reserve"
+            return finish(0.0, "free_margin_below_reserve")
 
         if is_new_position and self._active_position_slots() >= config.RISK.max_active_positions:
-            return 0.0, "max_active_positions_reached"
+            return finish(0.0, "max_active_positions_reached")
 
         base_margin_budget = equity * config.BUYING.position_budget_fraction
         available_after_reserve = max(0.0, free - config.RISK.min_quote_reserve)
@@ -747,19 +760,42 @@ class RiskManager:
         ):
             planned_notional = min_notional
         planned_margin = planned_notional / leverage
+        context.update(
+            {
+                "base_margin_budget": base_margin_budget,
+                "available_after_reserve": available_after_reserve,
+                "planned_margin": planned_margin,
+                "configured_leverage": leverage,
+                "total_cap_notional": total_cap_notional,
+                "position_cap_notional": position_cap_notional,
+                "current_total_notional": current_total_notional,
+                "current_symbol_notional": current_symbol_notional,
+                "total_remaining": total_remaining,
+                "symbol_remaining": symbol_remaining,
+                "base_notional": base_notional,
+                "budget_multiplier": multiplier,
+                "volatility_budget_multiplier": volatility_budget,
+                "effective_budget_multiplier": effective_multiplier,
+                "margin_cap_notional": margin_cap_notional,
+                "planned_notional": planned_notional,
+                "min_contracts": min_contracts,
+                "min_notional": min_notional,
+            }
+        )
 
         if planned_notional <= 0 or planned_margin <= 0:
-            return 0.0, "notional_limit_reached"
+            return finish(0.0, "notional_limit_reached")
 
         contracts = self._contracts_for_notional(symbol, planned_notional, reference_price)
         if contracts <= 0:
-            return 0.0, "order_size_below_exchange_minimum"
+            return finish(0.0, "order_size_below_exchange_minimum", contracts=contracts)
+        context["contracts"] = contracts
 
-        return planned_margin, (
+        return finish(planned_margin, (
             f"ok:budget_multiplier={multiplier:.3f};"
             f"vol_budget={volatility_budget:.3f};"
             f"effective_budget_multiplier={effective_multiplier:.3f};budget_scale={scale:.3f}"
-        )
+        ))
 
     def _static_exit_profit_context(self) -> dict:
         roundtrip_fee = config.SELLING.buy_fee_rate + config.SELLING.sell_fee_rate

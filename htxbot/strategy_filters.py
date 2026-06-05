@@ -159,6 +159,7 @@ class SignalFilters:
         blocked_reasons = {}
         quality_candidates = []
         quality_scores = {}
+        external_blocked_count = 0
         for symbol in raw_candidates:
             signal = signals.get(symbol)
             signal_for_quality = dict(signal or {})
@@ -172,6 +173,11 @@ class SignalFilters:
             if not quality_context.get("passed"):
                 reason = self._entry_weighted_score_block_reason(quality_context)
                 blocked_reasons[symbol] = f"entry_quality_blocked;crowded={int(crowded)};{reason}"
+                continue
+            external_reason = self._external_entry_block_reason(symbol)
+            if external_reason:
+                blocked_reasons[symbol] = external_reason
+                external_blocked_count += 1
                 continue
             quality_candidates.append(symbol)
             quality_scores[symbol] = self._safe_float(quality_context.get("weighted_score"), 0.0)
@@ -231,6 +237,7 @@ class SignalFilters:
             "rate_limit": rate_limit,
             "rate_remaining": rate_remaining,
             "recent_count": recent_count,
+            "external_blocked_count": external_blocked_count,
         }
         self.entry_gate = gate
 
@@ -241,12 +248,14 @@ class SignalFilters:
                 "INFO",
                 (
                     "Entry gate prepared: "
-                    f"raw={len(raw_candidates)} quality={len(quality_candidates)} allowed={len(allowed)}"
+                    f"raw={len(raw_candidates)} quality={len(quality_candidates)} "
+                    f"external_blocked={external_blocked_count} allowed={len(allowed)}"
                 ),
                 event="entry_gate_updated",
                 reason=(
                     f"signal_ts={signal_ts};crowded={int(crowded)};per_signal_limit={per_signal_limit};"
-                    f"recent_entries={recent_count};rate_limit={rate_limit};rate_remaining={rate_remaining}"
+                    f"recent_entries={recent_count};rate_limit={rate_limit};rate_remaining={rate_remaining};"
+                    f"external_blocked={external_blocked_count}"
                 ),
             )
         return gate

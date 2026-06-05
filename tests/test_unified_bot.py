@@ -94,6 +94,23 @@ class StaticExternalPriceFeed:
         return context
 
 
+class PerSymbolExternalPriceFeed:
+    def __init__(self, contexts):
+        self.contexts = {symbol: dict(context) for symbol, context in contexts.items()}
+        self.calls = []
+
+    def get_context(self, symbol, htx_ticker, market=None):
+        self.calls.append((symbol, dict(htx_ticker), market))
+        context = dict(self.contexts.get(symbol, {}))
+        context.setdefault("valid", True)
+        context.setdefault("stale", False)
+        context.setdefault("reason", "ok")
+        context["symbol"] = symbol
+        context.setdefault("mexc_symbol", symbol.split("/", 1)[0].replace(":", "") + "USDT")
+        context.setdefault("ts", time.time())
+        return context
+
+
 class FakeMexcClient:
     def __init__(self, books):
         self.books = list(books)
@@ -149,6 +166,7 @@ class FakeExchange:
         self.account_position_mode = "single_side"
         self.reject_reduce_only_closeable_amount = False
         self.reject_stop_loss_trigger_crossed = False
+        self.create_order_failures = []
         self.create_order_calls = 0
         self.set_leverage_calls = []
         self.set_leverage_error = None
@@ -301,6 +319,8 @@ class FakeExchange:
     def create_order(self, symbol, type, side, amount, price, params=None):
         params = params or {}
         self.create_order_calls += 1
+        if self.create_order_failures:
+            raise self.create_order_failures.pop(0)
         if self.reject_leverage_not_equal is not None:
             leverage = float(params.get("leverRate") or 0.0)
             if leverage != float(self.reject_leverage_not_equal):
@@ -738,6 +758,23 @@ class UnifiedBotTests(unittest.TestCase):
             bot._log_event("INFO", "test message", event="test_event", symbol=SYMBOL, reason="test")
 
             self.assertTrue(getattr(bot, "_csv_log_failed_once", False))
+
+    def test_jsonl_append_permission_error_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bot = self.make_bot(Path(raw_tmp))
+            jsonl_path = Path(raw_tmp) / "locked.jsonl"
+            original_open = Path.open
+
+            def locked_append(path_self, *args, **kwargs):
+                mode = args[0] if args else kwargs.get("mode", "r")
+                if path_self == jsonl_path and "a" in mode:
+                    raise PermissionError("locked")
+                return original_open(path_self, *args, **kwargs)
+
+            with patch.object(Path, "open", locked_append):
+                bot._append_jsonl(jsonl_path, {"event": "test"})
+
+            self.assertFalse(jsonl_path.exists())
 
     def test_trade_csv_concurrent_writes_rotate_without_lost_rows(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2683,6 +2720,38 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state_order["sizing_leverage"], 5.0)
                 self.assertEqual(state_order["amount"], 5.0)
 
+    def test_entry_ladder_stops_after_insufficient_margin_rejection(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, post_only_enabled=False)
+            buying = replace(config.BUYING, ladder_fractions=(0.5, 0.5), ladder_offsets=(0.0, 0.01))
+            with override_config(RUNTIME=runtime, BUYING=buying):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.create_order_failures = [
+                    ccxt.InsufficientFunds(
+                        'htx {"status":"error","err_code":1047,"err_msg":"Insufficient margin available."}'
+                    )
+                ]
+
+                placed = bot._place_buy_ladder(
+                    SYMBOL,
+                    margin_budget=10.0,
+                    reference_price=10.0,
+                    signal={"ts": 1000, "ladder_multiplier": 1.0},
+                    reason="ema_initial_signal",
+                )
+
+                self.assertEqual(placed, 0)
+                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
+                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertEqual(rows[-1]["decision"], "entry_ladder_rejected")
+                self.assertIn("entry_insufficient_margin", rows[-1]["block_reason"])
+                with bot.diagnostics_csv_path.open(newline="", encoding="utf-8") as handle:
+                    diagnostics = list(csv.DictReader(handle))
+                self.assertEqual(diagnostics[-1]["event"], "entry_order_canceled")
+                self.assertEqual(diagnostics[-1]["error_code"], "1047")
+
     def test_step_symbol_places_initial_entry_ladder_when_flat_signal_valid(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, post_only_enabled=False)
@@ -3557,6 +3626,56 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(gate["allowed_symbols"], {symbols[1], symbols[2]})
                 self.assertIn("entry_top_n_blocked", gate["blocked_reasons"][symbols[0]])
 
+    def test_entry_gate_skips_external_blocked_candidates_before_top_n(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = replace(
+                config.STRATEGY,
+                entry_min_score=0.0,
+                entry_min_rs60_abs=0.0,
+                entry_min_rs30_abs=0.0,
+                entry_max_new_ladders_per_signal=2,
+                entry_rate_limit_ladders=0,
+                entry_crowded_min_signals=0,
+                entry_crowded_signal_fraction=0.0,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                symbols = (SYMBOL, SECOND_SYMBOL, BTC_SYMBOL)
+                bot.entry_symbols = set(symbols)
+                bot.symbols = list(symbols)
+                bot.market_by_symbol = {SYMBOL: MARKET, SECOND_SYMBOL: SECOND_MARKET, BTC_SYMBOL: BTC_MARKET}
+                valid_context = self.external_context(spread_bps=0.0, htx_mid=10.0, mexc_mid=10.0)
+                bot.external_price_feed = PerSymbolExternalPriceFeed(
+                    {
+                        SYMBOL: self.external_context(
+                            valid=False,
+                            stale=False,
+                            reason="internal_spread_too_wide",
+                            spread_bps=-80.0,
+                            htx_mid=10.0,
+                            mexc_mid=10.0,
+                        ),
+                        SECOND_SYMBOL: valid_context,
+                        BTC_SYMBOL: valid_context,
+                    }
+                )
+                bot.signal_cache = {
+                    "benchmark_ok": True,
+                    "closed_candle_ts": 1000,
+                    "symbols": {
+                        SYMBOL: self.entry_signal(score=0.10, rs30=0.003, rs60=0.003),
+                        SECOND_SYMBOL: self.entry_signal(score=0.08, rs30=0.002, rs60=0.002),
+                        BTC_SYMBOL: self.entry_signal(score=0.07, rs30=0.001, rs60=0.001),
+                    },
+                }
+
+                gate = bot._prepare_new_entry_gate()
+
+                self.assertEqual(gate["external_blocked_count"], 1)
+                self.assertNotIn(SYMBOL, gate["ranked_symbols"])
+                self.assertEqual(gate["allowed_symbols"], {SECOND_SYMBOL, BTC_SYMBOL})
+                self.assertIn("external_reference_invalid", gate["blocked_reasons"][SYMBOL])
+
     def test_entry_gate_rate_limit_counts_recent_positions(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = replace(
@@ -4152,6 +4271,8 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertAlmostEqual(expanded_budget, 30.0)
                 self.assertIn("effective_budget_multiplier=0.500", reduced_reason)
                 self.assertIn("effective_budget_multiplier=1.500", expanded_reason)
+                self.assertAlmostEqual(bot._last_risk_budget_context["planned_notional"], 900.0)
+                self.assertAlmostEqual(bot._last_risk_budget_context["free"], 1000.0)
 
     def test_risk_budget_counts_combined_profile_notional(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

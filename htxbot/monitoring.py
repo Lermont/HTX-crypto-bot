@@ -224,11 +224,21 @@ class MonitoringMixin:
         if not path:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, sort_keys=True) + "\n"
         with _monitoring_global_lock:
             with instance_rlock(self, "_monitoring_lock"):
                 self._rotate_jsonl_if_needed(path)
-                with path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, sort_keys=True) + "\n")
+                last_exc = None
+                for attempt in range(3):
+                    try:
+                        with path.open("a", encoding="utf-8") as f:
+                            f.write(line)
+                        return
+                    except PermissionError as exc:
+                        last_exc = exc
+                        time.sleep(0.05 * (attempt + 1))
+                if last_exc is not None:
+                    self.log.warning("Could not append JSONL log %s: %s", path, last_exc)
 
     def _sanitize_for_log(self, value: Any, depth: int = 0) -> Any:
         if depth > 8:
