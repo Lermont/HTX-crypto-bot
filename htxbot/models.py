@@ -110,6 +110,8 @@ class TradeState:
     hard_stop_signature: str = ""
     pending_exit_ladder_since: Optional[float] = None
     pending_exit_ladder_reason: str = ""
+    pending_close_order: dict = field(default_factory=dict)
+    pending_close_reason: str = ""
     frozen_no_more_buys: bool = False
     cycle_opened_at: Optional[float] = None
     cooldown_until: Optional[float] = None

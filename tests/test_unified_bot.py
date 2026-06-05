@@ -1230,6 +1230,29 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(reloaded.pending_exit_ladder_reason, "no_closeable_position_available")
                 self.assertEqual(reloaded.lifecycle, PositionLifecycle.PENDING_CLOSEABLE.value)
 
+    def test_trade_state_serialization_keeps_pending_close_order_metadata(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            state.position_size = 2.0
+            state.entry_price = 10.0
+            state.pending_close_order = {
+                "id": 12345,
+                "side": "sell",
+                "amount": "2",
+                "created_at": "1700000000",
+                "reason": "dust_position_close",
+            }
+            state.pending_close_reason = "dust_position_close"
+
+            bot._save_state()
+            reloaded = bot._load_state()[SYMBOL]
+
+            self.assertEqual(reloaded.pending_close_order["id"], "12345")
+            self.assertEqual(reloaded.pending_close_order["amount"], 2.0)
+            self.assertEqual(reloaded.pending_close_reason, "dust_position_close")
+            self.assertEqual(reloaded.lifecycle, PositionLifecycle.EXITING.value)
+
     def test_trade_state_lifecycle_is_derived_from_runtime_flags(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -8262,6 +8285,44 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertTrue(cycle_rows)
             self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), 100.0)
 
+    def test_exit_ladder_cycle_stats_keep_take_profit_close_reason(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            state.position_size = 5.0
+            state.position_available = 0.0
+            state.position_frozen = 5.0
+            state.position_side = "long"
+            state.entry_price = 100.0
+            state.total_bought_amount = 5.0
+            state.total_bought_quote = 500.0
+            state.sell_ladder_orders = [
+                {
+                    "id": "tp_1",
+                    "side": "sell",
+                    "amount": 5.0,
+                    "price": 105.0,
+                    "mode": "normal",
+                }
+            ]
+
+            status = bot._sync_state_with_position(
+                SYMBOL,
+                {
+                    "long_size": 0.0,
+                    "long_available": 0.0,
+                    "short_size": 0.0,
+                    "short_available": 0.0,
+                },
+                open_orders=[],
+            )
+
+            self.assertEqual(status, "closed")
+            with bot.cycle_stats_path.open(newline="", encoding="utf-8") as handle:
+                cycle_rows = list(csv.DictReader(handle))
+            self.assertTrue(cycle_rows)
+            self.assertEqual(cycle_rows[-1]["close_reason"], "exit_ladder_filled")
+
     def test_position_gone_uses_pending_hard_stop_market_close_fill_price(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, fetch_fill_details_on_sync=True)
@@ -8323,7 +8384,61 @@ class UnifiedBotTests(unittest.TestCase):
                     cycle_rows = list(csv.DictReader(handle))
                 self.assertTrue(cycle_rows)
                 self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), 95.0)
+                self.assertEqual(cycle_rows[-1]["close_reason"], "hard_stop_loss_market_close")
                 self.assertLess(float(cycle_rows[-1]["realized_pnl_quote"]), 0.0)
+
+    def test_dust_close_cycle_stats_keep_dust_close_reason(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True, fetch_fill_details_on_sync=True)
+            risk = replace(config.RISK, dust_position_notional=100.0, dust_close_enabled=True)
+            with override_config(RUNTIME=runtime, RISK=risk):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 5.0
+                state.position_side = "long"
+                state.entry_price = 10.0
+                state.total_bought_amount = 5.0
+                state.total_bought_quote = 50.0
+
+                placed = bot._maybe_close_dust_position(SYMBOL, [])
+
+                self.assertTrue(placed)
+                self.assertEqual(state.pending_close_reason, "dust_position_close")
+                self.assertEqual(state.pending_close_order["reason"], "dust_position_close")
+                order_id = state.pending_close_order["id"]
+                bot.exchange.has["fetchOrder"] = True
+                bot.exchange.fetch_order_responses[order_id] = {
+                    "id": order_id,
+                    "symbol": SYMBOL,
+                    "side": "sell",
+                    "status": "closed",
+                    "amount": 5.0,
+                    "filled": 5.0,
+                    "remaining": 0.0,
+                    "average": 9.5,
+                    "cost": 47.5,
+                    "fee": {"cost": 0.02, "currency": "USDT"},
+                }
+
+                status = bot._sync_state_with_position(
+                    SYMBOL,
+                    {
+                        "long_size": 0.0,
+                        "long_available": 0.0,
+                        "short_size": 0.0,
+                        "short_available": 0.0,
+                    },
+                    open_orders=[],
+                )
+
+                self.assertEqual(status, "closed")
+                with bot.cycle_stats_path.open(newline="", encoding="utf-8") as handle:
+                    cycle_rows = list(csv.DictReader(handle))
+                self.assertTrue(cycle_rows)
+                self.assertEqual(cycle_rows[-1]["close_reason"], "dust_position_close")
+                self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), 9.5)
+                self.assertEqual(bot._get_state(SYMBOL).pending_close_order, {})
 
     def test_combined_reserved_symbols_include_exchange_side_opposite_profile_activity(self):
         class ReservationBot:

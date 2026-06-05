@@ -369,6 +369,17 @@ class RiskManager:
 
         state.frozen_no_more_buys = True
         state.zombie_position = True
+        state.pending_close_order = {
+            "id": str(order.get("id", "")),
+            "side": config.EXIT_SIDE,
+            "price": 0.0,
+            "amount": close_amount,
+            "created_at": time.time(),
+            "market_close": True,
+            "reduce_only": True,
+            "reason": close_reason,
+        }
+        state.pending_close_reason = close_reason
         self._refresh_active_side(state)
         self._save_state()
         self._log_event(
