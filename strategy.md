@@ -280,9 +280,20 @@ EMA_EXIT_MEDIUM_LADDER_FRACTIONS=0.45,0.30,0.15,0.10
 EMA_EXIT_MEDIUM_LADDER_MARKUPS=0.004,0.010,0.020,0.035
 EMA_EXIT_HEAVY_LADDER_FRACTIONS=0.60,0.25,0.15
 EMA_EXIT_HEAVY_LADDER_MARKUPS=0.003,0.008,0.015
+EMA_EXIT_RUNNER_ENABLED=true
+EMA_EXIT_TRAILING_ENABLED=true
+EMA_EXIT_TRAILING_FIXED_FRACTION=0.30
+EMA_EXIT_TRAILING_ACTIVATION_MARKUP=0.020
+EMA_EXIT_TRAILING_PULLBACK=0.010
+EMA_EXIT_TRAILING_ATR_MULTIPLIER=1.5
+EMA_EXIT_TRAILING_MIN_PULLBACK=0.006
+EMA_EXIT_TRAILING_MAX_PULLBACK=0.030
+EMA_EXIT_TRAILING_TAKE_PROFIT_MARKUP=0.050
+EMA_EXIT_RUNNER_PROFIT_LOCK_ENABLED=true
+EMA_EXIT_RUNNER_USE_AGGRESSIVE_LIMIT=true
 ```
 
-Normal mode по умолчанию использует только fixed reduce-only ladder. Runner/trailing остаётся opt-in через `EMA_EXIT_RUNNER_ENABLED=true` и `EMA_EXIT_TRAILING_ENABLED=true`; тогда остаток может закрываться при pullback от лучшей цены или при достижении take-profit markup.
+Normal mode по умолчанию фиксирует часть позиции через reduce-only TP ladder и оставляет runner-остаток: fixed fraction закрывается по первому normal markup, runner активируется после `EMA_EXIT_TRAILING_ACTIVATION_MARKUP` и закрывается при откате от лучшей цены или при достижении дальнего take-profit markup. Pullback расширяется от `atr_rate`/`volatility` в signal и ограничивается min/max настройками. После активации runner hard stop-loss подтягивается к breakeven, чтобы прибыльная позиция не превратилась обратно в убыточную. Для averaged split ladder runner не включается: базовая и recovery-части остаются полностью покрыты fixed reduce-only exits.
 
 Profit floor учитывает комиссии:
 

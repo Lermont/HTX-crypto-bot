@@ -53,6 +53,22 @@ class ExitStrategy:
             return self._price_at_or_above(symbol, state.entry_price * (1.0 + pct))
         return self._price_at_or_below(symbol, state.entry_price * (1.0 - pct))
 
+    def _runner_profit_lock_stop_price(self, symbol: str, state: TradeState) -> Tuple[float, str]:
+        strategy = config.STRATEGY
+        if not getattr(strategy, "ema_exit_runner_profit_lock_enabled", False):
+            return 0.0, "runner_profit_lock_disabled"
+        if not (state.exit_runner_active or state.exit_runner_activated_at):
+            return 0.0, "runner_profit_lock_inactive"
+        if state.entry_price <= 0:
+            return 0.0, "runner_profit_lock_entry_missing"
+
+        breakeven = self._breakeven_exit_price(state.entry_price)
+        if breakeven <= 0:
+            return 0.0, "runner_profit_lock_price_unavailable"
+        if config.POSITION_SIDE == "short":
+            return self._price_at_or_below(symbol, breakeven), "runner_profit_lock_breakeven"
+        return self._price_at_or_above(symbol, breakeven), "runner_profit_lock_breakeven"
+
     def _hard_stop_loss_signature(self, symbol: str, state: TradeState, amount: float, trigger_price: float) -> str:
         return (
             f"hard_stop_loss|direction={config.POSITION_SIDE}|side={config.EXIT_SIDE}|"
@@ -296,6 +312,14 @@ class ExitStrategy:
 
         loss_rate, loss_rate_reason = self._hard_stop_loss_rate(signal)
         trigger_price = self._hard_stop_loss_trigger_price(symbol, state, loss_rate)
+        lock_price, lock_reason = self._runner_profit_lock_stop_price(symbol, state)
+        if lock_price > 0:
+            if config.POSITION_SIDE == "short" and (trigger_price <= 0 or lock_price < trigger_price):
+                trigger_price = lock_price
+                loss_rate_reason = f"{loss_rate_reason};{lock_reason};trigger_locked={lock_price:.12f}"
+            elif config.POSITION_SIDE != "short" and lock_price > trigger_price:
+                trigger_price = lock_price
+                loss_rate_reason = f"{loss_rate_reason};{lock_reason};trigger_locked={lock_price:.12f}"
         if state.sell_ladder_mode == "soft_defensive_exit" and state.sell_ladder_orders:
             return False
         if state.sell_ladder_mode == "hard_stop_loss":
@@ -1297,6 +1321,7 @@ class ExitStrategy:
         max_markup = max(0.0, strategy.ema_exit_decay_max_markup)
         runner_allowed = bool(
             strategy.ema_exit_runner_enabled
+            and use_trailing_exit
             and ladder_name == "normal"
             and len(fractions) > 1
             and (max_markup_after <= 0 or age_hours < max_markup_after)
@@ -1486,7 +1511,12 @@ class ExitStrategy:
             f"{strategy.ema_exit_trailing_fixed_fraction:.8f}:"
             f"{strategy.ema_exit_trailing_activation_markup:.8f}:"
             f"{strategy.ema_exit_trailing_pullback:.8f}:"
+            f"{strategy.ema_exit_trailing_atr_multiplier:.8f}:"
+            f"{strategy.ema_exit_trailing_min_pullback:.8f}:"
+            f"{strategy.ema_exit_trailing_max_pullback:.8f}:"
             f"{strategy.ema_exit_trailing_take_profit_markup:.8f}|"
+            f"runner_profit_lock={int(strategy.ema_exit_runner_profit_lock_enabled)}|"
+            f"runner_aggressive_limit={int(strategy.ema_exit_runner_use_aggressive_limit)}|"
             f"external_spread={plan_context.get('external_spread_bps', 0.0):.4f}|"
             f"tp={strategy.ema_take_profit_markup:.8f}|"
             f"breakeven_after={strategy.ema_breakeven_after_hours:.4f}|"
@@ -3709,13 +3739,26 @@ class ExitStrategy:
         breakeven = self._breakeven_exit_price(avg_entry_price)
         if current_price <= 0 or breakeven <= 0:
             return 0.0
+        aggressive_price = (
+            self._aggressive_exit_limit_price(symbol)
+            if getattr(config.STRATEGY, "ema_exit_runner_use_aggressive_limit", True)
+            else 0.0
+        )
         if config.POSITION_SIDE == "short":
-            if current_price > breakeven:
+            candidate = aggressive_price if aggressive_price > 0 else current_price
+            if candidate > breakeven:
                 return 0.0
-            return self._price_at_or_below(symbol, min(current_price, breakeven))
-        if current_price < breakeven:
+            price = self._price_at_or_above(symbol, candidate)
+            if price > breakeven:
+                return self._price_at_or_below(symbol, breakeven)
+            return price
+        candidate = aggressive_price if aggressive_price > 0 else current_price
+        if candidate < breakeven:
             return 0.0
-        return self._price_at_or_above(symbol, max(current_price, breakeven))
+        price = self._price_at_or_below(symbol, candidate)
+        if price < breakeven:
+            return self._price_at_or_above(symbol, breakeven)
+        return price
 
     def _exit_runner_close_contracts(self, symbol: str, state: TradeState) -> float:
         runner_contracts = self._safe_float(state.exit_runner_contracts, 0.0)
@@ -3731,6 +3774,44 @@ class ExitStrategy:
         if state.position_available > 0:
             closeable = min(closeable, state.position_available)
         return self._amount_to_precision(symbol, closeable)
+
+    def _exit_runner_trailing_pullback(self, signal: Optional[dict] = None) -> Tuple[float, str]:
+        strategy = config.STRATEGY
+        trailing_enabled = bool(strategy.ema_exit_trailing_enabled)
+        base_pullback = max(
+            0.0,
+            strategy.ema_exit_trailing_pullback
+            if trailing_enabled
+            else strategy.ema_exit_runner_trailing_pullback,
+        )
+        if not trailing_enabled:
+            return base_pullback, f"pullback_fixed={base_pullback:.6f}"
+
+        signal = signal or {}
+        volatility = max(
+            0.0,
+            self._safe_float(signal.get("atr_rate"), 0.0),
+            self._safe_float(signal.get("volatility"), 0.0),
+        )
+        atr_multiplier = max(0.0, self._safe_float(strategy.ema_exit_trailing_atr_multiplier, 0.0))
+        volatility_pullback = volatility * atr_multiplier if volatility > 0 and atr_multiplier > 0 else 0.0
+        pullback = max(base_pullback, volatility_pullback)
+
+        min_pullback = max(0.0, self._safe_float(strategy.ema_exit_trailing_min_pullback, 0.0))
+        max_pullback = max(0.0, self._safe_float(strategy.ema_exit_trailing_max_pullback, 0.0))
+        if min_pullback > 0:
+            pullback = max(pullback, min_pullback)
+        if max_pullback > 0:
+            pullback = min(pullback, max_pullback)
+
+        return pullback, (
+            f"pullback_base={base_pullback:.6f};"
+            f"signal_volatility={volatility:.6f};"
+            f"atr_multiplier={atr_multiplier:.3f};"
+            f"volatility_pullback={volatility_pullback:.6f};"
+            f"min_pullback={min_pullback:.6f};"
+            f"max_pullback={max_pullback:.6f}"
+        )
 
     def _exit_runner_reference_entry_price(self, symbol: str, state: TradeState) -> float:
         if self._should_use_split_exit_ladder(symbol, state, "normal") and state.base_entry_price > 0:
@@ -3898,13 +3979,11 @@ class ExitStrategy:
                 entry_price=state.entry_price,
                 reason=f"runner_activation;ladder={plan_context.get('ladder_name', 'normal')}",
             )
+            if strategy.hard_stop_loss_enabled and strategy.ema_exit_runner_profit_lock_enabled:
+                self._ensure_hard_stop_loss(symbol, signal=signal)
+                state = self._get_state(symbol)
 
-        pullback = max(
-            0.0,
-            strategy.ema_exit_trailing_pullback
-            if strategy.ema_exit_trailing_enabled
-            else strategy.ema_exit_runner_trailing_pullback,
-        )
+        pullback, pullback_reason = self._exit_runner_trailing_pullback(signal)
         take_profit = max(
             0.0,
             strategy.ema_exit_trailing_take_profit_markup
@@ -3917,7 +3996,10 @@ class ExitStrategy:
             state.exit_runner_bottom_price = min(previous_bottom, current_price)
             changed = changed or state.exit_runner_bottom_price != previous_bottom
             if pullback > 0 and current_price >= state.exit_runner_bottom_price * (1 + pullback):
-                close_reason = f"runner_trailing_pullback;bottom={state.exit_runner_bottom_price:.12f};pullback={pullback:.5f}"
+                close_reason = (
+                    f"runner_trailing_pullback;bottom={state.exit_runner_bottom_price:.12f};"
+                    f"pullback={pullback:.5f};{pullback_reason}"
+                )
             elif take_profit > 0 and current_price <= runner_entry_price * (1 - take_profit):
                 close_reason = f"runner_take_profit;target_markup={take_profit:.5f}"
         else:
@@ -3925,7 +4007,10 @@ class ExitStrategy:
             state.exit_runner_peak_price = max(previous_peak, current_price)
             changed = changed or state.exit_runner_peak_price != previous_peak
             if pullback > 0 and current_price <= state.exit_runner_peak_price * (1 - pullback):
-                close_reason = f"runner_trailing_pullback;peak={state.exit_runner_peak_price:.12f};pullback={pullback:.5f}"
+                close_reason = (
+                    f"runner_trailing_pullback;peak={state.exit_runner_peak_price:.12f};"
+                    f"pullback={pullback:.5f};{pullback_reason}"
+                )
             elif take_profit > 0 and current_price >= runner_entry_price * (1 + take_profit):
                 close_reason = f"runner_take_profit;target_markup={take_profit:.5f}"
 

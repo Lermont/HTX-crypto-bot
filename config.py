@@ -317,7 +317,12 @@ class StrategySettings:
     ema_exit_trailing_fixed_fraction: float
     ema_exit_trailing_activation_markup: float
     ema_exit_trailing_pullback: float
+    ema_exit_trailing_atr_multiplier: float
+    ema_exit_trailing_min_pullback: float
+    ema_exit_trailing_max_pullback: float
     ema_exit_trailing_take_profit_markup: float
+    ema_exit_runner_profit_lock_enabled: bool
+    ema_exit_runner_use_aggressive_limit: bool
     ema_averaging_enabled: bool
     ema_averaging_drawdown_step: float
     ema_averaging_min_drawdown_step: float
@@ -803,6 +808,8 @@ def _validate_profile(profile: "BotProfile") -> None:
         "account_averaging_near_trough_fraction",
         "account_averaging_falling_guard_fraction",
         "account_averaging_budget_scale",
+        "ema_exit_trailing_min_pullback",
+        "ema_exit_trailing_max_pullback",
         "hard_stop_loss_pct",
         "hard_stop_loss_min_emergency_pct",
         "hard_stop_loss_atr_max_pct",
@@ -818,6 +825,17 @@ def _validate_profile(profile: "BotProfile") -> None:
         value = getattr(profile.strategy, setting_name)
         if value < 0.0 or value > 1.0:
             raise ValueError(f"{profile.name}.STRATEGY.{setting_name} must be between 0 and 1")
+    if profile.strategy.ema_exit_trailing_atr_multiplier < 0:
+        raise ValueError(f"{profile.name}.STRATEGY.ema_exit_trailing_atr_multiplier must be non-negative")
+    if (
+        profile.strategy.ema_exit_trailing_max_pullback > 0.0
+        and profile.strategy.ema_exit_trailing_min_pullback
+        > profile.strategy.ema_exit_trailing_max_pullback
+    ):
+        raise ValueError(
+            f"{profile.name}.STRATEGY.ema_exit_trailing_min_pullback "
+            "must be <= ema_exit_trailing_max_pullback"
+        )
 
     if (
         profile.strategy.account_pnl_trailing_enabled
@@ -1133,12 +1151,12 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ema_exit_decay_first_markup_cap=_env_float("EMA_EXIT_DECAY_FIRST_MARKUP_CAP", 0.008, profile=name),
         ema_exit_decay_max_markup_after_hours=_env_float("EMA_EXIT_DECAY_MAX_MARKUP_AFTER_HOURS", 6.0, profile=name),
         ema_exit_decay_max_markup=_env_float("EMA_EXIT_DECAY_MAX_MARKUP", 0.030, profile=name),
-        ema_exit_runner_enabled=_env_bool("EMA_EXIT_RUNNER_ENABLED", False, profile=name),
+        ema_exit_runner_enabled=_env_bool("EMA_EXIT_RUNNER_ENABLED", True, profile=name),
         ema_exit_runner_activation_markup=_env_float("EMA_EXIT_RUNNER_ACTIVATION_MARKUP", 0.020, profile=name),
         ema_exit_runner_trailing_pullback=_env_float("EMA_EXIT_RUNNER_TRAILING_PULLBACK", 0.010, profile=name),
         ema_exit_runner_take_profit_markup=_env_float("EMA_EXIT_RUNNER_TAKE_PROFIT_MARKUP", 0.050, profile=name),
-        ema_exit_trailing_enabled=_env_bool("EMA_EXIT_TRAILING_ENABLED", False, profile=name),
-        ema_exit_trailing_fixed_fraction=_env_float("EMA_EXIT_TRAILING_FIXED_FRACTION", 0.35, profile=name),
+        ema_exit_trailing_enabled=_env_bool("EMA_EXIT_TRAILING_ENABLED", True, profile=name),
+        ema_exit_trailing_fixed_fraction=_env_float("EMA_EXIT_TRAILING_FIXED_FRACTION", 0.30, profile=name),
         ema_exit_trailing_activation_markup=_env_float(
             "EMA_EXIT_TRAILING_ACTIVATION_MARKUP",
             _env_float("EMA_EXIT_RUNNER_ACTIVATION_MARKUP", 0.020, profile=name),
@@ -1149,11 +1167,16 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
             _env_float("EMA_EXIT_RUNNER_TRAILING_PULLBACK", 0.010, profile=name),
             profile=name,
         ),
+        ema_exit_trailing_atr_multiplier=_env_float("EMA_EXIT_TRAILING_ATR_MULTIPLIER", 1.5, profile=name),
+        ema_exit_trailing_min_pullback=_env_float("EMA_EXIT_TRAILING_MIN_PULLBACK", 0.006, profile=name),
+        ema_exit_trailing_max_pullback=_env_float("EMA_EXIT_TRAILING_MAX_PULLBACK", 0.030, profile=name),
         ema_exit_trailing_take_profit_markup=_env_float(
             "EMA_EXIT_TRAILING_TAKE_PROFIT_MARKUP",
             _env_float("EMA_EXIT_RUNNER_TAKE_PROFIT_MARKUP", 0.050, profile=name),
             profile=name,
         ),
+        ema_exit_runner_profit_lock_enabled=_env_bool("EMA_EXIT_RUNNER_PROFIT_LOCK_ENABLED", True, profile=name),
+        ema_exit_runner_use_aggressive_limit=_env_bool("EMA_EXIT_RUNNER_USE_AGGRESSIVE_LIMIT", True, profile=name),
         ema_averaging_enabled=_env_bool("EMA_AVERAGING_ENABLED", True, profile=name),
         ema_averaging_drawdown_step=ema_averaging_drawdown_step,
         ema_averaging_min_drawdown_step=ema_averaging_min_drawdown_step,
