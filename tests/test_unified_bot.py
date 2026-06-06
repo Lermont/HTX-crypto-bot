@@ -7736,10 +7736,35 @@ class UnifiedBotTests(unittest.TestCase):
             with self.assertRaisesRegex(UnexpectedExchangeResponse, "fetch_ohlcv returned dict"):
                 bot._closed_candles(SYMBOL, 2, timeframe="1m")
 
+    def test_position_mode_already_one_way_skips_write_endpoint(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_config(RUNTIME=config.RUNTIME):
+                bot = self.make_bot(Path(raw_tmp))
+
+                self.assertTrue(bot._ensure_one_way_position_mode(force=True))
+
+                self.assertTrue(bot.one_way_mode_checked)
+                self.assertEqual(bot.exchange.set_position_mode_calls, [])
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertEqual(rows[-1]["level"], "INFO")
+                self.assertEqual(rows[-1]["event"], "futures_setup")
+                self.assertIn("position_mode_one_way_confirmed", rows[-1]["reason"])
+
     def test_position_mode_locked_by_existing_positions_logs_info(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
+                responses = iter(["", "single_side"])
+
+                def fake_position_info(request):
+                    mode = next(responses)
+                    data = {"positions": [], "contract_detail": []}
+                    if mode:
+                        data["position_mode"] = mode
+                    return {"status": "ok", "data": data}
+
+                bot.exchange.contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo = fake_position_info
                 bot.exchange.set_position_mode_error = RuntimeError(
                     'htx {"status":"error","err_code":1494,'
                     '"err_msg":"Position mode cannot be adjusted for existing positions."}'
@@ -7754,6 +7779,58 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(rows[-1]["event"], "futures_setup")
                 self.assertIn("position_mode_existing_positions", rows[-1]["reason"])
                 self.assertIn("position_mode=single_side", rows[-1]["reason"])
+
+    def test_position_mode_access_limit_continues_when_one_way_is_confirmed(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_config(RUNTIME=config.RUNTIME):
+                bot = self.make_bot(Path(raw_tmp))
+                responses = iter(["", "single_side"])
+
+                def fake_position_info(request):
+                    mode = next(responses)
+                    data = {"positions": [], "contract_detail": []}
+                    if mode:
+                        data["position_mode"] = mode
+                    return {"status": "ok", "data": data}
+
+                bot.exchange.contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo = fake_position_info
+                bot.exchange.set_position_mode_error = RuntimeError(
+                    'htx {"status":"error","err_code":1032,'
+                    '"err_msg":"Maximum number of access attempts exceeded."}'
+                )
+
+                self.assertTrue(bot._ensure_one_way_position_mode(force=True))
+                self.assertTrue(bot.one_way_mode_checked)
+                self.assertEqual(len(bot.exchange.set_position_mode_calls), 1)
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                row = next(row for row in rows if row["reason"].startswith("position_mode_switch_limited_confirmed"))
+                self.assertEqual(row["level"], "WARNING")
+                self.assertEqual(row["event"], "futures_setup")
+                self.assertEqual(row["exception_type"], "RuntimeError")
+                self.assertEqual(row["error_code"], "1032")
+                self.assertEqual(row["retryable"], "1")
+
+    def test_position_mode_access_limit_without_confirmation_blocks_live_start(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_config(RUNTIME=config.RUNTIME):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.account_position_mode = ""
+                bot.exchange.set_position_mode_error = RuntimeError(
+                    'htx {"status":"error","err_code":1032,'
+                    '"err_msg":"Maximum number of access attempts exceeded."}'
+                )
+
+                self.assertFalse(bot._ensure_one_way_position_mode(force=True))
+                self.assertFalse(bot.one_way_mode_checked)
+                self.assertEqual(len(bot.exchange.set_position_mode_calls), 1)
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertEqual(rows[-1]["level"], "ERROR")
+                self.assertEqual(rows[-1]["event"], "futures_setup")
+                self.assertEqual(rows[-1]["reason"], "position_mode_switch_limited_unverified")
+                self.assertEqual(rows[-1]["error_code"], "1032")
+                self.assertEqual(rows[-1]["retryable"], "1")
 
     def test_position_mode_locked_in_hedge_mode_blocks_live_start(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

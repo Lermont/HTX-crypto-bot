@@ -1565,6 +1565,14 @@ class ExchangeMixin:
             or "position mode cannot be adjusted for open orders" in text
         )
 
+    def _is_position_mode_access_limit_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            '"err_code":1032' in text
+            or '"err_code":"1032"' in text
+            or "maximum number of access attempts exceeded" in text
+        )
+
     def _position_mode_values_from_payload(self, payload) -> List[str]:
         values: List[str] = []
         if isinstance(payload, dict):
@@ -1623,6 +1631,24 @@ class ExchangeMixin:
         if self.one_way_mode_checked and not force:
             return True
 
+        mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()
+        if mode_is_one_way is True:
+            self.one_way_mode_checked = True
+            self._log_event(
+                "INFO",
+                "HTX futures account position mode is already one-way",
+                event="futures_setup",
+                reason=f"position_mode_one_way_confirmed;{mode_reason}",
+            )
+            return True
+        if mode_is_one_way is False:
+            self._log_event(
+                "WARNING",
+                "HTX futures account is not in one-way mode; attempting to switch it",
+                event="futures_setup",
+                reason=f"position_mode_switch_required;{mode_reason}",
+            )
+
         try:
             if config.RISK.margin_mode == "cross":
                 self.exchange.set_position_mode(False, None, params=self._position_params())
@@ -1661,6 +1687,35 @@ class ExchangeMixin:
                     reason=f"position_mode_existing_positions;{mode_reason}",
                 )
                 return True
+
+            if self._is_position_mode_access_limit_error(exc) or self._is_transient_exchange_error(exc):
+                mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()
+                if mode_is_one_way is True:
+                    self.one_way_mode_checked = True
+                    self._log_event(
+                        "WARNING",
+                        "HTX position mode switch was rate-limited, but current one-way mode was confirmed; "
+                        f"continuing with one-way order parameters: {exc}",
+                        event="futures_setup",
+                        reason=f"position_mode_switch_limited_confirmed;{mode_reason}",
+                        exception=exc,
+                        retryable=True,
+                    )
+                    return True
+
+                self._log_event(
+                    "ERROR",
+                    "HTX position mode switch was rate-limited and current one-way mode could not be confirmed",
+                    event="futures_setup",
+                    reason=(
+                        "position_mode_switch_limited_unverified"
+                        if mode_is_one_way is None
+                        else "position_mode_switch_limited_hedge_mode"
+                    ),
+                    exception=exc,
+                    retryable=True,
+                )
+                return False
 
             self._log_event(
                 "ERROR",
