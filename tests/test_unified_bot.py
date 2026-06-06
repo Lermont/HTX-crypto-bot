@@ -3808,6 +3808,85 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(signal["entry_valid"])
                 self.assertEqual(strategy.ema_pullback_slow_minutes, 8)
 
+    def test_ema_entry_signal_accepts_pullback_when_trigger_conflicts(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy(
+                ema_use_rs_confirmation=False,
+                ema_use_btc_risk_filter=False,
+                ema_chop_filter_enabled=False,
+                ema_volume_confirmation_enabled=False,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                trigger_closes = [100.0 + index for index in range(79)] + [177.5]
+                macro_closes = [100.0 + index * 2.0 for index in range(80)]
+                pullback_closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                benchmark_closes = [100.0] * len(trigger_closes)
+                ctx = SignalContext(
+                    closes=trigger_closes,
+                    benchmark_closes=benchmark_closes,
+                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    latest_ts=1000,
+                    cache_key=SYMBOL,
+                    macro_closes=macro_closes,
+                    macro_latest_ts=1000,
+                    pullback_closes=pullback_closes,
+                    pullback_latest_ts=1000,
+                )
+
+                signal = bot._build_signal_from_closes(ctx)
+
+                self.assertIsNotNone(signal)
+                self.assertTrue(signal["macro_valid"])
+                self.assertTrue(signal["pullback_valid"])
+                self.assertFalse(signal["trigger_valid"])
+                self.assertTrue(signal["entry_setup_valid"])
+                self.assertTrue(signal["entry_side_valid"])
+                self.assertEqual(signal["entry_signal_source"], "pullback")
+                self.assertTrue(signal["ema_entry_valid"])
+                self.assertTrue(signal["raw_entry_valid"])
+                self.assertTrue(signal["entry_valid"])
+
+    def test_ema_short_entry_signal_accepts_pullback_when_trigger_conflicts(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            strategy = self.ema_test_strategy(
+                ema_use_rs_confirmation=False,
+                ema_use_btc_risk_filter=False,
+                ema_chop_filter_enabled=False,
+                ema_volume_confirmation_enabled=False,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                trigger_closes = [200.0 - index for index in range(79)] + [122.5]
+                macro_closes = [260.0 - index * 2.0 for index in range(80)]
+                long_pullback = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                pullback_closes = [300.0 - close for close in long_pullback]
+                benchmark_closes = [100.0] * len(trigger_closes)
+                ctx = SignalContext(
+                    closes=trigger_closes,
+                    benchmark_closes=benchmark_closes,
+                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    latest_ts=1000,
+                    cache_key=SYMBOL,
+                    macro_closes=macro_closes,
+                    macro_latest_ts=1000,
+                    pullback_closes=pullback_closes,
+                    pullback_latest_ts=1000,
+                )
+
+                signal = bot._build_signal_from_closes(ctx)
+
+                self.assertIsNotNone(signal)
+                self.assertTrue(signal["macro_valid"])
+                self.assertTrue(signal["pullback_valid"])
+                self.assertFalse(signal["trigger_valid"])
+                self.assertTrue(signal["entry_setup_valid"])
+                self.assertTrue(signal["entry_side_valid"])
+                self.assertEqual(signal["entry_signal_source"], "pullback")
+                self.assertTrue(signal["ema_entry_valid"])
+                self.assertTrue(signal["raw_entry_valid"])
+                self.assertTrue(signal["entry_valid"])
+
     def test_ema_entry_signal_requires_recent_volume_confirmation(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = self.ema_test_strategy(

@@ -223,7 +223,7 @@ class SignalMathTests(unittest.TestCase):
         self.assertTrue(long_metrics["add_valid"])
         self.assertTrue(short_metrics["add_valid"])
 
-    def test_ema_signal_direction_metrics_return_neutral_on_timeframe_conflict(self):
+    def test_ema_signal_direction_metrics_allow_pullback_or_trend_entry(self):
         metrics = ema_signal_direction_metrics(
             "long",
             current_close=100.0,
@@ -248,7 +248,39 @@ class SignalMathTests(unittest.TestCase):
         self.assertEqual(metrics["ema_trigger_side"], "short")
         self.assertEqual(metrics["ema_side"], "neutral")
         self.assertFalse(metrics["ema_side_valid"])
-        self.assertFalse(metrics["entry_valid"])
+        self.assertTrue(metrics["entry_setup_valid"])
+        self.assertTrue(metrics["entry_side_valid"])
+        self.assertEqual(metrics["entry_signal_source"], "pullback")
+        self.assertTrue(metrics["entry_valid"])
+
+        short_metrics = ema_signal_direction_metrics(
+            "short",
+            current_close=100.0,
+            ema_macro_fast=95.0,
+            ema_macro_slow=100.0,
+            ema_pullback_fast=98.0,
+            ema_pullback_slow=101.0,
+            ema_trigger_fast=103.0,
+            ema_trigger_slow=101.0,
+            pullback_valid=True,
+            rs60=-0.02,
+            btc_return_30m=0.0,
+            use_rs_confirmation=True,
+            long_min_rs60=0.0,
+            short_max_rs60=0.0,
+            use_btc_risk_filter=False,
+            btc_long_min_return_30m=0.0,
+            btc_short_max_return_30m=0.0,
+        )
+
+        self.assertEqual(short_metrics["ema_macro_side"], "short")
+        self.assertEqual(short_metrics["ema_trigger_side"], "long")
+        self.assertEqual(short_metrics["ema_side"], "neutral")
+        self.assertFalse(short_metrics["ema_side_valid"])
+        self.assertTrue(short_metrics["entry_setup_valid"])
+        self.assertTrue(short_metrics["entry_side_valid"])
+        self.assertEqual(short_metrics["entry_signal_source"], "pullback")
+        self.assertTrue(short_metrics["entry_valid"])
 
     def test_ema_signal_direction_metrics_block_invalid_filters(self):
         metrics = ema_signal_direction_metrics(

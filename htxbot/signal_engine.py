@@ -194,6 +194,9 @@ class SignalMixin:
             f"data_valid={flag('data_valid', data_default)};"
             f"direction_valid={flag('direction_valid', data_default)};"
             f"entry_valid={flag('entry_valid', False)};"
+            f"entry_setup_valid={flag('entry_setup_valid', False)};"
+            f"entry_side_valid={flag('entry_side_valid', False)};"
+            f"entry_signal_source={signal.get('entry_signal_source', '')};"
             f"macro_valid={flag('macro_valid')};"
             f"pullback_valid={flag('pullback_valid')};"
             f"trigger_valid={flag('trigger_valid')};"
@@ -292,6 +295,24 @@ class SignalMixin:
             "direction_valid": bool(signal.get("direction_valid", signal.get("valid", False))),
             "entry_valid": bool(signal.get("entry_valid", False)),
             "ema_entry_valid": bool(signal.get("ema_entry_valid", signal.get("entry_valid", False))),
+            "entry_setup_valid": bool(
+                signal.get(
+                    "entry_setup_valid",
+                    bool(signal.get("trigger_valid", False) or signal.get("pullback_valid", False)),
+                )
+            ),
+            "entry_side_valid": bool(
+                signal.get(
+                    "entry_side_valid",
+                    bool(
+                        signal.get("macro_valid", signal.get("direction_valid", False))
+                        and signal.get(
+                            "entry_setup_valid",
+                            bool(signal.get("trigger_valid", False) or signal.get("pullback_valid", False)),
+                        )
+                    ),
+                )
+            ),
             "macro_valid": bool(signal.get("macro_valid", signal.get("direction_valid", False))),
             "pullback_valid": bool(signal.get("pullback_valid", True)),
             "trigger_valid": bool(signal.get("trigger_valid", True)),
@@ -1173,6 +1194,9 @@ class SignalMixin:
             "ema_side": "neutral",
             "ema_side_valid": False,
             "ema_entry_valid": False,
+            "entry_setup_valid": False,
+            "entry_side_valid": False,
+            "entry_signal_source": "none",
             "ema25d": 0.0,
             "ema50d": 0.0,
             "ema1d": 0.0,
@@ -1429,6 +1453,9 @@ class SignalMixin:
         ema_trigger_side = direction.get("ema_trigger_side", "neutral")
         ema_side = direction.get("ema_side", "neutral")
         ema_side_valid = bool(direction.get("ema_side_valid", False))
+        entry_setup_valid = bool(direction.get("entry_setup_valid", bool(trigger_valid or pullback_valid)))
+        entry_side_valid = bool(direction.get("entry_side_valid", bool(macro_valid and entry_setup_valid)))
+        entry_signal_source = str(direction.get("entry_signal_source", "none") or "none")
         macro_gap = direction["macro_gap"]
         trigger_gap = direction["trigger_gap"]
         pullback_depth = direction["pullback_depth"]
@@ -1438,11 +1465,11 @@ class SignalMixin:
         macro_context = self._macro_context_for_trading(macro_context)
         market_structure = self._ema_market_structure_context(candles)
         data_valid = True
-        direction_valid = bool(ema_side_valid and score > 0)
+        direction_valid = bool(entry_side_valid and score > 0)
         market_structure_valid = bool(market_structure["market_structure_valid"])
         entry_pullback_required = bool(getattr(strategy, "ema_entry_require_pullback_recovery", False))
         entry_pullback_gate_valid = bool(pullback_valid or not entry_pullback_required)
-        ema_entry_valid = bool(macro_valid and trigger_valid and entry_pullback_gate_valid)
+        ema_entry_valid = bool(macro_valid and entry_setup_valid and entry_pullback_gate_valid)
         raw_entry_valid = bool(
             ema_entry_valid
             and rs_confirm_valid
@@ -1467,6 +1494,9 @@ class SignalMixin:
             "data_valid": data_valid,
             "direction_valid": direction_valid,
             "ema_entry_valid": ema_entry_valid,
+            "entry_setup_valid": entry_setup_valid,
+            "entry_side_valid": entry_side_valid,
+            "entry_signal_source": entry_signal_source,
             "entry_valid": raw_entry_valid,
             "macro_valid": macro_valid,
             "pullback_valid": pullback_valid,
@@ -1497,6 +1527,7 @@ class SignalMixin:
             f"strategy=ema_pullback;macro_tf={timeframes['macro']};pullback_tf={timeframes['pullback']};trigger_tf={timeframes['trigger']};"
             f"ema_side={ema_side};ema_macro_side={ema_macro_side};ema_trigger_side={ema_trigger_side};"
             f"ema_side_valid={int(ema_side_valid)};"
+            f"entry_side_valid={int(entry_side_valid)};entry_signal_source={entry_signal_source};"
             f"ema25d={ema_macro_fast:.12f};ema50d={ema_macro_slow:.12f};"
             f"ema1d={ema_pullback_fast:.12f};ema2d={ema_pullback_slow:.12f};"
             f"ema50={ema_trigger_fast:.12f};ema100={ema_trigger_slow:.12f};"
@@ -1508,6 +1539,7 @@ class SignalMixin:
             f"pullback_min_gap={pullback_context['pullback_recovery_min_gap']:.6f};"
             f"entry_pullback_required={int(entry_pullback_required)};"
             f"entry_pullback_gate_valid={int(entry_pullback_gate_valid)};"
+            f"entry_setup_valid={int(entry_setup_valid)};"
             f"ema_entry_valid={int(ema_entry_valid)};"
             f"macro_valid={int(macro_valid)};pullback_valid={int(pullback_valid)};"
             f"trigger_valid={int(trigger_valid)};rs_confirm_valid={int(rs_confirm_valid)};"
@@ -1569,6 +1601,9 @@ class SignalMixin:
             "ema_side": ema_side,
             "ema_side_valid": ema_side_valid,
             "ema_entry_valid": ema_entry_valid,
+            "entry_setup_valid": entry_setup_valid,
+            "entry_side_valid": entry_side_valid,
+            "entry_signal_source": entry_signal_source,
             "ema25d": ema_macro_fast,
             "ema50d": ema_macro_slow,
             "ema1d": ema_pullback_fast,

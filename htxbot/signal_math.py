@@ -336,6 +336,9 @@ def ema_signal_direction_metrics(
             "pullback_depth": 0.0,
             "rs_edge": 0.0,
             "score": 0.0,
+            "entry_setup_valid": False,
+            "entry_side_valid": False,
+            "entry_signal_source": "none",
             "entry_valid": False,
             "add_valid": False,
         }
@@ -365,8 +368,18 @@ def ema_signal_direction_metrics(
     pullback_multiplier = max(0.01, 1.0 + pullback_depth)
     base_trend = macro_gap + trigger_gap
     score = base_trend * pullback_multiplier * rs_multiplier
-    entry_valid = bool(macro_valid and pullback_valid and trigger_valid and rs_confirm_valid and btc_entry_valid)
-    add_valid = bool(macro_valid and (trigger_valid or pullback_valid))
+    entry_setup_valid = bool(trigger_valid or pullback_valid)
+    if trigger_valid and pullback_valid:
+        entry_signal_source = "trend+pullback"
+    elif trigger_valid:
+        entry_signal_source = "trend"
+    elif pullback_valid:
+        entry_signal_source = "pullback"
+    else:
+        entry_signal_source = "none"
+    entry_side_valid = bool(macro_valid and entry_setup_valid)
+    entry_valid = bool(entry_side_valid and rs_confirm_valid and btc_entry_valid)
+    add_valid = bool(entry_side_valid)
     return {
         "ema_macro_side": macro_side,
         "ema_trigger_side": trigger_side,
@@ -382,6 +395,9 @@ def ema_signal_direction_metrics(
         "pullback_depth": pullback_depth,
         "rs_edge": rs_edge,
         "score": score,
+        "entry_setup_valid": entry_setup_valid,
+        "entry_side_valid": entry_side_valid,
+        "entry_signal_source": entry_signal_source,
         "entry_valid": entry_valid,
         "add_valid": add_valid,
     }
