@@ -776,6 +776,23 @@ class UnifiedBotTests(unittest.TestCase):
 
             self.assertFalse(jsonl_path.exists())
 
+    def test_signal_analytics_monitoring_failures_do_not_raise_step_error(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.signal_analytics_csv_path = Path(raw_tmp) / "signal_analytics_csv_locked"
+            bot.signal_analytics_csv_path.mkdir()
+
+            with patch.object(bot, "_rotate_jsonl_if_needed", side_effect=PermissionError("jsonl locked")):
+                bot._record_signal_analytics(
+                    "signal_built",
+                    symbol=SYMBOL,
+                    signal=self.entry_signal(),
+                    context={"note": "monitoring failure must not stop trading"},
+                )
+
+            failures = getattr(bot, "_monitoring_write_failures", set())
+            self.assertTrue(any("signal_analytics" in item[0] for item in failures))
+
     def test_trade_csv_concurrent_writes_rotate_without_lost_rows(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             monitoring = replace(config.MONITORING, csv_rotate_max_bytes=450, csv_archive_dir="archive")
@@ -7187,6 +7204,33 @@ class UnifiedBotTests(unittest.TestCase):
                 )
                 self.assertIn("closeable_amount_reserved", state.pending_exit_ladder_reason)
 
+    def test_pending_closeable_exit_ladder_keeps_original_wait_after_force_reset_window(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 0.0
+                state.position_frozen = 5.0
+                state.entry_price = 100.0
+
+                bot._ensure_sell_ladder(SYMBOL)
+                old_pending_since = time.time() - 600.0
+                state.pending_exit_ladder_since = old_pending_since
+                bot._ensure_sell_ladder(SYMBOL)
+
+                self.assertEqual(bot.exchange.created_orders, [])
+                self.assertEqual(bot.exchange.canceled_orders, [])
+                self.assertAlmostEqual(state.pending_exit_ladder_since, old_pending_since, places=3)
+                self.assertEqual(
+                    state.sell_ladder_signature,
+                    bot._pending_exit_ladder_signature("normal"),
+                )
+                with bot.diagnostics_csv_path.open(newline="", encoding="utf-8") as handle:
+                    reasons = [row["reason"] for row in csv.DictReader(handle)]
+                self.assertNotIn("pending_closeable_force_reset", reasons)
+
     def test_breakeven_waits_on_pending_closeable_without_retrying_reduce_only(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
@@ -8496,6 +8540,43 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(rows[-1]["exception_type"], "NetworkError")
             self.assertEqual(rows[-1]["error_code"], "invalid-parameter")
             self.assertEqual(rows[-1]["retryable"], "0")
+
+    def test_signal_cache_retries_same_candle_after_retryable_symbol_fetch_failure(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            strategy = self.ema_test_strategy(
+                ema_use_rs_confirmation=False,
+                ema_use_btc_risk_filter=False,
+                ema_chop_filter_enabled=False,
+                ema_volume_confirmation_enabled=False,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.benchmark_symbol = BTC_SYMBOL
+                bot.symbols = [SYMBOL]
+                bot.entry_symbols = {SYMBOL}
+                bot.market_by_symbol = {BTC_SYMBOL: BTC_MARKET, SYMBOL: MARKET}
+                benchmark_candles = ohlcv_series([100.0] * 120)
+                symbol_candles = ohlcv_series([100.0 + index * 0.1 for index in range(120)])
+                calls = {"symbol": 0}
+
+                def fake_closed_candles(symbol, limit, max_ts=None, timeframe=None, exchange=None):
+                    if symbol == BTC_SYMBOL:
+                        return benchmark_candles[-int(limit):]
+                    calls["symbol"] += 1
+                    if calls["symbol"] == 1:
+                        raise ccxt.RequestTimeout("temporary ohlcv timeout")
+                    return symbol_candles[-int(limit):]
+
+                bot._closed_candles = fake_closed_candles
+
+                first_updated = bot._update_signal_cache_if_needed()
+                second_updated = bot._update_signal_cache_if_needed()
+
+                self.assertTrue(first_updated)
+                self.assertTrue(second_updated)
+                self.assertEqual(calls["symbol"], 2)
+                self.assertEqual(bot.signal_cache["closed_candle_ts"], int(benchmark_candles[-1][0]))
+                self.assertIn(SYMBOL, bot.signal_cache["symbols"])
 
     def test_log_message_omits_html_gateway_body(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

@@ -1623,27 +1623,11 @@ class ExitStrategy:
             self._safe_float(getattr(config.RUNTIME, "order_timeout_sec", 0.0), 0.0),
             self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 0.0), 0.0),
         )
-        # Give it up to 5 minutes to clear naturally, then force a "reset" by canceling all orders
-        force_reset_after = 300.0
         elapsed = now - pending_since
         if elapsed < retry_after:
             return True
 
         if state.position_available <= 0 and state.position_frozen > 0:
-            if elapsed > force_reset_after:
-                self._log_event(
-                    "WARNING",
-                    f"Forcing exit ladder rebuild for {symbol}: position is still reserved after {elapsed:.1f}s; canceling all orders to clear state",
-                    event="state_exchange_mismatch",
-                    symbol=symbol,
-                    reason="pending_closeable_force_reset",
-                )
-                self._cancel_all_orders(symbol, reason="pending_closeable_force_reset")
-                state.sell_ladder_signature = ""
-                self._clear_pending_exit_ladder(state)
-                self._save_state()
-                return False
-
             state.pending_exit_ladder_since = pending_since  # Keep original start time
             self._refresh_active_side(state)
             self._save_state()

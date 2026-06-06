@@ -1816,7 +1816,6 @@ class SignalMixin:
 
         latest_ts = int(benchmark_candles[-1][0])
         benchmark_closes = [self._safe_float(row[4]) for row in benchmark_candles]
-        self.signal_cache["closed_candle_ts"] = latest_ts
         self.signal_cache["benchmark_ok"] = True
         btc_risk = self._btc_risk_context(benchmark_closes)
         self.signal_cache["btc_risk"] = btc_risk
@@ -1824,6 +1823,7 @@ class SignalMixin:
         self.signal_cache.setdefault("macro", {})["gold_btc_rsi"] = macro_context
 
         rows = {}
+        had_retryable_symbol_error = False
 
         def fetch_symbol_candles(symbol):
             try:
@@ -1907,6 +1907,13 @@ class SignalMixin:
             if log_info:
                 level, msg, event, reason = log_info[:4]
                 exc = log_info[4] if len(log_info) > 4 else None
+                retryable = (
+                    getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc)
+                    if exc
+                    else None
+                )
+                if retryable:
+                    had_retryable_symbol_error = True
                 self._log_event(
                     level,
                     msg,
@@ -1914,11 +1921,7 @@ class SignalMixin:
                     symbol=symbol,
                     reason=reason,
                     exception=exc,
-                    retryable=(
-                        getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc)
-                        if exc
-                        else None
-                    ),
+                    retryable=retryable,
                 )
                 continue
 
@@ -2007,11 +2010,16 @@ class SignalMixin:
             )
 
         self.signal_cache["symbols"] = rows
+        self.signal_cache["closed_candle_ts"] = None if had_retryable_symbol_error else latest_ts
         self._log_event(
             "INFO",
             f"Signals updated for {len(rows)} futures symbols",
             event="signal_updated",
-            reason=f"closed_ts={latest_ts}",
+            reason=(
+                f"closed_ts={latest_ts}"
+                if not had_retryable_symbol_error
+                else f"closed_ts={latest_ts};retryable_symbol_error=1;cache_retry_pending=1"
+            ),
         )
         self._save_state()
         return True

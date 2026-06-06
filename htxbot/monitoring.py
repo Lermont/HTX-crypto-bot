@@ -23,14 +23,31 @@ _CSV_STREAM_COPY_CHUNK_SIZE = 1024 * 1024
 
 
 class MonitoringMixin:
-    def _append_headered_csv_row(self, path: Optional[Path], header: Sequence[str], row: Sequence[Any]):
-        if not path:
+    def _monitoring_write_failed_once(self, path: Optional[Path], action: str, exc: Exception):
+        key = (str(path or ""), action)
+        logged = getattr(self, "_monitoring_write_failures", set())
+        if key in logged:
             return
-        with _monitoring_global_lock:
-            with instance_rlock(self, "_monitoring_lock"):
-                self._rotate_csv_if_needed(path, header)
-                with path.open("a", newline="", encoding="utf-8") as f:
-                    csv.writer(f).writerow(row)
+        if not isinstance(logged, set):
+            logged = set()
+        logged.add(key)
+        self._monitoring_write_failures = logged
+        logger = getattr(self, "log", logging.getLogger(__name__))
+        logger.warning("Could not %s %s: %s", action, path, exc)
+
+    def _append_headered_csv_row(self, path: Optional[Path], header: Sequence[str], row: Sequence[Any]) -> bool:
+        if not path:
+            return True
+        try:
+            with _monitoring_global_lock:
+                with instance_rlock(self, "_monitoring_lock"):
+                    self._rotate_csv_if_needed(path, header)
+                    with path.open("a", newline="", encoding="utf-8") as f:
+                        csv.writer(f).writerow(row)
+            return True
+        except Exception as exc:
+            self._monitoring_write_failed_once(path, "append CSV row", exc)
+            return False
 
     def _replace_path_with_retry(self, src: Path, dst: Path, attempts: int = 30, delay_sec: float = 0.05):
         replace_path_with_retry(
@@ -220,25 +237,31 @@ class MonitoringMixin:
         except Exception as exc:
             self.log.warning("Could not rotate JSONL log %s: %s", path, exc)
 
-    def _append_jsonl(self, path: Optional[Path], payload: Dict[str, Any]):
+    def _append_jsonl(self, path: Optional[Path], payload: Dict[str, Any]) -> bool:
         if not path:
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, sort_keys=True) + "\n"
-        with _monitoring_global_lock:
-            with instance_rlock(self, "_monitoring_lock"):
-                self._rotate_jsonl_if_needed(path)
-                last_exc = None
-                for attempt in range(3):
-                    try:
-                        with path.open("a", encoding="utf-8") as f:
-                            f.write(line)
-                        return
-                    except PermissionError as exc:
-                        last_exc = exc
-                        time.sleep(0.05 * (attempt + 1))
-                if last_exc is not None:
-                    self.log.warning("Could not append JSONL log %s: %s", path, last_exc)
+            return True
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, sort_keys=True) + "\n"
+            with _monitoring_global_lock:
+                with instance_rlock(self, "_monitoring_lock"):
+                    self._rotate_jsonl_if_needed(path)
+                    last_exc = None
+                    for attempt in range(3):
+                        try:
+                            with path.open("a", encoding="utf-8") as f:
+                                f.write(line)
+                            return True
+                        except OSError as exc:
+                            last_exc = exc
+                            time.sleep(0.05 * (attempt + 1))
+                    if last_exc is not None:
+                        self._monitoring_write_failed_once(path, "append JSONL log", last_exc)
+                        return False
+        except Exception as exc:
+            self._monitoring_write_failed_once(path, "append JSONL log", exc)
+            return False
+        return False
 
     def _sanitize_for_log(self, value: Any, depth: int = 0) -> Any:
         if depth > 8:
@@ -557,7 +580,7 @@ class MonitoringMixin:
             if not ema60:
                 ema60 = state.last_ema60
 
-        self._append_headered_csv_row(
+        if not self._append_headered_csv_row(
             self.csv_path,
             self.CSV_HEADER,
             [
@@ -587,7 +610,8 @@ class MonitoringMixin:
                 error_code,
                 retryable,
             ],
-        )
+        ):
+            raise OSError(f"Could not append CSV event log {self.csv_path}")
 
     def _append_cycle_stats_row(self, row: dict):
         self._append_headered_csv_row(
