@@ -175,8 +175,12 @@ class SignalMathTests(unittest.TestCase):
         btc = [100.0, 105.0, 110.25]
         context = relative_strength_context(closes, btc, fast_window=1, slow_window=2)
 
-        self.assertAlmostEqual(context["rs30"], math.log(121.0 / 110.0) - math.log(110.25 / 105.0))
-        self.assertAlmostEqual(context["rs60"], math.log(121.0 / 100.0) - math.log(110.25 / 100.0))
+        self.assertAlmostEqual(
+            context["rs30"], math.log(121.0 / 110.0) - math.log(110.25 / 105.0)
+        )
+        self.assertAlmostEqual(
+            context["rs60"], math.log(121.0 / 100.0) - math.log(110.25 / 100.0)
+        )
         self.assertAlmostEqual(context["btc_return_30m"], math.log(110.25 / 105.0))
 
     def test_pullback_recovery_context_is_mirrored_for_long_and_short(self):
@@ -357,7 +361,9 @@ class SignalMathTests(unittest.TestCase):
 
     def test_budget_and_volatility_multipliers_are_pure_math(self):
         self.assertEqual(signal_budget_multiplier(10.0, False, 1.0, 0.25, 1.0), 1.0)
-        self.assertAlmostEqual(signal_budget_multiplier(0.5, True, 1.0, 0.25, 1.0), 0.625)
+        self.assertAlmostEqual(
+            signal_budget_multiplier(0.5, True, 1.0, 0.25, 1.0), 0.625
+        )
         self.assertEqual(volatility_multiplier(10.0, False, 1.0, 0.5, 2.0), 1.0)
         self.assertEqual(volatility_multiplier(10.0, True, 1.0, 0.5, 2.0), 2.0)
 
@@ -414,8 +420,14 @@ class SignalMathTests(unittest.TestCase):
         btc = [50.0, 50.0, 55.0]
         direct = [2.0, 2.1, 2.0]
 
-        self.assertAlmostEqual(gold_btc_ratio_return(gold, btc, 2), math.log((110.0 / 55.0) / (100.0 / 50.0)))
-        self.assertAlmostEqual(gold_btc_ratio_return(gold, btc, 2, direct_closes=direct), math.log(2.0 / 2.0))
+        self.assertAlmostEqual(
+            gold_btc_ratio_return(gold, btc, 2),
+            math.log((110.0 / 55.0) / (100.0 / 50.0)),
+        )
+        self.assertAlmostEqual(
+            gold_btc_ratio_return(gold, btc, 2, direct_closes=direct),
+            math.log(2.0 / 2.0),
+        )
         self.assertEqual(gold_btc_ratio_return(gold[:1], btc[:1], 2), 0.0)
 
     def test_local_reversion_context_uses_side_specific_edge(self):
@@ -425,7 +437,9 @@ class SignalMathTests(unittest.TestCase):
         short_context = local_reversion_context(closes, 105.0, "short")
 
         self.assertAlmostEqual(long_context["local_reversion"], (110.0 - 105.0) / 110.0)
-        self.assertAlmostEqual(short_context["local_reversion"], (105.0 - 100.0) / 100.0)
+        self.assertAlmostEqual(
+            short_context["local_reversion"], (105.0 - 100.0) / 100.0
+        )
 
     def test_volume_confirmation_context_requires_recent_volume_expansion(self):
         quiet = [[index, 100.0, 101.0, 99.0, 101.0, 1.0] for index in range(20)]
@@ -481,7 +495,9 @@ class SignalMathTests(unittest.TestCase):
     def test_volume_profile_blocks_adverse_spike_breaks_symmetrically(self):
         long_candles = [[index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)]
         long_candles.append([59, 100.0, 101.0, 89.0, 90.0, 30.0])
-        short_candles = [[index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)]
+        short_candles = [
+            [index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)
+        ]
         short_candles.append([59, 100.0, 111.0, 99.0, 110.0, 30.0])
 
         long_context = volume_confirmation_context(
@@ -526,10 +542,16 @@ class SignalMathTests(unittest.TestCase):
 
     def test_market_structure_math_is_direction_symmetric(self):
         long_candles = [[index, 100.0, 101.0, 99.0, 101.0, 2.0] for index in range(20)]
-        short_candles = [[index, 101.0, 102.0, 100.0, 100.0, 2.0] for index in range(20)]
+        short_candles = [
+            [index, 101.0, 102.0, 100.0, 100.0, 2.0] for index in range(20)
+        ]
 
-        long_volume = volume_confirmation_context(long_candles, 5, 20, 1.0, 0.60, "long")
-        short_volume = volume_confirmation_context(short_candles, 5, 20, 1.0, 0.60, "short")
+        long_volume = volume_confirmation_context(
+            long_candles, 5, 20, 1.0, 0.60, "long"
+        )
+        short_volume = volume_confirmation_context(
+            short_candles, 5, 20, 1.0, 0.60, "short"
+        )
         long_chop = choppiness_context(long_candles, 14, 61.8)
         short_chop = choppiness_context(short_candles, 14, 61.8)
 
