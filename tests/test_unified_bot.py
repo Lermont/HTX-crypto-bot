@@ -2435,17 +2435,19 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(context["regime"], "macro_unavailable")
             self.assertEqual(context["long_budget_multiplier"], 1.0)
 
-    def test_macro_disable_new_entries_blocks_initial_ladder(self):
+    def test_macro_long_budget_zero_blocks_initial_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
             self.set_macro_context(
                 bot,
                 regime="deleveraging",
-                disable_new_entries=True,
+                long_budget_multiplier=0.0,
                 reason="btc_weak_gold_weak",
             )
 
-            bot._maybe_place_initial_buy(SYMBOL, self.entry_signal())
+            signal = self.entry_signal()
+            signal["budget_multiplier"] = 0.0 # reflect long_budget_multiplier applied
+            bot._maybe_place_initial_buy(SYMBOL, signal)
 
             self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
             self.assertEqual(bot.exchange.created_orders, [])

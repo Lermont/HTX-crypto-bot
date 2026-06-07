@@ -166,7 +166,7 @@ Overlay 会识别这些状态：
 - `crypto_underperforms_gold`：黄金强，而 BTC 弱或明显落后。Long budget 会降低，short 方向可以更宽松，averaging 可被禁用，time-exit 会更快。
 - `crypto_risk_on`：BTC 强而黄金落后。机器人保持正常 long 行为，并可降低 short 激进度。
 - `broad_liquidity_risk_on`：BTC 和黄金都强。它被视为建设性状态，但不会自动提高杠杆。
-- `deleveraging`：BTC 和黄金都弱。新入场可被阻止，averaging 禁用，出场加速。
+- `deleveraging`：BTC 和黄金都弱。多头（Long）新入场可能被阻止，空头（Short）被允许但预算减少，averaging 禁用，出场加速。
 - `neutral` 或 `macro_unavailable`：overlay 不增加强方向过滤。
 
 Macro context 会被缓存、写入 CSV，并用于 new-entry block、averaging block、ladder multiplier 和 time-exit multiplier 等决策。精确状态逻辑见 [strategy.md](../strategy.md)。

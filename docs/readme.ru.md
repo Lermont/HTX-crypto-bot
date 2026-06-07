@@ -171,7 +171,7 @@ Overlay классифицирует режимы:
 - `crypto_underperforms_gold`: золото сильное, а BTC слабый или заметно отстаёт. Long budget уменьшается, short-направление может оставаться мягче, averaging может быть отключен, time-exit ускоряется.
 - `crypto_risk_on`: BTC сильный, золото отстаёт. Бот сохраняет штатное long-поведение и может снизить агрессивность short.
 - `broad_liquidity_risk_on`: BTC и золото одновременно сильные. Это конструктивный режим, но он не повышает плечо автоматически.
-- `deleveraging`: BTC и золото одновременно слабые. Новые входы могут блокироваться, averaging отключается, выход ускоряется.
+- `deleveraging`: BTC и золото одновременно слабые. Новые long-позиции могут блокироваться, short-позиции разрешены с уменьшенным бюджетом, averaging отключается, выход ускоряется.
 - `neutral` или `macro_unavailable`: overlay не добавляет сильного directional-фильтра.
 
 Macro context кэшируется, пишется в CSV и используется в решениях по new-entry block, averaging block, ladder multiplier и time-exit multiplier. Точная логика режимов описана в [strategy.md](../strategy.md).
