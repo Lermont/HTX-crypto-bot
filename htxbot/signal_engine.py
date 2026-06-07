@@ -51,7 +51,7 @@ class SignalMixin:
 
     def _average_true_range_rate(
         self, candles: Optional[List[list]], close_price: float, period: int
-    ) -> Tuple[float, float]:
+    ) -> tuple[float, float]:
         if not candles or close_price <= 0:
             return 0.0, 0.0
         atr = self._average_true_range(candles, period)
