@@ -4,7 +4,7 @@ import concurrent.futures
 import concurrent.futures
 import math
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import config
 
@@ -1565,19 +1565,19 @@ class SignalMixin:
             "ts": latest_ts,
         }
 
-    def _build_signal_from_closes(
+    def _init_signal_context(
         self,
-        ctx: SignalContext | List[float],
-        benchmark_closes: Optional[List[float]] = None,
-        btc_risk: Optional[dict] = None,
-        latest_ts: Optional[int] = None,
-        cache_key: str = "",
-        macro_context: Optional[dict] = None,
-        macro_closes: Optional[List[float]] = None,
-        macro_latest_ts: Optional[int] = None,
-        pullback_closes: Optional[List[float]] = None,
-        pullback_latest_ts: Optional[int] = None,
-    ) -> Optional[dict]:
+        ctx,
+        benchmark_closes,
+        btc_risk,
+        latest_ts,
+        cache_key,
+        macro_context,
+        macro_closes,
+        macro_latest_ts,
+        pullback_closes,
+        pullback_latest_ts,
+    ):
         if not isinstance(ctx, SignalContext):
             if benchmark_closes is None or latest_ts is None:
                 raise TypeError(
@@ -1596,84 +1596,45 @@ class SignalMixin:
                 pullback_closes=pullback_closes,
                 pullback_latest_ts=pullback_latest_ts,
             )
-        closes = ctx.closes
-        benchmark_closes = ctx.benchmark_closes
-        btc_risk = ctx.btc_risk
-        latest_ts = ctx.latest_ts
-        candles = ctx.candles
-        cache_key = ctx.cache_key
-        macro_context = ctx.macro_context
-        macro_closes = ctx.macro_closes
-        macro_latest_ts = ctx.macro_latest_ts
-        pullback_closes = ctx.pullback_closes
-        pullback_latest_ts = ctx.pullback_latest_ts
+        return ctx
 
-        if not closes or not benchmark_closes:
-            return None
-
-        current_close = closes[-1]
-        current_btc = benchmark_closes[-1]
-        if current_close <= 0 or current_btc <= 0:
-            return None
-
-        strategy = config.STRATEGY
-        if not getattr(strategy, "ema_strategy_enabled", True):
-            return self._empty_ema_signal(
-                latest_ts, "ema_strategy_disabled", price=current_close
-            )
-
-        use_timeframe_ema = macro_closes is not None or pullback_closes is not None
-        periods = self._ema_periods(converted=use_timeframe_ema)
-        macro_closes = macro_closes if macro_closes is not None else closes
-        pullback_closes = pullback_closes if pullback_closes is not None else closes
-        macro_latest_ts = int(
-            macro_latest_ts if macro_latest_ts is not None else latest_ts
-        )
-        pullback_latest_ts = int(
-            pullback_latest_ts if pullback_latest_ts is not None else latest_ts
-        )
-        timeframes = self._ema_timeframes()
-        rs_fast_window = self._trigger_window_candles(
-            config.SIGNALS.rs_fast_window, timeframes["trigger"]
-        )
-        rs_slow_window = self._trigger_window_candles(
-            config.SIGNALS.rs_slow_window, timeframes["trigger"]
-        )
-        btc_return_window = rs_fast_window
-        benchmark_required = max(rs_slow_window, btc_return_window) + 1
-
-        trigger_required = self._ema_required_history(
-            "trigger", converted=use_timeframe_ema
-        )
-        macro_required = self._ema_required_history(
-            "macro", converted=use_timeframe_ema
-        )
-        pullback_required = self._ema_required_history(
-            "pullback", converted=use_timeframe_ema
-        )
-        if (
+    def _validate_signal_history(
+        self,
+        closes,
+        benchmark_closes,
+        macro_closes,
+        pullback_closes,
+        trigger_required,
+        benchmark_required,
+        macro_required,
+        pullback_required,
+    ) -> bool:
+        return not (
             len(closes) < trigger_required
             or len(benchmark_closes) < benchmark_required
             or len(macro_closes) < macro_required
             or len(pullback_closes) < pullback_required
-        ):
-            return self._empty_ema_signal(
-                latest_ts,
-                (
-                    f"ema_history_short;trigger_candles={len(closes)};trigger_required={trigger_required};"
-                    f"macro_candles={len(macro_closes)};macro_required={macro_required};macro_tf={timeframes['macro']};"
-                    f"pullback_candles={len(pullback_closes)};pullback_required={pullback_required};pullback_tf={timeframes['pullback']};"
-                    f"benchmark_candles={len(benchmark_closes)};benchmark_required={benchmark_required}"
-                ),
-                price=current_close,
-            )
+        )
 
+    def _calculate_signal_indicators(
+        self,
+        closes,
+        benchmark_closes,
+        pullback_closes,
+        macro_closes,
+        latest_ts,
+        pullback_latest_ts,
+        macro_latest_ts,
+        cache_key,
+        periods,
+        timeframes,
+        use_timeframe_ema,
+        rs_fast_window,
+        rs_slow_window,
+    ):
         rs_context = relative_strength_context(
             closes, benchmark_closes, rs_fast_window, rs_slow_window
         )
-        rs30 = rs_context["rs30"]
-        rs60 = rs_context["rs60"]
-        btc_return_30m = rs_context["btc_return_30m"]
 
         trigger_periods = {
             "ema_trigger_fast": periods["ema_trigger_fast"],
@@ -1718,15 +1679,7 @@ class SignalMixin:
             else None,
         )
         if not trigger_values or not pullback_values or not macro_values:
-            return self._empty_ema_signal(
-                latest_ts,
-                (
-                    f"ema_history_short;trigger_candles={len(closes)};trigger_required={trigger_required};"
-                    f"macro_candles={len(macro_closes)};macro_required={macro_required};"
-                    f"pullback_candles={len(pullback_closes)};pullback_required={pullback_required}"
-                ),
-                price=current_close,
-            )
+            return None, None, None, None
 
         ema_macro_fast = macro_values["ema_macro_fast"]
         ema_macro_slow = macro_values["ema_macro_slow"]
@@ -1734,6 +1687,7 @@ class SignalMixin:
         ema_pullback_slow = pullback_values["ema_pullback_slow"]
         ema_trigger_fast = trigger_values["ema_trigger_fast"]
         ema_trigger_slow = trigger_values["ema_trigger_slow"]
+
         pullback_context = self._ema_pullback_recovery_context(
             pullback_closes,
             periods["ema_pullback_fast"],
@@ -1741,9 +1695,10 @@ class SignalMixin:
             converted=use_timeframe_ema,
         )
 
+        strategy = config.STRATEGY
         direction = ema_signal_direction_metrics(
             config.POSITION_SIDE,
-            current_close,
+            closes[-1],
             ema_macro_fast,
             ema_macro_slow,
             ema_pullback_fast,
@@ -1751,8 +1706,8 @@ class SignalMixin:
             ema_trigger_fast,
             ema_trigger_slow,
             bool(pullback_context["pullback_valid"]),
-            rs60,
-            btc_return_30m,
+            rs_context["rs60"],
+            rs_context["btc_return_30m"],
             strategy.ema_use_rs_confirmation,
             strategy.ema_long_min_rs60,
             strategy.ema_short_max_rs60,
@@ -1760,45 +1715,26 @@ class SignalMixin:
             strategy.ema_btc_long_min_return_30m,
             strategy.ema_btc_short_max_return_30m,
         )
-        macro_valid = direction["macro_valid"]
-        pullback_valid = direction["pullback_valid"]
-        trigger_valid = direction["trigger_valid"]
-        rs_confirm_valid = direction["rs_confirm_valid"]
-        btc_entry_valid = direction["btc_entry_valid"]
-        ema_macro_side = direction.get("ema_macro_side", "neutral")
-        ema_trigger_side = direction.get("ema_trigger_side", "neutral")
-        ema_side = direction.get("ema_side", "neutral")
-        ema_side_valid = bool(direction.get("ema_side_valid", False))
-        entry_setup_valid = bool(
-            direction.get("entry_setup_valid", bool(trigger_valid or pullback_valid))
+        return (
+            rs_context,
+            trigger_values,
+            pullback_values,
+            macro_values,
+            pullback_context,
+            direction,
         )
-        entry_side_valid = bool(
-            direction.get("entry_side_valid", bool(macro_valid and entry_setup_valid))
-        )
-        entry_signal_source = str(
-            direction.get("entry_signal_source", "none") or "none"
-        )
-        macro_gap = direction["macro_gap"]
-        trigger_gap = direction["trigger_gap"]
-        pullback_depth = direction["pullback_depth"]
-        rs_edge = direction["rs_edge"]
-        score = direction["score"]
 
-        macro_context = self._macro_context_for_trading(macro_context)
-        market_structure = self._ema_market_structure_context(candles)
-        data_valid = True
-        direction_valid = bool(entry_side_valid and score > 0)
-        market_structure_valid = bool(market_structure["market_structure_valid"])
-        entry_pullback_required = bool(
-            getattr(strategy, "ema_entry_require_pullback_recovery", False)
-        )
-        entry_pullback_gate_valid = bool(pullback_valid or not entry_pullback_required)
-        ema_entry_valid = bool(
-            macro_valid and entry_setup_valid and entry_pullback_gate_valid
-        )
-        raw_entry_valid = bool(ema_entry_valid and rs_confirm_valid and btc_entry_valid)
-        raw_add_valid = bool(direction["add_valid"])
-        add_valid = bool(raw_add_valid and market_structure_valid)
+    def _calculate_signal_multipliers(
+        self,
+        closes,
+        candles,
+        current_close,
+        score,
+        btc_risk,
+        macro_context,
+        entry_quality,
+    ):
+        strategy = config.STRATEGY
         volatility = self._realized_volatility(closes, strategy.volatility_window)
         volatility_multiplier = self._volatility_multiplier(volatility)
         atr, atr_rate = self._average_true_range_rate(
@@ -1823,34 +1759,6 @@ class SignalMixin:
         macro_ladder_multiplier = max(
             0.0, self._safe_float(macro_context.get("ladder_multiplier"), 1.0)
         )
-        entry_quality_signal = {
-            "valid": data_valid,
-            "data_valid": data_valid,
-            "direction_valid": direction_valid,
-            "ema_entry_valid": ema_entry_valid,
-            "entry_setup_valid": entry_setup_valid,
-            "entry_side_valid": entry_side_valid,
-            "entry_signal_source": entry_signal_source,
-            "entry_valid": raw_entry_valid,
-            "macro_valid": macro_valid,
-            "pullback_valid": pullback_valid,
-            "trigger_valid": trigger_valid,
-            "rs_confirm_valid": rs_confirm_valid,
-            "btc_entry_valid": btc_entry_valid,
-            "market_structure_valid": market_structure_valid,
-            "volume_valid": bool(market_structure["volume_valid"]),
-            "chop_valid": bool(market_structure["chop_valid"]),
-            "score": score,
-            "rs30": rs30,
-            "rs60": rs60,
-            "btc_return_30m": btc_return_30m,
-            "volume_reason": market_structure["volume_reason"],
-            "chop_reason": market_structure["chop_reason"],
-        }
-        entry_quality = self._entry_signal_quality_context(
-            entry_quality_signal, external_bonus=0.0
-        )
-        entry_valid = bool(ema_entry_valid and entry_quality["passed"])
         entry_quality_budget_multiplier = self._safe_float(
             entry_quality.get("quality_budget_multiplier"), 1.0
         )
@@ -1863,7 +1771,65 @@ class SignalMixin:
         ladder_multiplier = (
             volatility_multiplier * btc_ladder_multiplier * macro_ladder_multiplier
         )
-        reason = (
+        return {
+            "volatility": volatility,
+            "volatility_multiplier": volatility_multiplier,
+            "atr": atr,
+            "atr_rate": atr_rate,
+            "daily_volatility": daily_volatility,
+            "signal_budget_multiplier": signal_budget_multiplier,
+            "btc_budget_multiplier": btc_budget_multiplier,
+            "btc_ladder_multiplier": btc_ladder_multiplier,
+            "macro_budget_multiplier": macro_budget_multiplier,
+            "macro_ladder_multiplier": macro_ladder_multiplier,
+            "entry_quality_budget_multiplier": entry_quality_budget_multiplier,
+            "budget_multiplier": budget_multiplier,
+            "ladder_multiplier": ladder_multiplier,
+        }
+
+    def _build_signal_reason(
+        self,
+        timeframes,
+        ema_side,
+        ema_macro_side,
+        ema_trigger_side,
+        ema_side_valid,
+        entry_side_valid,
+        entry_signal_source,
+        ema_macro_fast,
+        ema_macro_slow,
+        ema_pullback_fast,
+        ema_pullback_slow,
+        ema_trigger_fast,
+        ema_trigger_slow,
+        rs30,
+        rs60,
+        btc_return_30m,
+        pullback_context,
+        entry_pullback_required,
+        entry_pullback_gate_valid,
+        entry_setup_valid,
+        ema_entry_valid,
+        macro_valid,
+        pullback_valid,
+        trigger_valid,
+        rs_confirm_valid,
+        btc_entry_valid,
+        market_structure_valid,
+        market_structure,
+        raw_entry_valid,
+        entry_valid,
+        add_valid,
+        score,
+        entry_quality,
+        entry_quality_budget_multiplier,
+        atr_rate,
+        signal_budget_multiplier,
+        btc_budget_multiplier,
+        macro_budget_multiplier,
+        macro_context,
+    ):
+        return (
             f"strategy=ema_pullback;macro_tf={timeframes['macro']};pullback_tf={timeframes['pullback']};trigger_tf={timeframes['trigger']};"
             f"ema_side={ema_side};ema_macro_side={ema_macro_side};ema_trigger_side={ema_trigger_side};"
             f"ema_side_valid={int(ema_side_valid)};"
@@ -1917,25 +1883,65 @@ class SignalMixin:
             f"macro_regime={macro_context.get('regime', 'neutral')}"
         )
 
+    def _assemble_signal_response(
+        self,
+        current_close,
+        rs_context,
+        direction,
+        trigger_values,
+        pullback_values,
+        macro_values,
+        pullback_context,
+        macro_context,
+        market_structure,
+        entry_quality,
+        multipliers,
+        timeframes,
+        ema_side,
+        ema_macro_side,
+        ema_trigger_side,
+        ema_side_valid,
+        entry_side_valid,
+        entry_signal_source,
+        entry_setup_valid,
+        ema_entry_valid,
+        macro_valid,
+        pullback_valid,
+        trigger_valid,
+        rs_confirm_valid,
+        btc_entry_valid,
+        market_structure_valid,
+        entry_pullback_required,
+        entry_pullback_gate_valid,
+        raw_entry_valid,
+        entry_valid,
+        add_valid,
+        data_valid,
+        direction_valid,
+        score,
+        btc_risk,
+        latest_ts,
+        reason,
+    ):
         return {
             "strategy_name": "ema_pullback",
             "price": current_close,
-            "rs30": rs30,
-            "rs60": rs60,
-            "rs_edge": rs_edge,
+            "rs30": rs_context["rs30"],
+            "rs60": rs_context["rs60"],
+            "rs_edge": direction["rs_edge"],
             "rs_abs_valid": rs_confirm_valid,
             "rs_overheated": False,
-            "ema_gap": trigger_gap,
-            "macro_gap": macro_gap,
-            "trigger_gap": trigger_gap,
-            "pullback_depth": pullback_depth,
+            "ema_gap": direction["trigger_gap"],
+            "macro_gap": direction["macro_gap"],
+            "trigger_gap": direction["trigger_gap"],
+            "pullback_depth": direction["pullback_depth"],
             "ema_valid": trigger_valid,
-            "ema_macro_fast": ema_macro_fast,
-            "ema_macro_slow": ema_macro_slow,
-            "ema_pullback_fast": ema_pullback_fast,
-            "ema_pullback_slow": ema_pullback_slow,
-            "ema_trigger_fast": ema_trigger_fast,
-            "ema_trigger_slow": ema_trigger_slow,
+            "ema_macro_fast": macro_values["ema_macro_fast"],
+            "ema_macro_slow": macro_values["ema_macro_slow"],
+            "ema_pullback_fast": pullback_values["ema_pullback_fast"],
+            "ema_pullback_slow": pullback_values["ema_pullback_slow"],
+            "ema_trigger_fast": trigger_values["ema_trigger_fast"],
+            "ema_trigger_slow": trigger_values["ema_trigger_slow"],
             "ema_macro_side": ema_macro_side,
             "ema_trigger_side": ema_trigger_side,
             "ema_side": ema_side,
@@ -1944,26 +1950,27 @@ class SignalMixin:
             "entry_setup_valid": entry_setup_valid,
             "entry_side_valid": entry_side_valid,
             "entry_signal_source": entry_signal_source,
-            "ema25d": ema_macro_fast,
-            "ema50d": ema_macro_slow,
-            "ema1d": ema_pullback_fast,
-            "ema2d": ema_pullback_slow,
-            "ema50": ema_trigger_fast,
-            "ema100": ema_trigger_slow,
+            "ema25d": macro_values["ema_macro_fast"],
+            "ema50d": macro_values["ema_macro_slow"],
+            "ema1d": pullback_values["ema_pullback_fast"],
+            "ema2d": pullback_values["ema_pullback_slow"],
+            "ema50": trigger_values["ema_trigger_fast"],
+            "ema100": trigger_values["ema_trigger_slow"],
             "ema_macro_timeframe": timeframes["macro"],
             "ema_pullback_timeframe": timeframes["pullback"],
             "ema_trigger_timeframe": timeframes["trigger"],
-            "trend_ema_fast": ema_macro_fast,
-            "trend_ema_slow": ema_macro_slow,
-            "trend_ema_gap": macro_gap,
-            "price_to_trend_ema": (current_close - ema_macro_slow) / current_close,
+            "trend_ema_fast": macro_values["ema_macro_fast"],
+            "trend_ema_slow": macro_values["ema_macro_slow"],
+            "trend_ema_gap": direction["macro_gap"],
+            "price_to_trend_ema": (current_close - macro_values["ema_macro_slow"])
+            / current_close,
             "recent_return_5m": 0.0,
             "recent_return_15m": 0.0,
             "pullback_from_high": 0.0,
             "bounce_from_low": 0.0,
-            "local_reversion": pullback_depth,
-            "btc_entry_return": btc_return_30m,
-            "btc_return_30m": btc_return_30m,
+            "local_reversion": direction["pullback_depth"],
+            "btc_entry_return": rs_context["btc_return_30m"],
+            "btc_return_30m": rs_context["btc_return_30m"],
             "score": score,
             "data_valid": data_valid,
             "direction_valid": direction_valid,
@@ -2030,26 +2037,28 @@ class SignalMixin:
             "chop": market_structure["chop"],
             "chop_max": market_structure["chop_max"],
             "chop_reason": market_structure["chop_reason"],
-            "volatility": volatility,
-            "volatility_multiplier": volatility_multiplier,
-            "atr": atr,
-            "atr_rate": atr_rate,
-            "daily_volatility": daily_volatility["daily_volatility"],
-            "daily_volatility_multiplier": daily_volatility[
+            "volatility": multipliers["volatility"],
+            "volatility_multiplier": multipliers["volatility_multiplier"],
+            "atr": multipliers["atr"],
+            "atr_rate": multipliers["atr_rate"],
+            "daily_volatility": multipliers["daily_volatility"]["daily_volatility"],
+            "daily_volatility_multiplier": multipliers["daily_volatility"][
                 "daily_volatility_multiplier"
             ],
-            "volatility_budget_multiplier": daily_volatility[
+            "volatility_budget_multiplier": multipliers["daily_volatility"][
                 "volatility_budget_multiplier"
             ],
-            "signal_budget_multiplier": signal_budget_multiplier,
+            "signal_budget_multiplier": multipliers["signal_budget_multiplier"],
             "entry_weighted_score": entry_quality["weighted_score"],
             "entry_weighted_score_min": entry_quality["min_score"],
             "entry_weighted_penalty_total": entry_quality["penalty_total"],
             "entry_weighted_penalties": dict(entry_quality["penalties"]),
-            "entry_quality_budget_multiplier": entry_quality_budget_multiplier,
-            "btc_budget_multiplier": btc_budget_multiplier,
-            "macro_budget_multiplier": macro_budget_multiplier,
-            "macro_ladder_multiplier": macro_ladder_multiplier,
+            "entry_quality_budget_multiplier": multipliers[
+                "entry_quality_budget_multiplier"
+            ],
+            "btc_budget_multiplier": multipliers["btc_budget_multiplier"],
+            "macro_budget_multiplier": multipliers["macro_budget_multiplier"],
+            "macro_ladder_multiplier": multipliers["macro_ladder_multiplier"],
             "macro_regime": macro_context.get("regime", "neutral"),
             "macro_direction_score": self._safe_float(
                 macro_context.get("macro_direction_score"), 0.0
@@ -2063,8 +2072,8 @@ class SignalMixin:
             "macro_time_exit_multiplier": self._safe_float(
                 macro_context.get("time_exit_multiplier"), 1.0
             ),
-            "budget_multiplier": budget_multiplier,
-            "ladder_multiplier": ladder_multiplier,
+            "budget_multiplier": multipliers["budget_multiplier"],
+            "ladder_multiplier": multipliers["ladder_multiplier"],
             "btc_risk_reason": btc_risk.get("reason", "ema_filter"),
             "valid": data_valid,
             "entry_valid": entry_valid,
@@ -2072,6 +2081,300 @@ class SignalMixin:
             "reason": reason,
             "ts": latest_ts,
         }
+
+    def _build_signal_from_closes(
+        self,
+        ctx: SignalContext | List[float],
+        benchmark_closes: Optional[List[float]] = None,
+        btc_risk: Optional[dict] = None,
+        latest_ts: Optional[int] = None,
+        cache_key: str = "",
+        macro_context: Optional[dict] = None,
+        macro_closes: Optional[List[float]] = None,
+        macro_latest_ts: Optional[int] = None,
+        pullback_closes: Optional[List[float]] = None,
+        pullback_latest_ts: Optional[int] = None,
+    ) -> Optional[dict]:
+        ctx = self._init_signal_context(
+            ctx,
+            benchmark_closes,
+            btc_risk,
+            latest_ts,
+            cache_key,
+            macro_context,
+            macro_closes,
+            macro_latest_ts,
+            pullback_closes,
+            pullback_latest_ts,
+        )
+
+        closes = ctx.closes
+        benchmark_closes = ctx.benchmark_closes
+        btc_risk = ctx.btc_risk
+        latest_ts = ctx.latest_ts
+        candles = ctx.candles
+        cache_key = ctx.cache_key
+        macro_context = ctx.macro_context
+        macro_closes = ctx.macro_closes
+        macro_latest_ts = ctx.macro_latest_ts
+        pullback_closes = ctx.pullback_closes
+        pullback_latest_ts = ctx.pullback_latest_ts
+
+        if not closes or not benchmark_closes:
+            return None
+
+        current_close = closes[-1]
+        current_btc = benchmark_closes[-1]
+        if current_close <= 0 or current_btc <= 0:
+            return None
+
+        strategy = config.STRATEGY
+        if not getattr(strategy, "ema_strategy_enabled", True):
+            return self._empty_ema_signal(
+                latest_ts, "ema_strategy_disabled", price=current_close
+            )
+
+        use_timeframe_ema = macro_closes is not None or pullback_closes is not None
+        periods = self._ema_periods(converted=use_timeframe_ema)
+        macro_closes = macro_closes if macro_closes is not None else closes
+        pullback_closes = pullback_closes if pullback_closes is not None else closes
+        macro_latest_ts = int(
+            macro_latest_ts if macro_latest_ts is not None else latest_ts
+        )
+        pullback_latest_ts = int(
+            pullback_latest_ts if pullback_latest_ts is not None else latest_ts
+        )
+        timeframes = self._ema_timeframes()
+        rs_fast_window = self._trigger_window_candles(
+            config.SIGNALS.rs_fast_window, timeframes["trigger"]
+        )
+        rs_slow_window = self._trigger_window_candles(
+            config.SIGNALS.rs_slow_window, timeframes["trigger"]
+        )
+        btc_return_window = rs_fast_window
+        benchmark_required = max(rs_slow_window, btc_return_window) + 1
+
+        trigger_required = self._ema_required_history(
+            "trigger", converted=use_timeframe_ema
+        )
+        macro_required = self._ema_required_history(
+            "macro", converted=use_timeframe_ema
+        )
+        pullback_required = self._ema_required_history(
+            "pullback", converted=use_timeframe_ema
+        )
+
+        if not self._validate_signal_history(
+            closes,
+            benchmark_closes,
+            macro_closes,
+            pullback_closes,
+            trigger_required,
+            benchmark_required,
+            macro_required,
+            pullback_required,
+        ):
+            return self._empty_ema_signal(
+                latest_ts,
+                (
+                    f"ema_history_short;trigger_candles={len(closes)};trigger_required={trigger_required};"
+                    f"macro_candles={len(macro_closes)};macro_required={macro_required};macro_tf={timeframes['macro']};"
+                    f"pullback_candles={len(pullback_closes)};pullback_required={pullback_required};pullback_tf={timeframes['pullback']};"
+                    f"benchmark_candles={len(benchmark_closes)};benchmark_required={benchmark_required}"
+                ),
+                price=current_close,
+            )
+
+        (
+            rs_context,
+            trigger_values,
+            pullback_values,
+            macro_values,
+            pullback_context,
+            direction,
+        ) = self._calculate_signal_indicators(
+            closes,
+            benchmark_closes,
+            pullback_closes,
+            macro_closes,
+            latest_ts,
+            pullback_latest_ts,
+            macro_latest_ts,
+            cache_key,
+            periods,
+            timeframes,
+            use_timeframe_ema,
+            rs_fast_window,
+            rs_slow_window,
+        )
+
+        if not trigger_values or not pullback_values or not macro_values:
+            return self._empty_ema_signal(
+                latest_ts,
+                (
+                    f"ema_history_short;trigger_candles={len(closes)};trigger_required={trigger_required};"
+                    f"macro_candles={len(macro_closes)};macro_required={macro_required};"
+                    f"pullback_candles={len(pullback_closes)};pullback_required={pullback_required}"
+                ),
+                price=current_close,
+            )
+
+        macro_valid = direction["macro_valid"]
+        pullback_valid = direction["pullback_valid"]
+        trigger_valid = direction["trigger_valid"]
+        rs_confirm_valid = direction["rs_confirm_valid"]
+        btc_entry_valid = direction["btc_entry_valid"]
+        ema_macro_side = direction.get("ema_macro_side", "neutral")
+        ema_trigger_side = direction.get("ema_trigger_side", "neutral")
+        ema_side = direction.get("ema_side", "neutral")
+        ema_side_valid = bool(direction.get("ema_side_valid", False))
+        entry_setup_valid = bool(
+            direction.get("entry_setup_valid", bool(trigger_valid or pullback_valid))
+        )
+        entry_side_valid = bool(
+            direction.get("entry_side_valid", bool(macro_valid and entry_setup_valid))
+        )
+        entry_signal_source = str(
+            direction.get("entry_signal_source", "none") or "none"
+        )
+        score = direction["score"]
+
+        macro_context = self._macro_context_for_trading(macro_context)
+        market_structure = self._ema_market_structure_context(candles)
+        data_valid = True
+        direction_valid = bool(entry_side_valid and score > 0)
+        market_structure_valid = bool(market_structure["market_structure_valid"])
+        entry_pullback_required = bool(
+            getattr(strategy, "ema_entry_require_pullback_recovery", False)
+        )
+        entry_pullback_gate_valid = bool(pullback_valid or not entry_pullback_required)
+        ema_entry_valid = bool(
+            macro_valid and entry_setup_valid and entry_pullback_gate_valid
+        )
+        raw_entry_valid = bool(ema_entry_valid and rs_confirm_valid and btc_entry_valid)
+        raw_add_valid = bool(direction["add_valid"])
+        add_valid = bool(raw_add_valid and market_structure_valid)
+
+        entry_quality_signal = {
+            "valid": data_valid,
+            "data_valid": data_valid,
+            "direction_valid": direction_valid,
+            "ema_entry_valid": ema_entry_valid,
+            "entry_setup_valid": entry_setup_valid,
+            "entry_side_valid": entry_side_valid,
+            "entry_signal_source": entry_signal_source,
+            "entry_valid": raw_entry_valid,
+            "macro_valid": macro_valid,
+            "pullback_valid": pullback_valid,
+            "trigger_valid": trigger_valid,
+            "rs_confirm_valid": rs_confirm_valid,
+            "btc_entry_valid": btc_entry_valid,
+            "market_structure_valid": market_structure_valid,
+            "volume_valid": bool(market_structure["volume_valid"]),
+            "chop_valid": bool(market_structure["chop_valid"]),
+            "score": score,
+            "rs30": rs_context["rs30"],
+            "rs60": rs_context["rs60"],
+            "btc_return_30m": rs_context["btc_return_30m"],
+            "volume_reason": market_structure["volume_reason"],
+            "chop_reason": market_structure["chop_reason"],
+        }
+        entry_quality = self._entry_signal_quality_context(
+            entry_quality_signal, external_bonus=0.0
+        )
+        entry_valid = bool(ema_entry_valid and entry_quality["passed"])
+
+        multipliers = self._calculate_signal_multipliers(
+            closes,
+            candles,
+            current_close,
+            score,
+            btc_risk,
+            macro_context,
+            entry_quality,
+        )
+
+        reason = self._build_signal_reason(
+            timeframes,
+            ema_side,
+            ema_macro_side,
+            ema_trigger_side,
+            ema_side_valid,
+            entry_side_valid,
+            entry_signal_source,
+            macro_values["ema_macro_fast"],
+            macro_values["ema_macro_slow"],
+            pullback_values["ema_pullback_fast"],
+            pullback_values["ema_pullback_slow"],
+            trigger_values["ema_trigger_fast"],
+            trigger_values["ema_trigger_slow"],
+            rs_context["rs30"],
+            rs_context["rs60"],
+            rs_context["btc_return_30m"],
+            pullback_context,
+            entry_pullback_required,
+            entry_pullback_gate_valid,
+            entry_setup_valid,
+            ema_entry_valid,
+            macro_valid,
+            pullback_valid,
+            trigger_valid,
+            rs_confirm_valid,
+            btc_entry_valid,
+            market_structure_valid,
+            market_structure,
+            raw_entry_valid,
+            entry_valid,
+            add_valid,
+            score,
+            entry_quality,
+            multipliers["entry_quality_budget_multiplier"],
+            multipliers["atr_rate"],
+            multipliers["signal_budget_multiplier"],
+            multipliers["btc_budget_multiplier"],
+            multipliers["macro_budget_multiplier"],
+            macro_context,
+        )
+
+        return self._assemble_signal_response(
+            current_close,
+            rs_context,
+            direction,
+            trigger_values,
+            pullback_values,
+            macro_values,
+            pullback_context,
+            macro_context,
+            market_structure,
+            entry_quality,
+            multipliers,
+            timeframes,
+            ema_side,
+            ema_macro_side,
+            ema_trigger_side,
+            ema_side_valid,
+            entry_side_valid,
+            entry_signal_source,
+            entry_setup_valid,
+            ema_entry_valid,
+            macro_valid,
+            pullback_valid,
+            trigger_valid,
+            rs_confirm_valid,
+            btc_entry_valid,
+            market_structure_valid,
+            entry_pullback_required,
+            entry_pullback_gate_valid,
+            raw_entry_valid,
+            entry_valid,
+            add_valid,
+            data_valid,
+            direction_valid,
+            score,
+            btc_risk,
+            latest_ts,
+            reason,
+        )
 
     def _closed_candles(
         self,
