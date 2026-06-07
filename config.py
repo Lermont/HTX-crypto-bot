@@ -1007,23 +1007,85 @@ def _coins_from_api_accounts(
     )
 
 
-def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfile:
+@dataclass(frozen=True)
+class ProfileDirectionContext:
+    trade_direction: str
+    position_side: str
+    opposite_position_side: str
+    entry_side: str
+    exit_side: str
+
+
+@dataclass(frozen=True)
+class ProfileStrategyContext:
+    ema_trigger_timeframe: str
+    ema_macro_timeframe: str
+    ema_pullback_timeframe: str
+    ema_entry_fractions: Tuple[float, ...]
+    ema_entry_offsets: Tuple[float, ...]
+    ema_max_averaging_stages: int
+    dust_position_notional: float
+
+
+def _make_direction_context(direction: str) -> ProfileDirectionContext:
     direction = direction.lower()
     if direction not in {"long", "short"}:
         raise ValueError(f"Unsupported trade direction: {direction}")
-    coins = _normalize_coins(coins)
+    return ProfileDirectionContext(
+        trade_direction=direction,
+        position_side=direction,
+        opposite_position_side="short" if direction == "long" else "long",
+        entry_side="buy" if direction == "long" else "sell",
+        exit_side="sell" if direction == "long" else "buy",
+    )
 
-    position_side = direction
-    opposite_position_side = "short" if position_side == "long" else "long"
-    entry_side = "buy" if position_side == "long" else "sell"
-    exit_side = "sell" if position_side == "long" else "buy"
 
-    api_credentials = _api_credentials_for_account(name)
-    api_accounts = _make_api_accounts(name, api_credentials, coins)
-    account_coins = _coins_from_api_accounts(api_accounts)
-    if account_coins:
-        coins = account_coins
-    exchange = ExchangeSettings(
+def _make_strategy_context(
+    name: str, direction_context: ProfileDirectionContext
+) -> ProfileStrategyContext:
+    direction = direction_context.trade_direction
+    ema_trigger_timeframe = _env("EMA_TRIGGER_TIMEFRAME", profile=name) or "5m"
+    ema_macro_timeframe = _env("EMA_MACRO_TIMEFRAME", profile=name) or "1h"
+    ema_pullback_timeframe = (
+        _env("EMA_PULLBACK_TIMEFRAME", profile=name) or ema_trigger_timeframe
+    )
+
+    ema_entry_offsets_default = _env_float_tuple(
+        "EMA_ENTRY_LADDER_OFFSETS", (0.0, 0.01), profile=name
+    )
+    ema_entry_offsets = _env_float_tuple(
+        f"EMA_ENTRY_LADDER_OFFSETS_{direction.upper()}",
+        ema_entry_offsets_default,
+        profile=name,
+    )
+    ema_entry_fractions = _env_float_tuple(
+        "EMA_ENTRY_LADDER_FRACTIONS", (0.50, 0.50), profile=name
+    )
+
+    configured_ema_max_averaging_stages = _env_int(
+        "EMA_MAX_AVERAGING_STAGES", 2, profile=name
+    )
+    if configured_ema_max_averaging_stages > 2:
+        _add_config_warning(
+            f"{name}: live ema_max_averaging_stages={configured_ema_max_averaging_stages} "
+            "is capped at the conservative launch maximum of 2"
+        )
+    ema_max_averaging_stages = min(max(0, configured_ema_max_averaging_stages), 2)
+    dust_position_notional = _env_float("DUST_POSITION_NOTIONAL", 10.0, profile=name)
+
+    return ProfileStrategyContext(
+        ema_trigger_timeframe=ema_trigger_timeframe,
+        ema_macro_timeframe=ema_macro_timeframe,
+        ema_pullback_timeframe=ema_pullback_timeframe,
+        ema_entry_fractions=ema_entry_fractions,
+        ema_entry_offsets=ema_entry_offsets,
+        ema_max_averaging_stages=ema_max_averaging_stages,
+        dust_position_notional=dust_position_notional,
+    )
+
+
+def _make_exchange_settings(name: str) -> ExchangeSettings:
+    return ExchangeSettings(
         quote_currency="USDT",
         enable_rate_limit=True,
         timeout_ms=_env_int("TIMEOUT_MS", 30000, profile=name),
@@ -1040,28 +1102,96 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
             "MARKETS_CACHE_MAX_AGE_SEC", 7 * 24 * 60 * 60, profile=name
         ),
     )
-    ema_trigger_timeframe = _env("EMA_TRIGGER_TIMEFRAME", profile=name) or "5m"
-    ema_macro_timeframe = _env("EMA_MACRO_TIMEFRAME", profile=name) or "1h"
-    ema_pullback_timeframe = (
-        _env("EMA_PULLBACK_TIMEFRAME", profile=name) or ema_trigger_timeframe
-    )
 
-    signals = SignalSettings(
-        timeframe=ema_trigger_timeframe,
+
+def _make_signal_settings(
+    name: str, strategy_context: ProfileStrategyContext
+) -> SignalSettings:
+    return SignalSettings(
+        timeframe=strategy_context.ema_trigger_timeframe,
         rs_fast_window=30,
         rs_slow_window=60,
     )
-    ema_entry_offsets_default = _env_float_tuple(
-        "EMA_ENTRY_LADDER_OFFSETS", (0.0, 0.01), profile=name
+
+
+def _make_buy_settings(
+    name: str, strategy_context: ProfileStrategyContext
+) -> BuySettings:
+    return BuySettings(
+        position_budget_fraction=_env_float(
+            "EMA_POSITION_BUDGET_FRACTION",
+            _env_float("POSITION_BUDGET_FRACTION", 0.02, profile=name),
+            profile=name,
+        ),
+        ladder_fractions=strategy_context.ema_entry_fractions,
+        ladder_offsets=strategy_context.ema_entry_offsets,
     )
-    ema_entry_offsets = _env_float_tuple(
-        f"EMA_ENTRY_LADDER_OFFSETS_{direction.upper()}",
-        ema_entry_offsets_default,
-        profile=name,
+
+
+def _make_sell_settings(name: str) -> SellSettings:
+    return SellSettings(
+        buy_fee_rate=0.0001,
+        sell_fee_rate=0.0001,
+        min_gross_profit_floor=0.0,
     )
-    ema_entry_fractions = _env_float_tuple(
-        "EMA_ENTRY_LADDER_FRACTIONS", (0.50, 0.50), profile=name
+
+
+def _make_risk_settings(
+    name: str, strategy_context: ProfileStrategyContext
+) -> RiskSettings:
+    return RiskSettings(
+        min_quote_reserve=_env_float("MIN_QUOTE_RESERVE", 15.0, profile=name),
+        max_active_positions=_env_int("MAX_ACTIVE_POSITIONS", 50, profile=name),
+        max_position_notional_fraction=_env_float(
+            "EMA_MAX_POSITION_MARGIN_FRACTION",
+            _env_float("MAX_POSITION_NOTIONAL_FRACTION", 0.03, profile=name),
+            profile=name,
+        ),
+        max_total_notional_fraction=_env_float(
+            "EMA_MAX_TOTAL_MARGIN_FRACTION",
+            _env_float("MAX_TOTAL_NOTIONAL_FRACTION", 0.50, profile=name),
+            profile=name,
+        ),
+        active_position_min_notional_for_slot=_env_float(
+            "ACTIVE_POSITION_MIN_NOTIONAL_FOR_SLOT",
+            strategy_context.dust_position_notional,
+            profile=name,
+        ),
+        dust_position_notional=strategy_context.dust_position_notional,
+        dust_close_enabled=_env_bool("DUST_CLOSE_ENABLED", True, profile=name),
+        tiny_entry_close_enabled=_env_bool(
+            "TINY_ENTRY_CLOSE_ENABLED", True, profile=name
+        ),
+        tiny_entry_max_notional=_env_float(
+            "TINY_ENTRY_MAX_NOTIONAL",
+            strategy_context.dust_position_notional,
+            profile=name,
+        ),
+        tiny_entry_max_planned_fraction=_env_float(
+            "TINY_ENTRY_MAX_PLANNED_FRACTION", 0.10, profile=name
+        ),
+        leverage=_env_int("LEVERAGE", 30, profile=name),
+        account_leverage=_env_int(
+            "ACCOUNT_LEVERAGE",
+            _env_int("ORDER_LEVERAGE", 0, profile=name),
+            profile=name,
+        ),
+        margin_mode="cross",
+        position_mode="one-way",
+        cooldown_minutes_after_close=_env_float(
+            "COOLDOWN_MINUTES_AFTER_CLOSE", 10.0, profile=name
+        ),
+        post_win_cooldown_minutes_after_close=_env_float(
+            "POST_WIN_COOLDOWN_MINUTES_AFTER_CLOSE",
+            _env_float("WIN_COOLDOWN_MINUTES_AFTER_CLOSE", 90.0, profile=name),
+            profile=name,
+        ),
     )
+
+
+def _make_strategy_settings(
+    name: str, strategy_context: ProfileStrategyContext
+) -> StrategySettings:
     ema_exit_fractions = _env_float_tuple(
         "EMA_EXIT_LADDER_FRACTIONS", (1.0,), profile=name
     )
@@ -1096,67 +1226,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         (0.003, 0.008, 0.015),
         profile=name,
     )
-    dust_position_notional = _env_float("DUST_POSITION_NOTIONAL", 10.0, profile=name)
-    buying = BuySettings(
-        position_budget_fraction=_env_float(
-            "EMA_POSITION_BUDGET_FRACTION",
-            _env_float("POSITION_BUDGET_FRACTION", 0.02, profile=name),
-            profile=name,
-        ),
-        ladder_fractions=ema_entry_fractions,
-        ladder_offsets=ema_entry_offsets,
-    )
-    selling = SellSettings(
-        buy_fee_rate=0.0001,
-        sell_fee_rate=0.0001,
-        min_gross_profit_floor=0.0,
-    )
-    risk = RiskSettings(
-        min_quote_reserve=_env_float("MIN_QUOTE_RESERVE", 15.0, profile=name),
-        max_active_positions=_env_int("MAX_ACTIVE_POSITIONS", 50, profile=name),
-        max_position_notional_fraction=_env_float(
-            "EMA_MAX_POSITION_MARGIN_FRACTION",
-            _env_float("MAX_POSITION_NOTIONAL_FRACTION", 0.03, profile=name),
-            profile=name,
-        ),
-        max_total_notional_fraction=_env_float(
-            "EMA_MAX_TOTAL_MARGIN_FRACTION",
-            _env_float("MAX_TOTAL_NOTIONAL_FRACTION", 0.50, profile=name),
-            profile=name,
-        ),
-        active_position_min_notional_for_slot=_env_float(
-            "ACTIVE_POSITION_MIN_NOTIONAL_FOR_SLOT",
-            dust_position_notional,
-            profile=name,
-        ),
-        dust_position_notional=dust_position_notional,
-        dust_close_enabled=_env_bool("DUST_CLOSE_ENABLED", True, profile=name),
-        tiny_entry_close_enabled=_env_bool(
-            "TINY_ENTRY_CLOSE_ENABLED", True, profile=name
-        ),
-        tiny_entry_max_notional=_env_float(
-            "TINY_ENTRY_MAX_NOTIONAL", dust_position_notional, profile=name
-        ),
-        tiny_entry_max_planned_fraction=_env_float(
-            "TINY_ENTRY_MAX_PLANNED_FRACTION", 0.10, profile=name
-        ),
-        leverage=_env_int("LEVERAGE", 30, profile=name),
-        account_leverage=_env_int(
-            "ACCOUNT_LEVERAGE",
-            _env_int("ORDER_LEVERAGE", 0, profile=name),
-            profile=name,
-        ),
-        margin_mode="cross",
-        position_mode="one-way",
-        cooldown_minutes_after_close=_env_float(
-            "COOLDOWN_MINUTES_AFTER_CLOSE", 10.0, profile=name
-        ),
-        post_win_cooldown_minutes_after_close=_env_float(
-            "POST_WIN_COOLDOWN_MINUTES_AFTER_CLOSE",
-            _env_float("WIN_COOLDOWN_MINUTES_AFTER_CLOSE", 90.0, profile=name),
-            profile=name,
-        ),
-    )
+
     ema_averaging_min_drawdown_step = max(
         0.001,
         _env_float("EMA_AVERAGING_MIN_DRAWDOWN_STEP", 0.01, profile=name),
@@ -1170,22 +1240,14 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         profile=name,
     )
     ema_averaging_power = _env_float("EMA_AVERAGING_POWER", 1.0, profile=name)
-    configured_ema_max_averaging_stages = _env_int(
-        "EMA_MAX_AVERAGING_STAGES", 2, profile=name
-    )
-    if configured_ema_max_averaging_stages > 2:
-        _add_config_warning(
-            f"{name}: live ema_max_averaging_stages={configured_ema_max_averaging_stages} "
-            "is capped at the conservative launch maximum of 2"
-        )
-    ema_max_averaging_stages = min(max(0, configured_ema_max_averaging_stages), 2)
-    averaging_stage_count = max(0, ema_max_averaging_stages)
+    averaging_stage_count = max(0, strategy_context.ema_max_averaging_stages)
     hard_stop_loss_pct = _env_float("HARD_STOP_LOSS_PCT", 0.02, profile=name)
-    strategy = StrategySettings(
+
+    return StrategySettings(
         ema_strategy_enabled=_env_bool("EMA_STRATEGY_ENABLED", True, profile=name),
-        ema_macro_timeframe=ema_macro_timeframe,
-        ema_pullback_timeframe=ema_pullback_timeframe,
-        ema_trigger_timeframe=ema_trigger_timeframe,
+        ema_macro_timeframe=strategy_context.ema_macro_timeframe,
+        ema_pullback_timeframe=strategy_context.ema_pullback_timeframe,
+        ema_trigger_timeframe=strategy_context.ema_trigger_timeframe,
         ema_macro_fast_minutes=_env_int("EMA_MACRO_FAST_MINUTES", 2880, profile=name),
         ema_macro_slow_minutes=_env_int("EMA_MACRO_SLOW_MINUTES", 7200, profile=name),
         ema_pullback_fast_minutes=_env_int(
@@ -1388,7 +1450,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
             True,
             profile=name,
         ),
-        ema_max_averaging_stages=ema_max_averaging_stages,
+        ema_max_averaging_stages=strategy_context.ema_max_averaging_stages,
         account_pnl_enabled=_env_bool("ACCOUNT_PNL_ENABLED", True, profile=name),
         account_pnl_window_minutes=_env_float(
             "ACCOUNT_PNL_WINDOW_MINUTES", 360.0, profile=name
@@ -1562,7 +1624,9 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
             "ENTRY_SPREAD_FILTER_BLOCK_IF_UNAVAILABLE", False, profile=name
         ),
         max_buy_stages=_env_int(
-            "MAX_BUY_STAGES", ema_max_averaging_stages + 1, profile=name
+            "MAX_BUY_STAGES",
+            strategy_context.ema_max_averaging_stages + 1,
+            profile=name,
         ),
         averaging_drawdown_steps=tuple(
             max(
@@ -1783,7 +1847,10 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
             "FUNDING_NEGATIVE_MARKUP_MULTIPLIER", 1.15, profile=name
         ),
     )
-    macro = MacroSettings(
+
+
+def _make_macro_settings(name: str) -> MacroSettings:
+    return MacroSettings(
         enable_gold_btc_rsi_overlay=_env_bool(
             "ENABLE_GOLD_BTC_RSI_OVERLAY", True, profile=name
         ),
@@ -1836,12 +1903,15 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ),
         stale_macro_max_age_sec=_env_int("STALE_MACRO_MAX_AGE_SEC", 3600, profile=name),
     )
+
+
+def _make_monitoring_settings(name: str) -> MonitoringSettings:
     archive_dir = _env("CSV_ARCHIVE_DIR", profile=name) or "csv_archive"
     archive_path = Path(archive_dir)
     if not archive_path.is_absolute():
         archive_dir = str(BASE_DIR / name / archive_dir)
 
-    monitoring = MonitoringSettings(
+    return MonitoringSettings(
         log_level=_env("LOG_LEVEL", profile=name) or "INFO",
         cycle_stats_csv_file=_path(
             name, f"bot_futures{'_short' if name == 'short' else ''}_cycle_stats.csv"
@@ -1862,7 +1932,9 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ),
     )
 
-    external_price_feed = ExternalPriceFeedSettings(
+
+def _make_external_price_feed_settings(name: str) -> ExternalPriceFeedSettings:
+    return ExternalPriceFeedSettings(
         enabled=_env_bool("EXTERNAL_PRICE_FEED_ENABLED", True, profile=name),
         primary_exchange=_env("EXTERNAL_PRICE_PRIMARY_EXCHANGE", profile=name) or "htx",
         reference_exchanges=_env_csv(
@@ -1954,7 +2026,9 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         stale_after_ms=_env_int("EXTERNAL_PRICE_STALE_AFTER_MS", 3000, profile=name),
     )
 
-    runtime = RuntimeSettings(
+
+def _make_runtime_settings(name: str) -> RuntimeSettings:
+    return RuntimeSettings(
         dry_run=_env_bool("DRY_RUN", False, profile=name),
         dry_run_equity=_env_float("DRY_RUN_EQUITY", 1000.0, profile=name),
         order_timeout_sec=_env_int("ORDER_TIMEOUT_SEC", 90, profile=name),
@@ -1978,26 +2052,39 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         ),
     )
 
+
+def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfile:
+    coins = _normalize_coins(coins)
+
+    direction_context = _make_direction_context(direction)
+    strategy_context = _make_strategy_context(name, direction_context)
+
+    api_credentials = _api_credentials_for_account(name)
+    api_accounts = _make_api_accounts(name, api_credentials, coins)
+    account_coins = _coins_from_api_accounts(api_accounts)
+    if account_coins:
+        coins = account_coins
+
     profile = BotProfile(
         name=name,
         coins=coins,
-        trade_direction=direction,
-        position_side=position_side,
-        opposite_position_side=opposite_position_side,
-        entry_side=entry_side,
-        exit_side=exit_side,
+        trade_direction=direction_context.trade_direction,
+        position_side=direction_context.position_side,
+        opposite_position_side=direction_context.opposite_position_side,
+        entry_side=direction_context.entry_side,
+        exit_side=direction_context.exit_side,
         api_credentials=api_credentials,
         api_accounts=api_accounts,
-        exchange=exchange,
-        signals=signals,
-        buying=buying,
-        selling=selling,
-        risk=risk,
-        strategy=strategy,
-        macro=macro,
-        monitoring=monitoring,
-        runtime=runtime,
-        external_price_feed=external_price_feed,
+        exchange=_make_exchange_settings(name),
+        signals=_make_signal_settings(name, strategy_context),
+        buying=_make_buy_settings(name, strategy_context),
+        selling=_make_sell_settings(name),
+        risk=_make_risk_settings(name, strategy_context),
+        strategy=_make_strategy_settings(name, strategy_context),
+        macro=_make_macro_settings(name),
+        monitoring=_make_monitoring_settings(name),
+        runtime=_make_runtime_settings(name),
+        external_price_feed=_make_external_price_feed_settings(name),
     )
     _validate_profile(profile)
     return profile
