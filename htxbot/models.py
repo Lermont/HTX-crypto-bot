@@ -183,6 +183,7 @@ class TradeState:
 
 
 __all__ = [
+    "OrderRequest",
     "ExitLadderConfig",
     "ExitLadderPreflight",
     "OrderRequest",
