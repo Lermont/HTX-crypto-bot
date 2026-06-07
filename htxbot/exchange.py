@@ -2,23 +2,60 @@
 
 import concurrent.futures
 import json
+import math
 import re
+import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import ccxt
 
 import config
 from .models import OrderRequest
 
+from .concurrency import instance_rlock
+from .shared_exchange import MultiAccountExchange, ThreadSafeExchange
+
+
+class UnexpectedExchangeResponse(RuntimeError):
+    """Raised when CCXT returns a payload shape that cannot be trusted."""
+
 
 class ExchangeMixin:
-    def _create_exchange(self):
-        if config.RUNTIME.dry_run:
-            return None
-        if not config.API_CREDENTIALS.api_key or not config.API_CREDENTIALS.api_secret:
-            raise ValueError("HTX API credentials are required")
+    def _runtime_rlock(self, name: str):
+        lock = getattr(self, name, None)
+        if lock is None:
+            lock = threading.RLock()
+            setattr(self, name, lock)
+        return lock
 
+    def _private_cache_runtime_lock(self):
+        return self._runtime_rlock("_private_cache_lock")
+
+    def _funding_cache_runtime_lock(self):
+        return self._runtime_rlock("_funding_cache_lock")
+
+    def _market_data_cache_runtime_lock(self):
+        return self._runtime_rlock("_market_data_cache_lock")
+
+    def _exchange_runtime_lock(self):
+        getter = getattr(self.exchange, "thread_safe_lock", None)
+        if callable(getter):
+            lock = getter()
+            if lock is not None:
+                return lock
+        return instance_rlock(self.exchange, "_thread_safe_exchange_lock")
+
+    def _exchange_account_id_for_symbol(self, symbol: str = "") -> str:
+        resolver = getattr(self.exchange, "account_id_for_symbol", None)
+        if callable(resolver) and symbol:
+            try:
+                return str(resolver(symbol) or "primary")
+            except Exception:
+                return "primary"
+        return "primary" if symbol else "__all__"
+
+    def _exchange_config_for_credentials(self, credentials):
         exchange_config = {
             "enableRateLimit": config.EXCHANGE.enable_rate_limit,
             "timeout": config.EXCHANGE.timeout_ms,
@@ -34,14 +71,49 @@ class ExchangeMixin:
                 },
             },
         }
-        if config.API_CREDENTIALS.api_key and config.API_CREDENTIALS.api_secret:
-            exchange_config["apiKey"] = config.API_CREDENTIALS.api_key
-            exchange_config["secret"] = config.API_CREDENTIALS.api_secret
+        if credentials.api_key and credentials.api_secret:
+            exchange_config["apiKey"] = credentials.api_key
+            exchange_config["secret"] = credentials.api_secret
+        return exchange_config
 
+    def _create_account_exchange(self, credentials):
+        exchange_config = self._exchange_config_for_credentials(credentials)
         exchange = ccxt.htx(exchange_config)
         exchange.has["fetchCurrencies"] = False
         self._set_contract_hostname(exchange, self._contract_hostnames()[0])
-        return exchange
+        return ThreadSafeExchange(exchange)
+
+    def _create_exchange(self):
+        if config.RUNTIME.dry_run:
+            return None
+
+        api_accounts = tuple(getattr(config, "API_ACCOUNTS", ()) or ())
+        if not api_accounts:
+            api_accounts = (
+                config.ApiAccountSettings(
+                    name="primary",
+                    api_credentials=config.API_CREDENTIALS,
+                    coins=tuple(getattr(config, "COINS", ()) or ()),
+                ),
+            )
+
+        exchanges = {}
+        coin_accounts = {}
+        for account in api_accounts:
+            credentials = account.api_credentials
+            if not credentials.api_key or not credentials.api_secret:
+                raise ValueError(
+                    f"HTX API credentials are required for account {account.name}"
+                )
+            exchanges[account.name] = self._create_account_exchange(credentials)
+            for coin in account.coins:
+                coin_accounts[str(coin).strip().lower()] = account.name
+
+        if len(exchanges) == 1:
+            return next(iter(exchanges.values()))
+        return MultiAccountExchange(
+            exchanges, coin_accounts, default_account=api_accounts[0].name
+        )
 
     def _timeframe_to_seconds(self, timeframe: str) -> int:
         try:
@@ -50,10 +122,16 @@ class ExchangeMixin:
             return 60
 
     def _contract_hostnames(self) -> Tuple[str, ...]:
-        return tuple(config.EXCHANGE.contract_hostnames or ("api.hbdm.com", "api.hbdm.vn"))
+        return tuple(
+            config.EXCHANGE.contract_hostnames or ("api.hbdm.com", "api.hbdm.vn")
+        )
 
     def _set_contract_hostname(self, exchange, hostname: str):
         if not hostname:
+            return
+        setter = getattr(exchange, "set_contract_hostname", None)
+        if callable(setter):
+            setter(hostname)
             return
         urls = exchange.urls.setdefault("hostnames", {})
         urls["contract"] = hostname
@@ -64,11 +142,15 @@ class ExchangeMixin:
         try:
             payload = {
                 "saved_at": time.time(),
-                "contract_hostname": (self.exchange.urls.get("hostnames") or {}).get("contract", ""),
+                "contract_hostname": (self.exchange.urls.get("hostnames") or {}).get(
+                    "contract", ""
+                ),
                 "markets": markets,
             }
             self.markets_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.markets_cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            self.markets_cache_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
         except Exception as exc:
             self._log_event(
                 "DEBUG",
@@ -111,25 +193,38 @@ class ExchangeMixin:
         if not reload and self._markets_loaded():
             return getattr(self.exchange, "markets", {}) or {}
 
+        hostnames = list(self._contract_hostnames())
+        current = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
+        ordered_hostnames = []
+        if current:
+            ordered_hostnames.append(current)
+        ordered_hostnames.extend(
+            hostname for hostname in hostnames if hostname and hostname != current
+        )
+        if not ordered_hostnames:
+            ordered_hostnames = [""]
+
+        attempts = max(1, config.EXCHANGE.market_load_retries)
         last_exc = None
-        retries = max(1, config.EXCHANGE.market_load_retries)
-        hostnames = self._contract_hostnames()
-        for attempt in range(1, retries + 1):
-            for hostname in hostnames:
-                self._set_contract_hostname(self.exchange, hostname)
-                try:
+        for attempt in range(1, attempts + 1):
+            hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
+            try:
+                with self._exchange_runtime_lock():
+                    if hostname:
+                        self._set_contract_hostname(self.exchange, hostname)
                     markets = self.exchange.load_markets(reload=reload)
-                    self._save_markets_cache(markets)
-                    return markets
-                except (ccxt.RequestTimeout, ccxt.NetworkError) as exc:
-                    last_exc = exc
-                    self._log_event(
-                        "WARNING",
-                        f"HTX futures markets load attempt {attempt}/{retries} failed via {hostname}: {exc}",
-                        event="futures_setup",
-                        reason="load_markets_network_retry",
-                    )
-            time.sleep(min(2 * attempt, 8))
+                self._save_markets_cache(markets)
+                return markets
+            except (ccxt.RequestTimeout, ccxt.NetworkError) as exc:
+                last_exc = exc
+                self._log_event(
+                    "WARNING",
+                    f"HTX futures markets load attempt {attempt}/{attempts} failed via {hostname or 'default'}: {exc}",
+                    event="futures_setup",
+                    reason="load_markets_network_retry",
+                )
+                if attempt < attempts:
+                    time.sleep(min(2 * attempt, 8))
 
         cached = self._load_markets_from_cache()
         if cached:
@@ -137,7 +232,38 @@ class ExchangeMixin:
         raise last_exc
 
     def _is_transient_exchange_error(self, exc: Exception) -> bool:
-        return isinstance(exc, (ccxt.RequestTimeout, ccxt.NetworkError))
+        if not isinstance(exc, (ccxt.RequestTimeout, ccxt.NetworkError)):
+            return False
+        text = str(exc or "").lower()
+        diagnostic_error_code = getattr(self, "_diagnostic_error_code", None)
+        error_code = ""
+        if diagnostic_error_code:
+            try:
+                error_code = str(diagnostic_error_code(exc, "") or "").lower()
+            except Exception:
+                error_code = ""
+        non_retryable_codes = {
+            "bad-request",
+            "bad_request",
+            "invalid-parameter",
+            "invalid_parameter",
+            "invalid-symbol",
+            "invalid_symbol",
+        }
+        if error_code in non_retryable_codes:
+            return False
+        if any(
+            marker in text
+            for marker in (
+                "invalid-parameter",
+                "invalid parameter",
+                "invalid-symbol",
+                "invalid symbol",
+                "bad request",
+            )
+        ):
+            return False
+        return True
 
     def _markets_loaded(self) -> bool:
         markets = getattr(self.exchange, "markets", None)
@@ -174,13 +300,17 @@ class ExchangeMixin:
             market_by_symbol[symbol] = market
         return market
 
-    def _fetch_ohlcv_with_retry(self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None):
+    def _fetch_ohlcv_with_retry(
+        self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None
+    ):
         hostnames = list(self._contract_hostnames())
         current = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
         ordered_hostnames = []
         if current:
             ordered_hostnames.append(current)
-        ordered_hostnames.extend(hostname for hostname in hostnames if hostname and hostname != current)
+        ordered_hostnames.extend(
+            hostname for hostname in hostnames if hostname and hostname != current
+        )
         if not ordered_hostnames:
             ordered_hostnames = [""]
 
@@ -188,16 +318,23 @@ class ExchangeMixin:
         last_exc = None
         for attempt in range(1, attempts + 1):
             hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
-            if hostname:
-                self._set_contract_hostname(self.exchange, hostname)
             try:
-                return self.exchange.fetch_ohlcv(
-                    symbol,
-                    timeframe=timeframe,
-                    since=since,
-                    limit=limit,
-                    params=params or {},
-                )
+                with self._exchange_runtime_lock():
+                    if hostname:
+                        self._set_contract_hostname(self.exchange, hostname)
+                    ohlcv = self.exchange.fetch_ohlcv(
+                        symbol,
+                        timeframe=timeframe,
+                        since=since,
+                        limit=limit,
+                        params=params or {},
+                    )
+                    return self._expect_ccxt_list_response(
+                        ohlcv,
+                        "fetch_ohlcv",
+                        symbol=symbol,
+                        item_types=(list, tuple),
+                    )
             except Exception as exc:
                 if not self._is_transient_exchange_error(exc):
                     raise
@@ -219,13 +356,17 @@ class ExchangeMixin:
                 time.sleep(min(0.5 * attempt, 2.0))
         raise last_exc
 
-    def _private_fetch_with_retry(self, symbol: str, reason: str, description: str, fetch):
+    def _private_fetch_with_retry(
+        self, symbol: str, reason: str, description: str, fetch
+    ):
         hostnames = list(self._contract_hostnames())
         current = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
         ordered_hostnames = []
         if current:
             ordered_hostnames.append(current)
-        ordered_hostnames.extend(hostname for hostname in hostnames if hostname and hostname != current)
+        ordered_hostnames.extend(
+            hostname for hostname in hostnames if hostname and hostname != current
+        )
         if not ordered_hostnames:
             ordered_hostnames = [""]
 
@@ -233,10 +374,11 @@ class ExchangeMixin:
         last_exc = None
         for attempt in range(1, attempts + 1):
             hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
-            if hostname:
-                self._set_contract_hostname(self.exchange, hostname)
             try:
-                return fetch()
+                with self._exchange_runtime_lock():
+                    if hostname:
+                        self._set_contract_hostname(self.exchange, hostname)
+                    return fetch()
             except (ccxt.RequestTimeout, ccxt.NetworkError) as exc:
                 last_exc = exc
                 if attempt >= attempts:
@@ -256,6 +398,83 @@ class ExchangeMixin:
                 time.sleep(min(0.5 * attempt, 2.0))
         raise last_exc
 
+    def _ccxt_response_preview(self, payload: Any) -> str:
+        try:
+            sanitizer = getattr(self, "_sanitize_for_log", None)
+            clean = sanitizer(payload) if sanitizer else payload
+            if isinstance(clean, dict):
+                keys = list(clean.keys())[:8]
+                clean = {key: clean.get(key) for key in keys}
+            elif isinstance(clean, list):
+                clean = clean[:3]
+            text = json.dumps(clean, ensure_ascii=True, default=str, sort_keys=True)
+        except Exception:
+            text = repr(payload)
+        redactor = getattr(self, "_redact_sensitive_text", None)
+        if redactor:
+            text = redactor(text)
+        if len(text) > 500:
+            text = f"{text[:500]}...<truncated>"
+        return text
+
+    def _expected_item_type_name(self, item_types: Tuple[type, ...]) -> str:
+        return "|".join(item_type.__name__ for item_type in item_types)
+
+    def _is_ccxt_error_payload(self, payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+
+        normalized = {
+            str(key).lower().replace("-", "_"): value for key, value in payload.items()
+        }
+        status = str(normalized.get("status") or "").strip().lower()
+        if status in {"error", "err", "failed", "fail"}:
+            return True
+        if normalized.get("success") is False:
+            return True
+        if any(
+            key in normalized
+            for key in ("err_code", "err_msg", "error_code", "error_msg")
+        ):
+            return True
+
+        error = normalized.get("error")
+        if isinstance(error, dict):
+            return bool(error)
+        if isinstance(error, str):
+            return bool(error.strip())
+        return bool(error)
+
+    def _expect_ccxt_list_response(
+        self,
+        payload: Any,
+        method: str,
+        symbol: str = "",
+        item_types: Optional[Tuple[type, ...]] = None,
+    ) -> List[Any]:
+        location = f" for {symbol}" if symbol else ""
+        if not isinstance(payload, list):
+            raise UnexpectedExchangeResponse(
+                f"{method} returned {type(payload).__name__}; expected list{location}; "
+                f"payload={self._ccxt_response_preview(payload)}"
+            )
+        if item_types:
+            for index, item in enumerate(payload):
+                if isinstance(item, item_types):
+                    if isinstance(item, dict) and self._is_ccxt_error_payload(item):
+                        expected = self._expected_item_type_name(item_types)
+                        raise UnexpectedExchangeResponse(
+                            f"{method} returned list with error dict item at index {index}; "
+                            f"expected list[{expected}]{location}; payload={self._ccxt_response_preview(payload)}"
+                        )
+                    continue
+                expected = self._expected_item_type_name(item_types)
+                raise UnexpectedExchangeResponse(
+                    f"{method} returned list with {type(item).__name__} item at index {index}; "
+                    f"expected list[{expected}]{location}; payload={self._ccxt_response_preview(payload)}"
+                )
+        return payload
+
     def _price_to_precision(self, symbol: str, price: float) -> float:
         return float(self.exchange.price_to_precision(symbol, price))
 
@@ -264,10 +483,16 @@ class ExchangeMixin:
         raw_precision = (market.get("precision") or {}).get("price")
         precision = self._safe_float(raw_precision, -1.0)
         precision_mode = getattr(self.exchange, "precisionMode", None)
-        fallback_tick = max(abs(self._safe_float(market.get("last"), 1.0)) * 1e-10, 1e-12)
+        fallback_tick = max(
+            abs(self._safe_float(market.get("last"), 1.0)) * 1e-10, 1e-12
+        )
         if precision_mode == ccxt.TICK_SIZE:
             return precision if precision > 0 else fallback_tick
-        if precision_mode == ccxt.DECIMAL_PLACES and precision >= 0 and float(precision).is_integer():
+        if (
+            precision_mode == ccxt.DECIMAL_PLACES
+            and precision >= 0
+            and float(precision).is_integer()
+        ):
             return 10 ** (-int(precision))
         if precision <= 0:
             return fallback_tick
@@ -304,14 +529,20 @@ class ExchangeMixin:
     def _price_band_limit_from_error(self, exc: Exception, side: str) -> float:
         text = str(exc)
         if side == "sell":
-            match = re.search(r"Sell price must be higher than\s*([0-9.]+)", text, re.IGNORECASE)
+            match = re.search(
+                r"Sell price must be higher than\s*([0-9.]+)", text, re.IGNORECASE
+            )
         else:
-            match = re.search(r"Buy price must be lower than\s*([0-9.]+)", text, re.IGNORECASE)
+            match = re.search(
+                r"Buy price must be lower than\s*([0-9.]+)", text, re.IGNORECASE
+            )
         if not match:
             return 0.0
         return self._safe_float(match.group(1), 0.0)
 
-    def _price_inside_htx_band(self, symbol: str, price: float, side: str, limit: float) -> float:
+    def _price_inside_htx_band(
+        self, symbol: str, price: float, side: str, limit: float
+    ) -> float:
         if limit <= 0:
             return price
         tick = self._price_tick(symbol)
@@ -349,7 +580,10 @@ class ExchangeMixin:
                 ):
                     min_contracts = min_amount / contract_size
             candidates.append(min_contracts)
-        if precision_amount > 0 and getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE:
+        if (
+            precision_amount > 0
+            and getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE
+        ):
             candidates.append(precision_amount)
         if (
             precision is not None
@@ -364,16 +598,22 @@ class ExchangeMixin:
         market = self._market(symbol)
         return self._safe_float(market.get("contractSize"), 1.0) or 1.0
 
-    def _contracts_to_notional(self, symbol: str, contracts: float, price: float) -> float:
+    def _contracts_to_notional(
+        self, symbol: str, contracts: float, price: float
+    ) -> float:
         return max(0.0, contracts) * self._contract_size(symbol) * max(0.0, price)
 
-    def _contracts_for_notional(self, symbol: str, notional: float, price: float) -> float:
+    def _contracts_for_notional(
+        self, symbol: str, notional: float, price: float
+    ) -> float:
         if price <= 0:
             return 0.0
         raw_contracts = notional / (price * self._contract_size(symbol))
         return self._amount_to_precision(symbol, raw_contracts)
 
-    def _average_price_from_notional(self, symbol: str, contracts: float, notional: float) -> float:
+    def _average_price_from_notional(
+        self, symbol: str, contracts: float, notional: float
+    ) -> float:
         if contracts <= 0:
             return 0.0
         return notional / (contracts * self._contract_size(symbol))
@@ -382,7 +622,9 @@ class ExchangeMixin:
         tickers = self._bulk_tickers_by_symbol()
         ticker = tickers.get(symbol) if tickers else None
         if not ticker:
-            ticker = self.exchange.fetch_ticker(symbol)
+            ticker = self._ticker_from_market_data_cache(
+                symbol
+            ) or self._fetch_ticker_uncached(symbol)
         bid = self._safe_float(ticker.get("bid"))
         last = self._safe_float(ticker.get("last"))
         ask = self._safe_float(ticker.get("ask"))
@@ -397,7 +639,9 @@ class ExchangeMixin:
             tickers = self._bulk_tickers_by_symbol()
             ticker = tickers.get(symbol) if tickers else None
             if not ticker:
-                ticker = self.exchange.fetch_ticker(symbol)
+                ticker = self._ticker_from_market_data_cache(
+                    symbol
+                ) or self._fetch_ticker_uncached(symbol)
         except Exception as exc:
             self._log_event(
                 "DEBUG",
@@ -421,24 +665,48 @@ class ExchangeMixin:
         if not strategy.enable_funding_aware_exit:
             return {"rate": 0.0, "markup_multiplier": 1.0, "reason": "disabled"}
 
-        import threading
-        if not hasattr(self, "_funding_lock"):
-            self._funding_lock = threading.Lock()
-        with self._funding_lock:
+        with self._funding_cache_runtime_lock():
+            now = time.time()
             cached = self.funding_cache.get(symbol)
-        now = time.time()
-        if cached and now - self._safe_float(cached.get("ts"), 0.0) < strategy.funding_cache_ttl_sec:
-            return cached
+            cached_until = (
+                self._safe_float((cached or {}).get("expires_at"), 0.0)
+                if isinstance(cached, dict)
+                else 0.0
+            )
+            if cached and cached_until > now:
+                return dict(cached)
+            if (
+                cached
+                and cached_until <= 0
+                and now - self._safe_float(cached.get("ts"), 0.0)
+                < strategy.funding_cache_ttl_sec
+            ):
+                return dict(cached)
 
-        rate = 0.0
-        reason = "unavailable"
-        if self.exchange.has.get("fetchFundingRate"):
+            rate = 0.0
+            reason = "unavailable"
+            if not self.exchange.has.get("fetchFundingRate"):
+                payload = {
+                    "rate": 0.0,
+                    "markup_multiplier": 1.0,
+                    "reason": "funding_rate_unavailable",
+                    "valid": False,
+                    "ts": now,
+                    "expires_at": now
+                    + min(
+                        max(1.0, self._safe_float(strategy.funding_cache_ttl_sec, 1.0)),
+                        30.0,
+                    ),
+                }
+                self.funding_cache[symbol] = payload
+                return dict(payload)
+
             try:
                 funding = self.exchange.fetch_funding_rate(symbol)
-                rate = self._safe_float(
-                    funding.get("fundingRate", funding.get("rate", (funding.get("info") or {}).get("funding_rate"))),
-                    0.0,
-                )
+                parsed_rate = self._parse_funding_rate_payload(funding)
+                if parsed_rate is None:
+                    raise ValueError("funding rate payload is missing a numeric rate")
+                rate = parsed_rate
                 reason = "neutral"
             except Exception as exc:
                 self._log_event(
@@ -448,44 +716,151 @@ class ExchangeMixin:
                     symbol=symbol,
                     reason="funding_rate_unavailable",
                 )
-
-        markup_multiplier = 1.0
-        if config.POSITION_SIDE == "short":
-            if rate >= strategy.funding_positive_threshold:
-                markup_multiplier = strategy.funding_negative_markup_multiplier
-                reason = "positive_funding_short_receives"
-            elif rate <= strategy.funding_negative_threshold:
-                markup_multiplier = strategy.funding_positive_markup_multiplier
-                reason = "negative_funding_short_pays"
-        else:
-            if rate >= strategy.funding_positive_threshold:
-                markup_multiplier = strategy.funding_positive_markup_multiplier
-                reason = "positive_funding_long_pays"
-            elif rate <= strategy.funding_negative_threshold:
-                markup_multiplier = strategy.funding_negative_markup_multiplier
-                reason = "negative_funding_long_receives"
-
-        payload = {
-            "rate": rate,
-            "markup_multiplier": markup_multiplier,
-            "reason": reason,
-            "ts": now,
-        }
-        import threading
-        if not hasattr(self, "_funding_lock"):
-            self._funding_lock = threading.Lock()
-        with self._funding_lock:
-            self.funding_cache[symbol] = payload
-        return payload
-
-    def _account_snapshot(self) -> dict:
-        try:
-            balance = self.exchange.fetch_balance(
-                {
-                    "type": config.EXCHANGE.default_type,
-                    "marginMode": config.RISK.margin_mode,
+                payload = {
+                    "rate": 0.0,
+                    "markup_multiplier": 1.0,
+                    "reason": "funding_rate_unavailable",
+                    "valid": False,
+                    "ts": now,
+                    "expires_at": now
+                    + min(
+                        max(1.0, self._safe_float(strategy.funding_cache_ttl_sec, 1.0)),
+                        30.0,
+                    ),
                 }
+                self.funding_cache[symbol] = payload
+                return dict(payload)
+
+            markup_multiplier = 1.0
+            if config.POSITION_SIDE == "short":
+                if rate >= strategy.funding_positive_threshold:
+                    markup_multiplier = strategy.funding_negative_markup_multiplier
+                    reason = "positive_funding_short_receives"
+                elif rate <= strategy.funding_negative_threshold:
+                    markup_multiplier = strategy.funding_positive_markup_multiplier
+                    reason = "negative_funding_short_pays"
+            else:
+                if rate >= strategy.funding_positive_threshold:
+                    markup_multiplier = strategy.funding_positive_markup_multiplier
+                    reason = "positive_funding_long_pays"
+                elif rate <= strategy.funding_negative_threshold:
+                    markup_multiplier = strategy.funding_negative_markup_multiplier
+                    reason = "negative_funding_long_receives"
+
+            payload = {
+                "rate": rate,
+                "markup_multiplier": markup_multiplier,
+                "reason": reason,
+                "valid": True,
+                "ts": now,
+                "expires_at": now
+                + max(0.0, self._safe_float(strategy.funding_cache_ttl_sec, 0.0)),
+            }
+            self.funding_cache[symbol] = payload
+            return dict(payload)
+
+    def _parse_funding_rate_payload(self, funding: dict) -> Optional[float]:
+        if not isinstance(funding, dict):
+            return None
+        info = funding.get("info") if isinstance(funding.get("info"), dict) else {}
+        for source in (funding, info):
+            if not isinstance(source, dict):
+                continue
+            for key in ("fundingRate", "funding_rate", "rate"):
+                if key not in source or source.get(key) in (None, ""):
+                    continue
+                try:
+                    rate = float(source.get(key))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(rate):
+                    return rate
+        return None
+
+    def _account_snapshot_cache_key(self, symbol: str = "") -> str:
+        return "__all__"
+
+    def _account_snapshot(self, symbol: str = "") -> dict:
+        cache_key = self._account_snapshot_cache_key(symbol)
+        entry = None
+        owner = False
+        with self._private_cache_runtime_lock():
+            cache_by_key = getattr(self, "_account_snapshot_cache_by_key", None)
+            if not isinstance(cache_by_key, dict):
+                cache_by_key = {}
+                self._account_snapshot_cache_by_key = cache_by_key
+            cached = cache_by_key.get(cache_key)
+            if isinstance(cached, dict):
+                return dict(cached)
+            inflight_by_key = getattr(self, "_account_snapshot_inflight_by_key", None)
+            if not isinstance(inflight_by_key, dict):
+                inflight_by_key = {}
+                self._account_snapshot_inflight_by_key = inflight_by_key
+            entry = inflight_by_key.get(cache_key)
+            if not isinstance(entry, dict):
+                entry = {"event": threading.Event(), "value": None, "exception": None}
+                inflight_by_key[cache_key] = entry
+                owner = True
+
+        if not owner:
+            entry["event"].wait()
+            if entry.get("exception") is not None:
+                raise entry["exception"]
+            value = entry.get("value") or {"free": 0.0, "total": 0.0}
+            return (
+                dict(value) if isinstance(value, dict) else {"free": 0.0, "total": 0.0}
             )
+
+        value = None
+        try:
+            value = self._fetch_account_snapshot_uncached(symbol=symbol)
+            with self._private_cache_runtime_lock():
+                self._account_snapshot_cache_by_key[cache_key] = dict(value)
+                if cache_key == "__all__":
+                    self._account_snapshot_cache = dict(value)
+            return dict(value)
+        except Exception as exc:
+            entry["exception"] = exc
+            raise
+        finally:
+            if entry.get("exception") is None:
+                entry["value"] = dict(value) if isinstance(value, dict) else value
+            with self._private_cache_runtime_lock():
+                inflight_by_key = getattr(
+                    self, "_account_snapshot_inflight_by_key", None
+                )
+                if (
+                    isinstance(inflight_by_key, dict)
+                    and inflight_by_key.get(cache_key) is entry
+                ):
+                    inflight_by_key.pop(cache_key, None)
+                if (
+                    cache_key == "__all__"
+                    and getattr(self, "_account_snapshot_inflight", None) is entry
+                ):
+                    self._account_snapshot_inflight = None
+                entry["event"].set()
+
+    def _invalidate_account_snapshot_cache(self, symbol: str = ""):
+        cache_key = self._account_snapshot_cache_key(symbol)
+        with self._private_cache_runtime_lock():
+            cache_by_key = getattr(self, "_account_snapshot_cache_by_key", None)
+            if isinstance(cache_by_key, dict):
+                cache_by_key.pop(cache_key, None)
+            if cache_key == "__all__":
+                self._account_snapshot_cache = None
+
+    def _fresh_account_snapshot(self, symbol: str = "") -> dict:
+        self._invalidate_account_snapshot_cache(symbol)
+        return self._account_snapshot(symbol)
+
+    def _fetch_account_snapshot_uncached(self, symbol: str = "") -> dict:
+        params = {
+            "type": config.EXCHANGE.default_type,
+            "marginMode": config.RISK.margin_mode,
+        }
+        try:
+            balance = self.exchange.fetch_balance(params)
         except Exception as exc:
             self._log_event(
                 "ERROR",
@@ -496,7 +871,9 @@ class ExchangeMixin:
             )
             return {"free": 0.0, "total": 0.0}
 
-        if not self._ensure_cross_margin_response(balance, context="futures_balance"):
+        if not self._ensure_cross_margin_response(
+            balance, context="futures_balance", symbol=symbol
+        ):
             return {"free": 0.0, "total": 0.0}
 
         quote = config.EXCHANGE.quote_currency
@@ -517,15 +894,24 @@ class ExchangeMixin:
                     item_margin_mode = self._extract_margin_mode(item)
                     if item_margin_mode and item_margin_mode != config.RISK.margin_mode:
                         continue
-                    margin_asset = str(item.get("margin_asset") or item.get("symbol") or "").upper()
+                    margin_asset = str(
+                        item.get("margin_asset") or item.get("symbol") or ""
+                    ).upper()
                     if margin_asset and margin_asset != quote:
                         continue
                     available = self._safe_float(
-                        item.get("margin_available", item.get("withdraw_available", item.get("margin_balance", 0.0))),
+                        item.get(
+                            "margin_available",
+                            item.get(
+                                "withdraw_available", item.get("margin_balance", 0.0)
+                            ),
+                        ),
                         0.0,
                     )
                     equity = self._safe_float(
-                        item.get("margin_balance", item.get("margin_static", available)),
+                        item.get(
+                            "margin_balance", item.get("margin_static", available)
+                        ),
                         available,
                     )
                     raw_free += max(0.0, available)
@@ -554,19 +940,330 @@ class ExchangeMixin:
         return {"free": free, "total": total}
 
     def _reset_private_caches(self):
-        self._private_positions_by_symbol = None
-        self._private_open_orders_by_symbol = None
-        self._private_tickers_by_symbol = None
-        self._private_positions_bulk_failed = False
-        self._private_open_orders_bulk_failed = False
-        self._private_tickers_bulk_failed = False
-        self._external_price_context_cache = {}
+        with self._private_cache_runtime_lock():
+            self._private_positions_by_symbol = None
+            self._private_open_orders_by_symbol = None
+            self._private_tickers_by_symbol = None
+            self._account_snapshot_cache = None
+            self._account_snapshot_inflight = None
+            self._account_snapshot_cache_by_key = {}
+            self._account_snapshot_inflight_by_key = {}
+            self._private_positions_bulk_failed = False
+            self._private_open_orders_bulk_failed = False
+            self._private_tickers_bulk_failed = False
+            self._private_api_network_failed = False
+            self._external_price_context_cache = {}
+
+    def _reset_market_data_caches(self):
+        with self._market_data_cache_runtime_lock():
+            self._ticker_cache = {}
+            self._ticker_inflight = {}
+            self._order_book_cache = {}
+            self._order_book_inflight = {}
+
+    def _market_data_cache_ttl_sec(self) -> float:
+        try:
+            poll_interval = self._safe_float(
+                getattr(config.RUNTIME, "poll_interval_sec", 1.0), 1.0
+            )
+        except Exception:
+            poll_interval = 1.0
+        return max(1.0, min(10.0, poll_interval))
+
+    def _fetch_ticker_uncached(self, symbol: str) -> dict:
+        return self.exchange.fetch_ticker(symbol)
+
+    def _ticker_from_market_data_cache(self, symbol: str) -> Optional[dict]:
+        now = time.time()
+        key = (symbol,)
+        ttl = self._market_data_cache_ttl_sec()
+        with self._market_data_cache_runtime_lock():
+            cache = getattr(self, "_ticker_cache", None)
+            if not isinstance(cache, dict):
+                return None
+            cached = cache.get(key)
+            if cached and now - self._safe_float(cached[0], 0.0) <= ttl:
+                value = cached[1]
+                return dict(value) if isinstance(value, dict) else None
+        return None
+
+    def _cached_ticker(self, symbol: str) -> dict:
+        now = time.time()
+        key = (symbol,)
+        ttl = self._market_data_cache_ttl_sec()
+        entry = None
+        owner = False
+
+        with self._market_data_cache_runtime_lock():
+            cache = getattr(self, "_ticker_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._ticker_cache = cache
+            inflight = getattr(self, "_ticker_inflight", None)
+            if not isinstance(inflight, dict):
+                inflight = {}
+                self._ticker_inflight = inflight
+
+            cached = cache.get(key)
+            if cached and now - self._safe_float(cached[0], 0.0) <= ttl:
+                return dict(cached[1])
+
+            entry = inflight.get(key)
+            if entry is None:
+                entry = {"event": threading.Event(), "value": None, "exception": None}
+                inflight[key] = entry
+                owner = True
+
+        if not owner:
+            entry["event"].wait()
+            if entry.get("exception") is not None:
+                raise entry["exception"]
+            value = entry.get("value") or {}
+            return dict(value) if isinstance(value, dict) else {}
+
+        value = None
+        try:
+            value = self._fetch_ticker_uncached(symbol)
+            if isinstance(value, dict) and not self._is_ccxt_error_payload(value):
+                with self._market_data_cache_runtime_lock():
+                    self._ticker_cache[key] = (time.time(), dict(value))
+            return value
+        except Exception as exc:
+            entry["exception"] = exc
+            raise
+        finally:
+            if entry.get("exception") is None:
+                entry["value"] = dict(value) if isinstance(value, dict) else value
+            with self._market_data_cache_runtime_lock():
+                inflight = getattr(self, "_ticker_inflight", {})
+                if isinstance(inflight, dict):
+                    inflight.pop(key, None)
+                entry["event"].set()
+
+    def _ticker_prefetch_symbols(self) -> List[str]:
+        symbols = []
+        seen = set()
+        for symbol in list(getattr(self, "symbols", []) or []):
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            symbols.append(symbol)
+        return symbols
+
+    def _prefetch_ticker_snapshots(
+        self, symbols: Optional[List[str]] = None
+    ) -> Dict[str, dict]:
+        if not hasattr(self.exchange, "fetch_ticker"):
+            return {}
+
+        prefetch_symbols = (
+            list(symbols) if symbols is not None else self._ticker_prefetch_symbols()
+        )
+        if not prefetch_symbols:
+            return {}
+
+        max_workers_resolver = getattr(self, "_market_data_max_workers", None)
+        if max_workers_resolver:
+            max_workers = max_workers_resolver()
+        else:
+            try:
+                max_workers = int(
+                    getattr(config.RUNTIME, "market_data_max_workers", 1) or 1
+                )
+            except (TypeError, ValueError):
+                max_workers = 1
+            max_workers = max(1, max_workers)
+        max_workers = min(max_workers, len(prefetch_symbols))
+        profile = getattr(self, "profile", None) or config.current_profile()
+
+        def fetch_ticker_safe(symbol: str):
+            try:
+                with config.use_profile(profile):
+                    return symbol, self._cached_ticker(symbol), None
+            except Exception as exc:
+                return symbol, None, exc
+
+        if max_workers <= 1 or len(prefetch_symbols) <= 1:
+            results = [fetch_ticker_safe(symbol) for symbol in prefetch_symbols]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                results = list(executor.map(fetch_ticker_safe, prefetch_symbols))
+
+        tickers: Dict[str, dict] = {}
+        for symbol, ticker, exc in results:
+            if exc is not None:
+                self._log_event(
+                    "DEBUG",
+                    f"HTX ticker prefetch failed for {symbol}: {exc}",
+                    event="market_data_prefetch",
+                    symbol=symbol,
+                    reason="ticker_prefetch_failed",
+                    exception=exc,
+                    retryable=getattr(
+                        self, "_is_transient_exchange_error", lambda _exc: False
+                    )(exc),
+                )
+                continue
+            if isinstance(ticker, dict) and ticker:
+                tickers[symbol] = dict(ticker)
+
+        if tickers:
+            with self._private_cache_runtime_lock():
+                cached = getattr(self, "_private_tickers_by_symbol", None)
+                if not isinstance(cached, dict):
+                    cached = {}
+                cached.update(tickers)
+                self._private_tickers_by_symbol = cached
+        return tickers
+
+    def _fetch_order_book_uncached(self, symbol: str, limit: int = 5):
+        try:
+            return self.exchange.fetch_order_book(symbol, limit=limit)
+        except TypeError:
+            return self.exchange.fetch_order_book(symbol)
+
+    def _cached_order_book(self, symbol: str, limit: int = 5) -> dict:
+        now = time.time()
+        key = (symbol, int(limit or 0))
+        ttl = self._market_data_cache_ttl_sec()
+        entry = None
+        owner = False
+
+        with self._market_data_cache_runtime_lock():
+            cache = getattr(self, "_order_book_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._order_book_cache = cache
+            inflight = getattr(self, "_order_book_inflight", None)
+            if not isinstance(inflight, dict):
+                inflight = {}
+                self._order_book_inflight = inflight
+
+            cached = cache.get(key)
+            if cached and now - self._safe_float(cached[0], 0.0) <= ttl:
+                return cached[1]
+
+            entry = inflight.get(key)
+            if entry is None:
+                entry = {"event": threading.Event(), "value": None, "exception": None}
+                inflight[key] = entry
+                owner = True
+
+        if not owner:
+            entry["event"].wait()
+            if entry.get("exception") is not None:
+                raise entry["exception"]
+            return entry.get("value") or {}
+
+        value = None
+        try:
+            value = self._fetch_order_book_uncached(symbol, limit=limit)
+            if (
+                isinstance(value, dict)
+                and isinstance(value.get("bids"), list)
+                and isinstance(value.get("asks"), list)
+            ):
+                with self._market_data_cache_runtime_lock():
+                    self._order_book_cache[key] = (time.time(), value)
+            return value
+        except Exception as exc:
+            entry["exception"] = exc
+            raise
+        finally:
+            if entry.get("exception") is None:
+                entry["value"] = value
+            with self._market_data_cache_runtime_lock():
+                inflight = getattr(self, "_order_book_inflight", {})
+                if isinstance(inflight, dict):
+                    inflight.pop(key, None)
+                entry["event"].set()
+
+    def _order_book_prefetch_symbols(self) -> List[str]:
+        symbols = []
+        seen = set()
+        for symbol in list(getattr(self, "symbols", []) or []):
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            symbols.append(symbol)
+        return symbols
+
+    def _prefetch_market_data_snapshots(self):
+        symbols = self._order_book_prefetch_symbols()
+        if not symbols:
+            return
+
+        exchange_has = getattr(self.exchange, "has", {}) or {}
+        if not exchange_has.get("fetchTickers"):
+            self._prefetch_ticker_snapshots(symbols)
+
+        strategy = config.STRATEGY
+        if not getattr(strategy, "entry_spread_filter_enabled", False):
+            return
+        max_spread = max(
+            0.0,
+            self._safe_float(
+                getattr(strategy, "entry_spread_filter_max_bps", 0.0), 0.0
+            ),
+        )
+        if max_spread <= 0 or not hasattr(self.exchange, "fetch_order_book"):
+            return
+
+        max_workers_resolver = getattr(self, "_market_data_max_workers", None)
+        if max_workers_resolver:
+            max_workers = max_workers_resolver()
+        else:
+            try:
+                max_workers = int(
+                    getattr(config.RUNTIME, "market_data_max_workers", 1) or 1
+                )
+            except (TypeError, ValueError):
+                max_workers = 1
+            max_workers = max(1, max_workers)
+        max_workers = min(max_workers, len(symbols))
+        profile = getattr(self, "profile", None) or config.current_profile()
+
+        def fetch_order_book_safe(symbol: str):
+            try:
+                with config.use_profile(profile):
+                    self._cached_order_book(symbol, limit=5)
+                return symbol, None
+            except Exception as exc:
+                return symbol, exc
+
+        if max_workers <= 1 or len(symbols) <= 1:
+            results = [fetch_order_book_safe(symbol) for symbol in symbols]
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                results = list(executor.map(fetch_order_book_safe, symbols))
+
+        for symbol, exc in results:
+            if exc is None:
+                continue
+            self._log_event(
+                "DEBUG",
+                f"HTX order book prefetch failed for {symbol}: {exc}",
+                event="market_data_prefetch",
+                symbol=symbol,
+                reason="order_book_prefetch_failed",
+                exception=exc,
+                retryable=getattr(
+                    self, "_is_transient_exchange_error", lambda _exc: False
+                )(exc),
+            )
 
     def _payload_symbol(self, payload: dict) -> str:
         if not isinstance(payload, dict):
             return ""
 
-        for source in (payload, payload.get("info") if isinstance(payload.get("info"), dict) else {}):
+        for source in (
+            payload,
+            payload.get("info") if isinstance(payload.get("info"), dict) else {},
+        ):
             for key in ("symbol", "market", "contract_code", "contractCode"):
                 value = source.get(key)
                 if value:
@@ -583,7 +1280,9 @@ class ExchangeMixin:
                         return raw_symbol
         return ""
 
-    def _group_payloads_by_symbol(self, payloads: List[dict]) -> Tuple[Dict[str, List[dict]], bool]:
+    def _group_payloads_by_symbol(
+        self, payloads: List[dict]
+    ) -> Tuple[Dict[str, List[dict]], bool]:
         grouped: Dict[str, List[dict]] = {}
         missing_symbol = False
         for payload in payloads or []:
@@ -594,129 +1293,178 @@ class ExchangeMixin:
             grouped.setdefault(symbol, []).append(payload)
         return grouped, missing_symbol
 
-
     def _bulk_tickers_by_symbol(self) -> Optional[Dict[str, dict]]:
-        cached = getattr(self, "_private_tickers_by_symbol", None)
-        if cached is not None:
-            return cached
-        if getattr(self, "_private_tickers_bulk_failed", False):
-            return None
-        if not self.exchange.has.get("fetchTickers"):
+        with self._private_cache_runtime_lock():
+            cached = getattr(self, "_private_tickers_by_symbol", None)
+            if cached is not None:
+                return cached
+            if getattr(self, "_private_tickers_bulk_failed", False):
+                return None
+            if not self.exchange.has.get("fetchTickers"):
+                self._private_tickers_bulk_failed = True
+                return None
+
+            try:
+                tickers = self._private_fetch_with_retry(
+                    "",
+                    "bulk_tickers_fetch_failed",
+                    "bulk tickers",
+                    lambda: self.exchange.fetch_tickers(list(self.symbols)),
+                )
+            except Exception as exc:
+                self._private_tickers_bulk_failed = True
+                self._log_event(
+                    "DEBUG",
+                    f"Bulk tickers fetch unavailable; falling back to per-symbol sync: {exc}",
+                    event="state_exchange_mismatch",
+                    reason="bulk_tickers_fetch_failed_fallback",
+                    exception=exc,
+                )
+                return None
+
+            if isinstance(tickers, dict):
+                self._private_tickers_by_symbol = tickers
+                return tickers
+
             self._private_tickers_bulk_failed = True
             return None
-
-        try:
-            tickers = self._private_fetch_with_retry(
-                "",
-                "bulk_tickers_fetch_failed",
-                "bulk tickers",
-                lambda: self.exchange.fetch_tickers(list(self.symbols)),
-            )
-        except Exception as exc:
-            self._private_tickers_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                f"Bulk tickers fetch unavailable; falling back to per-symbol sync: {exc}",
-                event="state_exchange_mismatch",
-                reason="bulk_tickers_fetch_failed_fallback",
-                exception=exc,
-            )
-            return None
-
-        if isinstance(tickers, dict):
-            self._private_tickers_by_symbol = tickers
-            return tickers
-
-        self._private_tickers_bulk_failed = True
-        return None
 
     def _bulk_positions_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        cached = getattr(self, "_private_positions_by_symbol", None)
-        if cached is not None:
-            return cached
-        if getattr(self, "_private_positions_bulk_failed", False):
-            return None
-        if not self.exchange.has.get("fetchPositions"):
-            self._private_positions_bulk_failed = True
-            return None
+        with self._private_cache_runtime_lock():
+            cached = getattr(self, "_private_positions_by_symbol", None)
+            if cached is not None:
+                return cached
+            if getattr(self, "_private_api_network_failed", False):
+                return None
+            if getattr(self, "_private_positions_bulk_failed", False):
+                return None
+            if not self.exchange.has.get("fetchPositions"):
+                self._private_positions_bulk_failed = True
+                return None
 
-        try:
-            positions = self._private_fetch_with_retry(
-                "",
-                "bulk_positions_fetch_failed",
-                "bulk positions",
-                lambda: self.exchange.fetch_positions(list(self.symbols), self._position_params()),
-            )
-        except Exception as exc:
-            self._private_positions_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                f"Bulk positions fetch unavailable; falling back to per-symbol sync: {exc}",
-                event="state_exchange_mismatch",
-                reason="bulk_positions_fetch_failed",
-                exception=exc,
-            )
-            return None
+            try:
+                positions = self._private_fetch_with_retry(
+                    "",
+                    "bulk_positions_fetch_failed",
+                    "bulk positions",
+                    lambda: self.exchange.fetch_positions(
+                        list(self.symbols), self._position_params()
+                    ),
+                )
+                positions = self._expect_ccxt_list_response(
+                    positions,
+                    "fetch_positions",
+                    item_types=(dict,),
+                )
+            except Exception as exc:
+                self._private_positions_bulk_failed = True
+                network_failed = self._is_transient_exchange_error(exc)
+                if network_failed:
+                    self._private_api_network_failed = True
+                self._log_event(
+                    "WARNING" if network_failed else "DEBUG",
+                    (
+                        f"Bulk positions fetch unavailable after network retries; skipping private sync for this cycle: {exc}"
+                        if network_failed
+                        else f"Bulk positions fetch unavailable; falling back to per-symbol sync: {exc}"
+                    ),
+                    event="state_exchange_mismatch",
+                    reason=(
+                        "bulk_positions_fetch_failed_cycle_skipped"
+                        if network_failed
+                        else "bulk_positions_fetch_failed"
+                    ),
+                    exception=exc,
+                )
+                return None
 
-        grouped, missing_symbol = self._group_payloads_by_symbol(positions)
-        if positions and missing_symbol:
-            self._private_positions_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                "Bulk positions response contains payloads without symbols; falling back to per-symbol sync",
-                event="state_exchange_mismatch",
-                reason="bulk_positions_missing_symbol_fallback",
-            )
-            return None
-        self._private_positions_by_symbol = grouped
-        return grouped
+            grouped, missing_symbol = self._group_payloads_by_symbol(positions)
+            if positions and missing_symbol:
+                self._private_positions_bulk_failed = True
+                self._log_event(
+                    "DEBUG",
+                    "Bulk positions response contains payloads without symbols; falling back to per-symbol sync",
+                    event="state_exchange_mismatch",
+                    reason="bulk_positions_missing_symbol_fallback",
+                )
+                return None
+            self._private_positions_by_symbol = grouped
+            return grouped
 
     def _bulk_open_orders_by_symbol(self) -> Optional[Dict[str, List[dict]]]:
-        cached = getattr(self, "_private_open_orders_by_symbol", None)
-        if cached is not None:
-            return cached
-        if getattr(self, "_private_open_orders_bulk_failed", False):
-            return None
-        if not self.exchange.has.get("fetchOpenOrders"):
-            self._private_open_orders_bulk_failed = True
-            return None
+        with self._private_cache_runtime_lock():
+            cached = getattr(self, "_private_open_orders_by_symbol", None)
+            if cached is not None:
+                return cached
+            if getattr(self, "_private_api_network_failed", False):
+                return None
+            if getattr(self, "_private_open_orders_bulk_failed", False):
+                return None
+            if not self.exchange.has.get("fetchOpenOrders"):
+                self._private_open_orders_bulk_failed = True
+                return None
 
-        def fetch_bulk_open_orders():
+            def fetch_bulk_open_orders():
+                return self.exchange.fetch_open_orders(
+                    None, params=self._position_params()
+                )
+
             try:
-                return self.exchange.fetch_open_orders(None, params=self._position_params())
-            except TypeError:
-                return self.exchange.fetch_open_orders()
+                orders = self._private_fetch_with_retry(
+                    "",
+                    "bulk_open_orders_fetch_failed",
+                    "bulk open orders",
+                    fetch_bulk_open_orders,
+                )
+                orders = self._expect_ccxt_list_response(
+                    orders,
+                    "fetch_open_orders",
+                    item_types=(dict,),
+                )
+            except Exception as exc:
+                self._private_open_orders_bulk_failed = True
+                network_failed = self._is_transient_exchange_error(exc)
+                if network_failed:
+                    self._private_api_network_failed = True
+                self._log_event(
+                    "WARNING" if network_failed else "DEBUG",
+                    (
+                        f"Bulk open-orders fetch unavailable after network retries; skipping private sync for this cycle: {exc}"
+                        if network_failed
+                        else f"Bulk open-orders fetch unavailable; falling back to per-symbol sync: {exc}"
+                    ),
+                    event="state_exchange_mismatch",
+                    reason=(
+                        "bulk_open_orders_fetch_failed_cycle_skipped"
+                        if network_failed
+                        else "bulk_open_orders_fetch_failed"
+                    ),
+                    exception=exc,
+                )
+                return None
 
-        try:
-            orders = self._private_fetch_with_retry(
-                "",
-                "bulk_open_orders_fetch_failed",
-                "bulk open orders",
-                fetch_bulk_open_orders,
-            )
-        except Exception as exc:
-            self._private_open_orders_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                f"Bulk open-orders fetch unavailable; falling back to per-symbol sync: {exc}",
-                event="state_exchange_mismatch",
-                reason="bulk_open_orders_fetch_failed",
-                exception=exc,
-            )
-            return None
+            grouped, missing_symbol = self._group_payloads_by_symbol(orders)
+            if orders and missing_symbol:
+                self._private_open_orders_bulk_failed = True
+                self._log_event(
+                    "DEBUG",
+                    "Bulk open-orders response contains payloads without symbols; falling back to per-symbol sync",
+                    event="state_exchange_mismatch",
+                    reason="bulk_open_orders_missing_symbol_fallback",
+                )
+                return None
+            self._private_open_orders_by_symbol = grouped
+            return grouped
 
-        grouped, missing_symbol = self._group_payloads_by_symbol(orders)
-        if orders and missing_symbol:
-            self._private_open_orders_bulk_failed = True
-            self._log_event(
-                "DEBUG",
-                "Bulk open-orders response contains payloads without symbols; falling back to per-symbol sync",
-                event="state_exchange_mismatch",
-                reason="bulk_open_orders_missing_symbol_fallback",
-            )
-            return None
-        self._private_open_orders_by_symbol = grouped
-        return grouped
+    def _prefetch_private_snapshots(self):
+        self._bulk_positions_by_symbol()
+        if getattr(self, "_private_api_network_failed", False):
+            return
+        self._bulk_open_orders_by_symbol()
+        if getattr(self, "_private_api_network_failed", False):
+            return
+        if self._bulk_tickers_by_symbol() is None:
+            self._prefetch_ticker_snapshots()
 
     def _position_params(self) -> dict:
         return {"marginMode": config.RISK.margin_mode}
@@ -773,7 +1521,9 @@ class ExchangeMixin:
         return fallback
 
     def _fetch_account_order_leverage(self, symbol: str) -> float:
-        configured = self._safe_float(getattr(config.RISK, "account_leverage", 0.0), 0.0)
+        configured = self._safe_float(
+            getattr(config.RISK, "account_leverage", 0.0), 0.0
+        )
         if configured > 0:
             return configured
 
@@ -790,7 +1540,11 @@ class ExchangeMixin:
             self.order_leverage_cache[symbol] = state_leverage
             return state_leverage
 
-        method = getattr(self.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo", None)
+        method = getattr(
+            self.exchange,
+            "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo",
+            None,
+        )
         if not method:
             self._log_event(
                 "ERROR",
@@ -833,7 +1587,12 @@ class ExchangeMixin:
         self.order_leverage_cache[symbol] = leverage
         return leverage
 
-    def _order_params(self, reduce_only: bool = False, post_only: bool = False, leverage: Optional[float] = None) -> dict:
+    def _order_params(
+        self,
+        reduce_only: bool = False,
+        post_only: bool = False,
+        leverage: Optional[float] = None,
+    ) -> dict:
         lever_rate = self._safe_float(leverage, 0.0)
         if lever_rate <= 0:
             raise RuntimeError("manual_account_leverage_unavailable")
@@ -843,7 +1602,9 @@ class ExchangeMixin:
             "hedged": False,
         }
         if lever_rate > 0:
-            params["leverRate"] = int(lever_rate) if lever_rate.is_integer() else lever_rate
+            params["leverRate"] = (
+                int(lever_rate) if lever_rate.is_integer() else lever_rate
+            )
         if post_only:
             params["postOnly"] = True
         if reduce_only:
@@ -865,7 +1626,9 @@ class ExchangeMixin:
                     return str(val).lower()
         return ""
 
-    def _ensure_cross_margin_response(self, payload: dict, context: str, symbol: str = "") -> bool:
+    def _ensure_cross_margin_response(
+        self, payload: dict, context: str, symbol: str = ""
+    ) -> bool:
         if config.RISK.margin_mode != "cross":
             self._log_event(
                 "ERROR",
@@ -876,7 +1639,11 @@ class ExchangeMixin:
             )
             return False
 
-        raw_data = (payload.get("info") or {}).get("data") if isinstance(payload, dict) else None
+        raw_data = (
+            (payload.get("info") or {}).get("data")
+            if isinstance(payload, dict)
+            else None
+        )
         modes = []
         if isinstance(raw_data, list):
             for item in raw_data:
@@ -901,7 +1668,11 @@ class ExchangeMixin:
 
     def _is_hedge_mode_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
-        return "hedge mode currently" in text or "one-way mode" in text or '"err_code":1499' in text
+        return (
+            "hedge mode currently" in text
+            or "one-way mode" in text
+            or '"err_code":1499' in text
+        )
 
     def _is_high_leverage_risk_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
@@ -909,6 +1680,15 @@ class ExchangeMixin:
             '"err_code":1206' in text
             or "high risk exposure" in text
             or "high leverage is not supported" in text
+        )
+
+    def _is_insufficient_margin_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            isinstance(exc, ccxt.InsufficientFunds)
+            or '"err_code":1047' in text
+            or "insufficient margin" in text
+            or "insufficient funds" in text
         )
 
     def _is_reduce_only_amount_exceeds_closeable_error(self, exc: Exception) -> bool:
@@ -919,6 +1699,16 @@ class ExchangeMixin:
             or "amount available to close" in text
         )
 
+    def _is_hard_stop_loss_trigger_reached_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        has_code = bool(re.search(r'"err[_-]?code"\s*:\s*"?1407"?', text))
+        has_message = (
+            "stop-loss price" in text
+            or "stop loss price" in text
+            or ("stop" in text and "loss" in text and "shall not be" in text)
+        )
+        return has_code and has_message
+
     def _is_position_mode_locked_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
         return (
@@ -926,6 +1716,14 @@ class ExchangeMixin:
             or '"err_code":1493' in text
             or "position mode cannot be adjusted for existing positions" in text
             or "position mode cannot be adjusted for open orders" in text
+        )
+
+    def _is_position_mode_access_limit_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            '"err_code":1032' in text
+            or '"err_code":"1032"' in text
+            or "maximum number of access attempts exceeded" in text
         )
 
     def _position_mode_values_from_payload(self, payload) -> List[str]:
@@ -954,11 +1752,19 @@ class ExchangeMixin:
         endpoints = [
             (
                 "cross_account_position_info",
-                getattr(self.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo", None),
+                getattr(
+                    self.exchange,
+                    "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo",
+                    None,
+                ),
             ),
             (
                 "cross_account_info",
-                getattr(self.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountInfo", None),
+                getattr(
+                    self.exchange,
+                    "contractPrivatePostLinearSwapApiV1SwapCrossAccountInfo",
+                    None,
+                ),
             ),
         ]
         last_reason = "position_mode_query_unavailable"
@@ -986,18 +1792,50 @@ class ExchangeMixin:
         if self.one_way_mode_checked and not force:
             return True
 
+        mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()
+        if mode_is_one_way is True:
+            self.one_way_mode_checked = True
+            self._log_event(
+                "INFO",
+                "HTX futures account position mode is already one-way",
+                event="futures_setup",
+                reason=f"position_mode_one_way_confirmed;{mode_reason}",
+            )
+            return True
+        if mode_is_one_way is False:
+            self._log_event(
+                "WARNING",
+                "HTX futures account is not in one-way mode; attempting to switch it",
+                event="futures_setup",
+                reason=f"position_mode_switch_required;{mode_reason}",
+            )
+
         try:
             if config.RISK.margin_mode == "cross":
-                self.exchange.set_position_mode(False, None, params=self._position_params())
+                self.exchange.set_position_mode(
+                    False, None, params=self._position_params()
+                )
             else:
-                def update_mode(symbol):
-                    self.exchange.set_position_mode(False, symbol, params=self._position_params())
 
-                for symbol in self.symbols:
-                    update_mode(symbol)
+                def update_mode(symbol):
+                    self.exchange.set_position_mode(
+                        False, symbol, params=self._position_params()
+                    )
+
+                max_workers = min(10, max(1, len(self.symbols)))
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers
+                ) as executor:
+                    futures = [
+                        executor.submit(update_mode, symbol) for symbol in self.symbols
+                    ]
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()
         except Exception as exc:
             if self._is_position_mode_locked_error(exc):
-                mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()
+                mode_is_one_way, mode_reason = (
+                    self._fetch_current_position_mode_is_one_way()
+                )
                 if mode_is_one_way is not True:
                     self._log_event(
                         "ERROR",
@@ -1022,6 +1860,39 @@ class ExchangeMixin:
                 )
                 return True
 
+            if self._is_position_mode_access_limit_error(
+                exc
+            ) or self._is_transient_exchange_error(exc):
+                mode_is_one_way, mode_reason = (
+                    self._fetch_current_position_mode_is_one_way()
+                )
+                if mode_is_one_way is True:
+                    self.one_way_mode_checked = True
+                    self._log_event(
+                        "WARNING",
+                        "HTX position mode switch was rate-limited, but current one-way mode was confirmed; "
+                        f"continuing with one-way order parameters: {exc}",
+                        event="futures_setup",
+                        reason=f"position_mode_switch_limited_confirmed;{mode_reason}",
+                        exception=exc,
+                        retryable=True,
+                    )
+                    return True
+
+                self._log_event(
+                    "ERROR",
+                    "HTX position mode switch was rate-limited and current one-way mode could not be confirmed",
+                    event="futures_setup",
+                    reason=(
+                        "position_mode_switch_limited_unverified"
+                        if mode_is_one_way is None
+                        else "position_mode_switch_limited_hedge_mode"
+                    ),
+                    exception=exc,
+                    retryable=True,
+                )
+                return False
+
             self._log_event(
                 "ERROR",
                 f"Could not switch HTX futures account to one-way mode: {exc}",
@@ -1041,14 +1912,16 @@ class ExchangeMixin:
 
     def _set_leverage_safe(self, symbol: str, leverage: int) -> bool:
         try:
-            self.exchange.set_leverage(int(leverage), symbol, params=self._position_params())
+            self.exchange.set_leverage(
+                int(leverage), symbol, params=self._position_params()
+            )
             if not hasattr(self, "order_leverage_cache"):
                 self.order_leverage_cache = {}
             self.order_leverage_cache[symbol] = float(leverage)
             return True
         except Exception as exc:
             self._log_event(
-                "ERROR",
+                "WARNING",
                 f"Could not set leverage {leverage} for {symbol}: {exc}",
                 event="futures_setup",
                 symbol=symbol,
@@ -1059,11 +1932,27 @@ class ExchangeMixin:
 
     def _create_one_way_order(
         self,
-        req: OrderRequest,
+        req: Optional[OrderRequest] = None,
+        **kwargs,
     ) -> dict:
+        if req is None:
+            req = OrderRequest(**kwargs)
+        elif kwargs:
+            raise TypeError(
+                "_create_one_way_order accepts either OrderRequest or keyword arguments, not both"
+            )
+        elif not isinstance(req, OrderRequest):
+            raise TypeError(
+                f"_create_one_way_order expected OrderRequest, got {type(req).__name__}"
+            )
+
         if req.leverage is None:
             req.leverage = self._fetch_account_order_leverage(req.symbol)
-        params = self._order_params(reduce_only=req.reduce_only, post_only=req.post_only, leverage=req.leverage)
+        params = self._order_params(
+            reduce_only=req.reduce_only, post_only=req.post_only, leverage=req.leverage
+        )
+        if req.extra_params:
+            params.update(dict(req.extra_params))
         try:
             return self.exchange.create_order(
                 symbol=req.symbol,
@@ -1119,16 +2008,30 @@ class ExchangeMixin:
         bulk_positions = self._bulk_positions_by_symbol()
         if bulk_positions is not None:
             positions = bulk_positions.get(symbol, [])
+        elif getattr(self, "_private_api_network_failed", False):
+            snapshot["ok"] = False
+            return snapshot
         else:
             try:
                 positions = self._private_fetch_with_retry(
                     symbol,
                     "position_fetch_failed",
                     f"position for {symbol}",
-                    lambda: self.exchange.fetch_positions([symbol], self._position_params()),
+                    lambda: self.exchange.fetch_positions(
+                        [symbol], self._position_params()
+                    ),
+                )
+                positions = self._expect_ccxt_list_response(
+                    positions,
+                    "fetch_positions",
+                    symbol=symbol,
+                    item_types=(dict,),
                 )
             except Exception as exc:
-                level = "WARNING" if self._is_transient_exchange_error(exc) else "ERROR"
+                network_failed = self._is_transient_exchange_error(exc)
+                if network_failed:
+                    self._private_api_network_failed = True
+                level = "WARNING" if network_failed else "ERROR"
                 self._log_event(
                     level,
                     f"Could not fetch position for {symbol}: {exc}",
@@ -1140,8 +2043,12 @@ class ExchangeMixin:
                 snapshot["ok"] = False
                 return snapshot
 
-        def available_and_frozen(position: dict, contracts: float) -> Tuple[float, float]:
-            info = position.get("info") if isinstance(position.get("info"), dict) else {}
+        def available_and_frozen(
+            position: dict, contracts: float
+        ) -> Tuple[float, float]:
+            info = (
+                position.get("info") if isinstance(position.get("info"), dict) else {}
+            )
             available = None
             for source in (position, info):
                 if not isinstance(source, dict):
@@ -1168,7 +2075,12 @@ class ExchangeMixin:
             for source in (position, info):
                 if not isinstance(source, dict):
                     continue
-                for key in ("frozen", "frozenPosition", "frozen_position", "frozen_volume"):
+                for key in (
+                    "frozen",
+                    "frozenPosition",
+                    "frozen_position",
+                    "frozen_volume",
+                ):
                     if key in source and source.get(key) is not None:
                         frozen = self._safe_float(source.get(key), 0.0)
                         break
@@ -1198,7 +2110,9 @@ class ExchangeMixin:
                 continue
 
             old_size = snapshot[f"{side}_size"]
-            old_entry_notional = self._contracts_to_notional(symbol, old_size, snapshot[f"{side}_entry_price"])
+            old_entry_notional = self._contracts_to_notional(
+                symbol, old_size, snapshot[f"{side}_entry_price"]
+            )
             add_entry = self._safe_float(position.get("entryPrice"), 0.0)
             add_notional = self._contracts_to_notional(symbol, contracts, add_entry)
             available, frozen = available_and_frozen(position, contracts)
@@ -1210,7 +2124,9 @@ class ExchangeMixin:
                 snapshot[f"{side}_size"],
                 old_entry_notional + add_notional,
             )
-            snapshot[f"{side}_unrealized_pnl"] += self._safe_float(position.get("unrealizedPnl"), 0.0)
+            snapshot[f"{side}_unrealized_pnl"] += self._safe_float(
+                position.get("unrealizedPnl"), 0.0
+            )
 
             if side == config.POSITION_SIDE:
                 snapshot["entry_price"] = snapshot[f"{side}_entry_price"]
@@ -1224,12 +2140,14 @@ class ExchangeMixin:
         bulk_orders = self._bulk_open_orders_by_symbol()
         if bulk_orders is not None:
             orders = bulk_orders.get(symbol, [])
+        elif getattr(self, "_private_api_network_failed", False):
+            return None
         else:
+
             def fetch_symbol_open_orders():
-                try:
-                    return self.exchange.fetch_open_orders(symbol, params=self._position_params())
-                except TypeError:
-                    return self.exchange.fetch_open_orders(symbol)
+                return self.exchange.fetch_open_orders(
+                    symbol, params=self._position_params()
+                )
 
             try:
                 orders = self._private_fetch_with_retry(
@@ -1238,8 +2156,17 @@ class ExchangeMixin:
                     f"open orders for {symbol}",
                     fetch_symbol_open_orders,
                 )
+                orders = self._expect_ccxt_list_response(
+                    orders,
+                    "fetch_open_orders",
+                    symbol=symbol,
+                    item_types=(dict,),
+                )
             except Exception as exc:
-                level = "WARNING" if self._is_transient_exchange_error(exc) else "ERROR"
+                network_failed = self._is_transient_exchange_error(exc)
+                if network_failed:
+                    self._private_api_network_failed = True
+                level = "WARNING" if network_failed else "ERROR"
                 self._log_event(
                     level,
                     f"Could not fetch open orders for {symbol}: {exc}",
@@ -1267,7 +2194,9 @@ class ExchangeMixin:
 
         return orders
 
-    def _cancel_order_ref(self, symbol: str, ref: dict, event: str, reason: str) -> bool:
+    def _cancel_order_ref(
+        self, symbol: str, ref: dict, event: str, reason: str
+    ) -> bool:
         order_id = str(ref.get("id", ""))
         if not order_id:
             return False
@@ -1297,9 +2226,14 @@ class ExchangeMixin:
             symbol=symbol,
             signal={"ts": ref.get("signal_ts"), "strategy_name": "ema_pullback"},
             block_reason=reason,
-            operation_id=str(ref.get("operation_id") or self._operation_id("order_cancel", symbol=symbol, order_id=order_id)),
+            operation_id=str(
+                ref.get("operation_id")
+                or self._operation_id("order_cancel", symbol=symbol, order_id=order_id)
+            ),
             order_id=order_id,
-            cycle_id=str(ref.get("cycle_id") or getattr(self._get_state(symbol), "cycle_id", "")),
+            cycle_id=str(
+                ref.get("cycle_id") or getattr(self._get_state(symbol), "cycle_id", "")
+            ),
             context={
                 "side": ref.get("side", ""),
                 "price": self._safe_float(ref.get("price"), 0.0),
@@ -1323,8 +2257,9 @@ class ExchangeMixin:
         state = self._get_state(symbol)
         remaining = []
         for ref in list(state.entry_orders):
-            side = str(ref.get("side") or config.ENTRY_SIDE).lower()
-            if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+            if not self._cancel_order_ref(
+                symbol, ref, event="entry_order_canceled", reason=reason
+            ):
                 remaining.append(ref)
         state.entry_orders = remaining
         self._refresh_active_side(state)
@@ -1335,7 +2270,9 @@ class ExchangeMixin:
         remaining = []
         for ref in list(state.sell_ladder_orders):
             side = str(ref.get("side") or config.EXIT_SIDE).lower()
-            if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+            if not self._cancel_order_ref(
+                symbol, ref, event=f"{side}_order_canceled", reason=reason
+            ):
                 remaining.append(ref)
         state.sell_ladder_orders = remaining
         state.sell_ladder_signature = ""
@@ -1343,7 +2280,35 @@ class ExchangeMixin:
         self._refresh_active_side(state)
         self._save_state()
 
-    def _cancel_exchange_orders(self, symbol: str, orders: List[dict], side: Optional[str], reason: str) -> bool:
+    def _cancel_hard_stop_order(self, symbol: str, reason: str):
+        state = self._get_state(symbol)
+        ref = dict(state.hard_stop_order or {})
+        if not ref:
+            return
+        if ref.get("market_close"):
+            state.hard_stop_order = {}
+            state.hard_stop_signature = ""
+            self._refresh_active_side(state)
+            self._save_state()
+            return
+        side = str(ref.get("side") or config.EXIT_SIDE).lower()
+        if not self._cancel_order_ref(
+            symbol, ref, event=f"{side}_order_canceled", reason=reason
+        ):
+            return
+        state.hard_stop_order = {}
+        state.hard_stop_signature = ""
+        self._refresh_active_side(state)
+        self._save_state()
+
+    def _cancel_exchange_orders(
+        self,
+        symbol: str,
+        orders: List[dict],
+        side: Optional[str],
+        reason: str,
+        event: Optional[str] = None,
+    ) -> bool:
         all_canceled = True
         for order in orders:
             order_side = (order.get("side") or "").lower()
@@ -1358,8 +2323,10 @@ class ExchangeMixin:
             cancel_params = order.get("bot_cancel_params") or order.get("cancel_params")
             if isinstance(cancel_params, dict):
                 ref["cancel_params"] = dict(cancel_params)
-            event = "buy_order_canceled" if order_side == "buy" else "sell_order_canceled"
-            if not self._cancel_order_ref(symbol, ref, event=event, reason=reason):
+            log_event = event or (
+                "buy_order_canceled" if order_side == "buy" else "sell_order_canceled"
+            )
+            if not self._cancel_order_ref(symbol, ref, event=log_event, reason=reason):
                 all_canceled = False
         return all_canceled
 
@@ -1367,36 +2334,32 @@ class ExchangeMixin:
         state = self._get_state(symbol)
         entry_refs = list(state.entry_orders)
         sell_refs = list(state.sell_ladder_orders)
+        hard_stop_ref = dict(state.hard_stop_order or {})
         canceled_all = True
         for ref in entry_refs:
-            side = str(ref.get("side") or config.ENTRY_SIDE).lower()
-            if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+            if not self._cancel_order_ref(
+                symbol, ref, event="entry_order_canceled", reason=reason
+            ):
                 canceled_all = False
         for ref in sell_refs:
             side = str(ref.get("side") or config.EXIT_SIDE).lower()
-            if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+            if not self._cancel_order_ref(
+                symbol, ref, event=f"{side}_order_canceled", reason=reason
+            ):
                 canceled_all = False
-
-        tracked_ids = {str(ref.get("id")) for ref in entry_refs + sell_refs if ref.get("id")}
-        open_orders = self._fetch_open_orders(symbol)
-        if isinstance(open_orders, list):
-            untracked_orders = [o for o in open_orders if isinstance(o, dict) and str(o.get("id")) not in tracked_ids]
-            if untracked_orders:
-                self._log_event(
-                    "WARNING",
-                    f"Found {len(untracked_orders)} untracked open orders on exchange for {symbol}; canceling them",
-                    event="state_exchange_mismatch",
-                    symbol=symbol,
-                    reason="canceling_untracked_orders",
-                )
-                if not self._cancel_exchange_orders(symbol, untracked_orders, side=None, reason=reason):
-                    canceled_all = False
-
+        if hard_stop_ref:
+            side = str(hard_stop_ref.get("side") or config.EXIT_SIDE).lower()
+            if not self._cancel_order_ref(
+                symbol, hard_stop_ref, event=f"{side}_order_canceled", reason=reason
+            ):
+                canceled_all = False
         if not canceled_all:
             return
         state.entry_orders = []
         state.sell_ladder_orders = []
         state.sell_ladder_signature = ""
+        state.hard_stop_order = {}
+        state.hard_stop_signature = ""
         self._clear_pending_exit_ladder(state)
         self._refresh_active_side(state)
         self._save_state()
@@ -1405,7 +2368,11 @@ class ExchangeMixin:
         base = coin.upper()
         exact = f"{base}/{config.EXCHANGE.quote_currency}:USDT"
         market = self.exchange.markets.get(exact)
-        if market and market.get("linear") and (market.get("swap") or market.get("future")):
+        if (
+            market
+            and market.get("linear")
+            and (market.get("swap") or market.get("future"))
+        ):
             return exact
 
         candidates = []
@@ -1437,7 +2404,9 @@ class ExchangeMixin:
         for symbol in exact_candidates:
             market = self.exchange.markets.get(symbol)
             if market and market.get("base") == base and market.get("quote") == quote:
-                if market.get("linear") and (market.get("swap") or market.get("future")):
+                if market.get("linear") and (
+                    market.get("swap") or market.get("future")
+                ):
                     return symbol
 
         candidates = []
@@ -1446,7 +2415,13 @@ class ExchangeMixin:
                 continue
             if not (market.get("swap") or market.get("future")):
                 continue
-            candidates.append((0 if market.get("linear") else 1, 0 if market.get("swap") else 1, symbol))
+            candidates.append(
+                (
+                    0 if market.get("linear") else 1,
+                    0 if market.get("swap") else 1,
+                    symbol,
+                )
+            )
         candidates.sort()
         return candidates[0][2] if candidates else None
 
@@ -1468,7 +2443,7 @@ class ExchangeMixin:
             }
         )
         exchange.has["fetchCurrencies"] = False
-        return exchange
+        return ThreadSafeExchange(exchange)
 
     def _spot_exchange(self):
         if getattr(self, "macro_spot_exchange", None) is None:
@@ -1528,12 +2503,16 @@ class ExchangeMixin:
     def _find_macro_gold_symbol(self) -> Optional[str]:
         self.macro_gold_is_spot = False
         for coin in self._macro_gold_coin_candidates():
-            futures_symbol = self._find_futures_base_quote_symbol(coin, config.EXCHANGE.quote_currency)
+            futures_symbol = self._find_futures_base_quote_symbol(
+                coin, config.EXCHANGE.quote_currency
+            )
             if futures_symbol:
                 return futures_symbol
 
         for coin in self._macro_gold_coin_candidates():
-            spot_symbol = self._find_spot_base_quote_symbol(coin, config.EXCHANGE.quote_currency)
+            spot_symbol = self._find_spot_base_quote_symbol(
+                coin, config.EXCHANGE.quote_currency
+            )
             if spot_symbol:
                 self.macro_gold_is_spot = True
                 return spot_symbol
@@ -1593,7 +2572,38 @@ class ExchangeMixin:
                 raise RuntimeError("Could not enforce HTX one-way position mode")
 
         if config.EXCHANGE.set_leverage_on_start:
-            leverage = int(config.RISK.leverage)
-            for symbol in self.symbols:
-                if not self._set_leverage_safe(symbol, leverage):
-                    raise RuntimeError(f"Could not set configured HTX leverage {leverage} for {symbol}")
+            self._apply_configured_leverage_on_start()
+
+    def _apply_configured_leverage_on_start(self) -> bool:
+        leverage = int(config.RISK.leverage)
+        failed_symbols = []
+        for symbol in self.symbols:
+            if self._set_leverage_safe(symbol, leverage):
+                continue
+            failed_symbols.append(symbol)
+
+        if failed_symbols:
+            preview = ", ".join(failed_symbols[:10])
+            suffix = (
+                ""
+                if len(failed_symbols) <= 10
+                else f", +{len(failed_symbols) - 10} more"
+            )
+            self._log_event(
+                "WARNING",
+                (
+                    f"Configured HTX leverage {leverage} could not be applied to "
+                    f"{len(failed_symbols)} of {len(self.symbols)} tracked symbols "
+                    f"({preview}{suffix}); startup will continue and orders will use "
+                    "the readable/manual account leverage"
+                ),
+                event="futures_setup",
+                reason="set_leverage_partial_failure",
+                diagnostic_context={
+                    "configured_leverage": leverage,
+                    "failed_symbols": failed_symbols,
+                    "tracked_symbol_count": len(self.symbols),
+                },
+            )
+            return False
+        return True

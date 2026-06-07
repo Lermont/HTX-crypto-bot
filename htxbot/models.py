@@ -8,15 +8,16 @@ import config
 
 
 @dataclass
-
-@dataclass
 class OrderRequest:
     symbol: str
     order_type: str
     side: str
     amount: float
-    price: Optional[float]
+    price: Optional[float] = None
     reduce_only: bool = False
+    post_only: bool = False
+    leverage: Optional[float] = None
+    extra_params: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -25,6 +26,7 @@ class SignalContext:
     benchmark_closes: List[float]
     btc_risk: dict
     latest_ts: int
+    candles: Optional[List[list]] = None
     cache_key: str = ""
     macro_context: Optional[dict] = None
     macro_closes: Optional[List[float]] = None
@@ -55,6 +57,7 @@ class ExitLadderConfig:
     exit_scope: Optional[str] = None
     signature_override: str = ""
     use_trailing_exit: bool = True
+    signal: Optional[dict] = None
 
 
 @dataclass
@@ -79,6 +82,7 @@ class SellLadderParams:
     exit_scope: Optional[str] = None
     signature_override: str = ""
     use_trailing_exit: bool = True
+    signal: Optional[dict] = None
 
 
 @dataclass
@@ -102,8 +106,12 @@ class TradeState:
     sell_ladder_orders: list = field(default_factory=list)
     sell_ladder_mode: str = "normal"
     sell_ladder_signature: str = ""
+    hard_stop_order: dict = field(default_factory=dict)
+    hard_stop_signature: str = ""
     pending_exit_ladder_since: Optional[float] = None
     pending_exit_ladder_reason: str = ""
+    pending_close_order: dict = field(default_factory=dict)
+    pending_close_reason: str = ""
     frozen_no_more_buys: bool = False
     cycle_opened_at: Optional[float] = None
     cooldown_until: Optional[float] = None
@@ -146,9 +154,6 @@ class TradeState:
     last_average_signal_timestamp: Optional[float] = None
     last_average_at: Optional[float] = None
     average_stage: int = 0
-    frozen_recovery_buys: int = 0
-    last_frozen_recovery_signal_timestamp: Optional[float] = None
-    last_frozen_recovery_at: Optional[float] = None
     strategy_name: str = "ema_pullback"
     last_ema_strategy_signal_timestamp: Optional[float] = None
     breakeven_activated_at: Optional[float] = None
@@ -157,6 +162,11 @@ class TradeState:
     exit_runner_peak_price: float = 0.0
     exit_runner_bottom_price: float = 0.0
     exit_runner_contracts: float = 0.0
+    soft_defensive_last_signal_timestamp: Optional[float] = None
+    soft_defensive_consecutive_signals: int = 0
+    soft_defensive_exit_activated_at: Optional[float] = None
+    soft_defensive_exit_last_rebuild_at: Optional[float] = None
+    soft_defensive_exit_fraction: float = 0.0
     last_account_unload_at: Optional[float] = None
     account_unload_count: int = 0
     entry_rs30: float = 0.0
@@ -176,6 +186,7 @@ __all__ = [
     "OrderRequest",
     "ExitLadderConfig",
     "ExitLadderPreflight",
+    "OrderRequest",
     "PositionLifecycle",
     "SellLadderParams",
     "SignalContext",

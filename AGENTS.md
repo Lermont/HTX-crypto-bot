@@ -59,10 +59,9 @@
   - validate entries;
   - manage entries;
   - ensure sell ladder;
-  - averaging/recovery;
+  - averaging;
   - initial entry.
 - Проверь, что позиция не блокируется навечно без возможности выхода.
-- Проверь, что frozen recovery не открывает бесконтрольные доборы.
 - Проверь, что time-based exit/urgent_time_exit действительно перестраивает ladder, а не зависает.
 - Проверь, что long и short логика зеркальна там, где должна быть зеркальна.
 
