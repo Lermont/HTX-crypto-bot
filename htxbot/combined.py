@@ -27,11 +27,17 @@ class CombinedHtxFuturesBot:
         for profile in self.profiles:
             feed_settings = profile.external_price_feed
             shared_external_price_feed = shared_external_price_feeds.get(feed_settings)
-            bot = HtxFuturesBot(profile=profile, exchange=shared_exchange, external_price_feed=shared_external_price_feed)
+            bot = HtxFuturesBot(
+                profile=profile,
+                exchange=shared_exchange,
+                external_price_feed=shared_external_price_feed,
+            )
             if shared_exchange is None:
                 shared_exchange = CachedMarketDataExchange(bot.exchange)
                 bot.exchange = shared_exchange
-            shared_external_price_feeds.setdefault(feed_settings, bot.external_price_feed)
+            shared_external_price_feeds.setdefault(
+                feed_settings, bot.external_price_feed
+            )
             bot.skip_futures_account_setup = bool(self.bots)
             bot.skip_live_balance_log = bool(self.bots)
             bot.account_pnl_runtime = shared_account_pnl_runtime
@@ -68,7 +74,9 @@ class CombinedHtxFuturesBot:
                 prepare_entry_gate = getattr(bot, "_prepare_new_entry_gate", None)
                 if prepare_entry_gate:
                     prepare_entry_gate()
-                prefetch_market_data = getattr(bot, "_prefetch_market_data_snapshots", None)
+                prefetch_market_data = getattr(
+                    bot, "_prefetch_market_data_snapshots", None
+                )
                 if prefetch_market_data:
                     prefetch_market_data()
                 prefetch_private = getattr(bot, "_prefetch_private_snapshots", None)
@@ -93,7 +101,9 @@ class CombinedHtxFuturesBot:
                             )
                 bot._save_state()
         try:
-            self._rebalance_btc_hedge(skip_reason="step_error" if had_step_error else "")
+            self._rebalance_btc_hedge(
+                skip_reason="step_error" if had_step_error else ""
+            )
         except Exception as exc:
             self._log_btc_hedge(
                 "ERROR",
@@ -115,7 +125,12 @@ class CombinedHtxFuturesBot:
                 except Exception:
                     pass
             try:
-                workers = max(workers, int(getattr(bot.profile.runtime, "market_data_max_workers", 1) or 1))
+                workers = max(
+                    workers,
+                    int(
+                        getattr(bot.profile.runtime, "market_data_max_workers", 1) or 1
+                    ),
+                )
             except Exception:
                 workers = max(workers, 1)
         return max(1, workers)
@@ -145,11 +160,19 @@ class CombinedHtxFuturesBot:
         first = self.profiles[0]
         for profile in self.profiles[1:]:
             if profile.api_credentials != first.api_credentials:
-                raise RuntimeError("Combined live profiles must use the same primary HTX API credentials")
-            if tuple(getattr(profile, "api_accounts", ()) or ()) != tuple(getattr(first, "api_accounts", ()) or ()):
-                raise RuntimeError("Combined live profiles must use the same HTX API account routing")
+                raise RuntimeError(
+                    "Combined live profiles must use the same primary HTX API credentials"
+                )
+            if tuple(getattr(profile, "api_accounts", ()) or ()) != tuple(
+                getattr(first, "api_accounts", ()) or ()
+            ):
+                raise RuntimeError(
+                    "Combined live profiles must use the same HTX API account routing"
+                )
             if profile.runtime.dry_run != first.runtime.dry_run:
-                raise RuntimeError("Combined profiles must all have the same DRY_RUN setting")
+                raise RuntimeError(
+                    "Combined profiles must all have the same DRY_RUN setting"
+                )
 
     def _reserved_symbols(self, exclude: HtxFuturesBot) -> set:
         reserved = set()
@@ -158,7 +181,12 @@ class CombinedHtxFuturesBot:
                 continue
             with config.use_profile(bot.profile):
                 for symbol, state in bot.states.items():
-                    if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders or state.hard_stop_order:
+                    if (
+                        state.position_size > 0
+                        or state.entry_orders
+                        or state.sell_ladder_orders
+                        or state.hard_stop_order
+                    ):
                         reserved.add(symbol)
                 reserved.update(self._exchange_reserved_symbols(bot))
         return reserved
@@ -178,9 +206,17 @@ class CombinedHtxFuturesBot:
         remaining_amount = getattr(bot, "_order_remaining_amount", None)
         if remaining_amount:
             return remaining_amount(order)
-        if isinstance(order, dict) and "remaining" in order and order.get("remaining") is not None:
-            return max(0.0, CombinedHtxFuturesBot._safe_float(bot, order.get("remaining"), 0.0))
-        return max(0.0, CombinedHtxFuturesBot._safe_float(bot, order.get("amount"), 0.0))
+        if (
+            isinstance(order, dict)
+            and "remaining" in order
+            and order.get("remaining") is not None
+        ):
+            return max(
+                0.0, CombinedHtxFuturesBot._safe_float(bot, order.get("remaining"), 0.0)
+            )
+        return max(
+            0.0, CombinedHtxFuturesBot._safe_float(bot, order.get("amount"), 0.0)
+        )
 
     def _exchange_reserved_symbols(self, bot: HtxFuturesBot) -> set:
         reserved = set()
@@ -212,7 +248,9 @@ class CombinedHtxFuturesBot:
                     pass
             for position in positions or []:
                 side = str((position or {}).get("side") or "").lower()
-                contracts = self._safe_float(bot, (position or {}).get("contracts"), 0.0)
+                contracts = self._safe_float(
+                    bot, (position or {}).get("contracts"), 0.0
+                )
                 if side == bot.profile.position_side and contracts > epsilon:
                     reserved.add(symbol)
                     break
@@ -316,7 +354,12 @@ class CombinedHtxFuturesBot:
             symbols.update(getattr(bot, "symbols", []) or [])
             states = getattr(bot, "states", {}) or {}
             for symbol, state in states.items():
-                if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders or state.hard_stop_order:
+                if (
+                    state.position_size > 0
+                    or state.entry_orders
+                    or state.sell_ladder_orders
+                    or state.hard_stop_order
+                ):
                     symbols.add(symbol)
         symbols.discard(hedge_symbol)
         return symbols
@@ -335,7 +378,9 @@ class CombinedHtxFuturesBot:
                 return ""
         return ""
 
-    def _position_payload_price(self, bot: HtxFuturesBot, symbol: str, payload: dict) -> float:
+    def _position_payload_price(
+        self, bot: HtxFuturesBot, symbol: str, payload: dict
+    ) -> float:
         info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
         for source in (payload, info):
             if not isinstance(source, dict):
@@ -362,7 +407,9 @@ class CombinedHtxFuturesBot:
             pass
         return 0.0
 
-    def _position_payload_available(self, bot: HtxFuturesBot, payload: dict, contracts: float) -> float:
+    def _position_payload_available(
+        self, bot: HtxFuturesBot, payload: dict, contracts: float
+    ) -> float:
         info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
         for source in (payload, info):
             if not isinstance(source, dict):
@@ -378,10 +425,14 @@ class CombinedHtxFuturesBot:
                 "available_volume",
             ):
                 if key in source and source.get(key) is not None:
-                    return max(0.0, min(contracts, self._safe_float(bot, source.get(key), 0.0)))
+                    return max(
+                        0.0, min(contracts, self._safe_float(bot, source.get(key), 0.0))
+                    )
         return max(0.0, contracts)
 
-    def _fetch_btc_hedge_positions(self, bot: HtxFuturesBot, symbols: set) -> Optional[List[dict]]:
+    def _fetch_btc_hedge_positions(
+        self, bot: HtxFuturesBot, symbols: set
+    ) -> Optional[List[dict]]:
         ordered_symbols = sorted(symbols)
         with config.use_profile(bot.profile):
             try:
@@ -389,7 +440,9 @@ class CombinedHtxFuturesBot:
                     "",
                     "btc_hedge_positions_fetch_failed",
                     "BTC hedge positions",
-                    lambda: bot.exchange.fetch_positions(ordered_symbols, bot._position_params()),
+                    lambda: bot.exchange.fetch_positions(
+                        ordered_symbols, bot._position_params()
+                    ),
                 )
                 return bot._expect_ccxt_list_response(
                     positions,
@@ -408,14 +461,18 @@ class CombinedHtxFuturesBot:
                 )
                 return None
 
-    def _fetch_btc_hedge_open_orders(self, bot: HtxFuturesBot, symbol: str) -> Optional[List[dict]]:
+    def _fetch_btc_hedge_open_orders(
+        self, bot: HtxFuturesBot, symbol: str
+    ) -> Optional[List[dict]]:
         with config.use_profile(bot.profile):
             try:
                 orders = bot._private_fetch_with_retry(
                     symbol,
                     "btc_hedge_open_orders_fetch_failed",
                     f"BTC hedge open orders for {symbol}",
-                    lambda: bot.exchange.fetch_open_orders(symbol, params=bot._position_params()),
+                    lambda: bot.exchange.fetch_open_orders(
+                        symbol, params=bot._position_params()
+                    ),
                 )
                 return bot._expect_ccxt_list_response(
                     orders,
@@ -435,7 +492,13 @@ class CombinedHtxFuturesBot:
                 )
                 return None
 
-    def _btc_hedge_exposure(self, bot: HtxFuturesBot, positions: List[dict], hedge_symbol: str, managed_symbols: set) -> dict:
+    def _btc_hedge_exposure(
+        self,
+        bot: HtxFuturesBot,
+        positions: List[dict],
+        hedge_symbol: str,
+        managed_symbols: set,
+    ) -> dict:
         exposure = {
             "long_notional": 0.0,
             "short_notional": 0.0,
@@ -462,7 +525,9 @@ class CombinedHtxFuturesBot:
                 continue
             if symbol == hedge_symbol:
                 exposure[f"hedge_{side}_contracts"] += contracts
-                exposure[f"hedge_{side}_available"] += self._position_payload_available(bot, position, contracts)
+                exposure[f"hedge_{side}_available"] += self._position_payload_available(
+                    bot, position, contracts
+                )
                 exposure["hedge_price"] = price
                 continue
             notional = bot._contracts_to_notional(symbol, contracts, price)
@@ -488,11 +553,20 @@ class CombinedHtxFuturesBot:
                 return price
         return 0.0
 
-    def _btc_hedge_target(self, bot: HtxFuturesBot, symbol: str, net_notional: float) -> Tuple[str, float, float, float]:
+    def _btc_hedge_target(
+        self, bot: HtxFuturesBot, symbol: str, net_notional: float
+    ) -> Tuple[str, float, float, float]:
         settings = self._btc_hedge_settings()
-        ratio = max(0.0, self._safe_float(bot, getattr(settings, "btc_hedge_ratio", 1.0), 1.0))
+        ratio = max(
+            0.0, self._safe_float(bot, getattr(settings, "btc_hedge_ratio", 1.0), 1.0)
+        )
         target_notional = abs(net_notional) * ratio
-        max_notional = max(0.0, self._safe_float(bot, getattr(settings, "btc_hedge_max_notional", 0.0), 0.0))
+        max_notional = max(
+            0.0,
+            self._safe_float(
+                bot, getattr(settings, "btc_hedge_max_notional", 0.0), 0.0
+            ),
+        )
         if max_notional > 0:
             target_notional = min(target_notional, max_notional)
         if target_notional <= 0:
@@ -504,11 +578,20 @@ class CombinedHtxFuturesBot:
         contracts = bot._contracts_for_notional(symbol, target_notional, price)
         if contracts <= 0:
             return "", 0.0, target_notional, price
-        return target_side, contracts, bot._contracts_to_notional(symbol, contracts, price), price
+        return (
+            target_side,
+            contracts,
+            bot._contracts_to_notional(symbol, contracts, price),
+            price,
+        )
 
-    def _btc_hedge_open_market_safe(self, bot: HtxFuturesBot, symbol: str, amount: float, reference_price: float) -> bool:
+    def _btc_hedge_open_market_safe(
+        self, bot: HtxFuturesBot, symbol: str, amount: float, reference_price: float
+    ) -> bool:
         settings = self._btc_hedge_settings()
-        max_spread_bps = self._safe_float(bot, getattr(settings, "btc_hedge_max_spread_bps", 0.0), 0.0)
+        max_spread_bps = self._safe_float(
+            bot, getattr(settings, "btc_hedge_max_spread_bps", 0.0), 0.0
+        )
         if max_spread_bps <= 0:
             return True
         try:
@@ -563,7 +646,9 @@ class CombinedHtxFuturesBot:
 
     def _btc_hedge_order_leverage(self, bot: HtxFuturesBot, symbol: str) -> float:
         with config.use_profile(bot.profile):
-            configured = self._safe_float(bot, getattr(config.RISK, "account_leverage", 0.0), 0.0)
+            configured = self._safe_float(
+                bot, getattr(config.RISK, "account_leverage", 0.0), 0.0
+            )
             if configured > 0:
                 return configured
 
@@ -573,7 +658,11 @@ class CombinedHtxFuturesBot:
             if cached and cached > 0:
                 return cached
 
-            method = getattr(bot.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo", None)
+            method = getattr(
+                bot.exchange,
+                "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo",
+                None,
+            )
             if not method:
                 self._log_btc_hedge(
                     "ERROR",
@@ -645,7 +734,9 @@ class CombinedHtxFuturesBot:
                     throttle_sec=60.0,
                 )
                 return False
-            if not reduce_only and not self._btc_hedge_open_market_safe(bot, symbol, amount, reference_price):
+            if not reduce_only and not self._btc_hedge_open_market_safe(
+                bot, symbol, amount, reference_price
+            ):
                 return False
             leverage = self._btc_hedge_order_leverage(bot, symbol)
             if leverage <= 0:
@@ -671,7 +762,9 @@ class CombinedHtxFuturesBot:
                     side=side,
                     amount=amount,
                     price=reference_price,
-                    notional=bot._contracts_to_notional(symbol, amount, reference_price),
+                    notional=bot._contracts_to_notional(
+                        symbol, amount, reference_price
+                    ),
                     exception=exc,
                     throttle_sec=60.0,
                 )
@@ -714,8 +807,17 @@ class CombinedHtxFuturesBot:
             )
             return
         settings = self._btc_hedge_settings()
-        cooldown = self._safe_float(bot, getattr(settings, "btc_hedge_cooldown_sec", 0.0), 0.0)
-        if cooldown > 0 and time.time() - self._safe_float(bot, getattr(self, "_last_btc_hedge_action_at", 0.0), 0.0) < cooldown:
+        cooldown = self._safe_float(
+            bot, getattr(settings, "btc_hedge_cooldown_sec", 0.0), 0.0
+        )
+        if (
+            cooldown > 0
+            and time.time()
+            - self._safe_float(
+                bot, getattr(self, "_last_btc_hedge_action_at", 0.0), 0.0
+            )
+            < cooldown
+        ):
             return
 
         hedge_symbol = self._btc_hedge_symbol(bot)
@@ -730,16 +832,26 @@ class CombinedHtxFuturesBot:
         managed_symbols = self._btc_hedge_managed_symbols(hedge_symbol)
         if not managed_symbols:
             managed_symbols = set()
-        positions = self._fetch_btc_hedge_positions(bot, managed_symbols | {hedge_symbol})
+        positions = self._fetch_btc_hedge_positions(
+            bot, managed_symbols | {hedge_symbol}
+        )
         if positions is None:
             return
 
-        exposure = self._btc_hedge_exposure(bot, positions, hedge_symbol, managed_symbols)
+        exposure = self._btc_hedge_exposure(
+            bot, positions, hedge_symbol, managed_symbols
+        )
         net_notional = exposure["long_notional"] - exposure["short_notional"]
-        target_side, target_contracts, target_notional, reference_price = self._btc_hedge_target(bot, hedge_symbol, net_notional)
+        target_side, target_contracts, target_notional, reference_price = (
+            self._btc_hedge_target(bot, hedge_symbol, net_notional)
+        )
         current_long = exposure["hedge_long_contracts"]
         current_short = exposure["hedge_short_contracts"]
-        hedge_price = reference_price or exposure["hedge_price"] or self._btc_hedge_reference_price(bot, hedge_symbol)
+        hedge_price = (
+            reference_price
+            or exposure["hedge_price"]
+            or self._btc_hedge_reference_price(bot, hedge_symbol)
+        )
         epsilon = 1e-12
         if current_long > epsilon and current_short > epsilon:
             self._log_btc_hedge(
@@ -752,8 +864,20 @@ class CombinedHtxFuturesBot:
             )
             return
 
-        current_side = "long" if current_long > epsilon else "short" if current_short > epsilon else ""
-        current_contracts = current_long if current_side == "long" else current_short if current_side == "short" else 0.0
+        current_side = (
+            "long"
+            if current_long > epsilon
+            else "short"
+            if current_short > epsilon
+            else ""
+        )
+        current_contracts = (
+            current_long
+            if current_side == "long"
+            else current_short
+            if current_side == "short"
+            else 0.0
+        )
         current_available = (
             exposure["hedge_long_available"]
             if current_side == "long"
@@ -761,10 +885,22 @@ class CombinedHtxFuturesBot:
             if current_side == "short"
             else 0.0
         )
-        current_notional = bot._contracts_to_notional(hedge_symbol, current_contracts, hedge_price) if hedge_price > 0 else 0.0
-        min_contract_notional = bot._contracts_to_notional(hedge_symbol, bot._get_min_contracts(hedge_symbol), hedge_price) if hedge_price > 0 else 0.0
+        current_notional = (
+            bot._contracts_to_notional(hedge_symbol, current_contracts, hedge_price)
+            if hedge_price > 0
+            else 0.0
+        )
+        min_contract_notional = (
+            bot._contracts_to_notional(
+                hedge_symbol, bot._get_min_contracts(hedge_symbol), hedge_price
+            )
+            if hedge_price > 0
+            else 0.0
+        )
         min_rebalance = max(
-            self._safe_float(bot, getattr(settings, "btc_hedge_min_rebalance_notional", 0.0), 0.0),
+            self._safe_float(
+                bot, getattr(settings, "btc_hedge_min_rebalance_notional", 0.0), 0.0
+            ),
             min_contract_notional,
         )
 
@@ -794,7 +930,10 @@ class CombinedHtxFuturesBot:
 
         if not target_side and current_contracts <= epsilon:
             return
-        if target_side == current_side and abs(target_notional - current_notional) < min_rebalance:
+        if (
+            target_side == current_side
+            and abs(target_notional - current_notional) < min_rebalance
+        ):
             return
         if current_side == "" and target_notional < min_rebalance:
             return
@@ -803,8 +942,10 @@ class CombinedHtxFuturesBot:
         if open_orders is None:
             return
         active_orders = [
-            order for order in open_orders
-            if self._order_remaining_amount(bot, order) > max(bot._get_min_contracts(hedge_symbol) * 1e-9, epsilon)
+            order
+            for order in open_orders
+            if self._order_remaining_amount(bot, order)
+            > max(bot._get_min_contracts(hedge_symbol) * 1e-9, epsilon)
         ]
         if active_orders:
             self._log_btc_hedge(
@@ -812,7 +953,9 @@ class CombinedHtxFuturesBot:
                 f"BTC hedge skipped for {hedge_symbol}: open BTC orders are present",
                 reason="open_hedge_orders_present",
                 symbol=hedge_symbol,
-                amount=sum(self._order_remaining_amount(bot, order) for order in active_orders),
+                amount=sum(
+                    self._order_remaining_amount(bot, order) for order in active_orders
+                ),
                 throttle_sec=60.0,
             )
             return
@@ -851,7 +994,10 @@ class CombinedHtxFuturesBot:
 
         if current_side == target_side:
             delta = target_contracts - current_contracts
-            if bot._contracts_to_notional(hedge_symbol, abs(delta), hedge_price) < min_rebalance:
+            if (
+                bot._contracts_to_notional(hedge_symbol, abs(delta), hedge_price)
+                < min_rebalance
+            ):
                 return
             if delta > 0:
                 side = "buy" if target_side == "long" else "sell"
@@ -897,7 +1043,9 @@ class CombinedHtxFuturesBot:
         )
 
     def poll_interval(self) -> int:
-        intervals = [max(1, int(bot.profile.runtime.poll_interval_sec)) for bot in self.bots]
+        intervals = [
+            max(1, int(bot.profile.runtime.poll_interval_sec)) for bot in self.bots
+        ]
         return min(intervals) if intervals else 3
 
     def run(self):
