@@ -23,9 +23,23 @@ from htxbot.combined import CombinedHtxFuturesBot
 from htxbot.exchange import UnexpectedExchangeResponse
 from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
-from htxbot.indicators import average_true_range, calculate_rsi, compute_log_return, realized_volatility
-from htxbot.models import OrderRequest, PositionLifecycle, SellLadderParams, SignalContext
-from htxbot.shared_exchange import CachedMarketDataExchange, MultiAccountExchange, ThreadSafeExchange
+from htxbot.indicators import (
+    average_true_range,
+    calculate_rsi,
+    compute_log_return,
+    realized_volatility,
+)
+from htxbot.models import (
+    OrderRequest,
+    PositionLifecycle,
+    SellLadderParams,
+    SignalContext,
+)
+from htxbot.shared_exchange import (
+    CachedMarketDataExchange,
+    MultiAccountExchange,
+    ThreadSafeExchange,
+)
 from tests.config_overrides import override_config
 
 
@@ -65,7 +79,9 @@ XAUT_MARKET = {
 }
 
 
-def ohlcv_series(closes, timeframe_sec=60, start_ts=1_700_000_000_000, volumes=None, range_width=0.0):
+def ohlcv_series(
+    closes, timeframe_sec=60, start_ts=1_700_000_000_000, volumes=None, range_width=0.0
+):
     volumes = list(volumes) if volumes is not None else None
     return [
         [
@@ -106,7 +122,9 @@ class PerSymbolExternalPriceFeed:
         context.setdefault("stale", False)
         context.setdefault("reason", "ok")
         context["symbol"] = symbol
-        context.setdefault("mexc_symbol", symbol.split("/", 1)[0].replace(":", "") + "USDT")
+        context.setdefault(
+            "mexc_symbol", symbol.split("/", 1)[0].replace(":", "") + "USDT"
+        )
         context.setdefault("ts", time.time())
         return context
 
@@ -126,7 +144,11 @@ class FakeMexcClient:
 class FakeExchange:
     def __init__(self, name="primary"):
         self.name = name
-        self.markets = {SYMBOL: MARKET, SECOND_SYMBOL: SECOND_MARKET, BTC_SYMBOL: BTC_MARKET}
+        self.markets = {
+            SYMBOL: MARKET,
+            SECOND_SYMBOL: SECOND_MARKET,
+            BTC_SYMBOL: BTC_MARKET,
+        }
         self.urls = {"hostnames": {}}
         self.has = {
             "fetchFundingRate": False,
@@ -253,14 +275,18 @@ class FakeExchange:
     def fetch_open_orders(self, symbol=None, params=None):
         self.fetch_open_orders_calls += 1
         if params is not None and self.fetch_open_orders_type_error_on_params:
-            raise TypeError("fetch_open_orders() got an unexpected keyword argument 'params'")
+            raise TypeError(
+                "fetch_open_orders() got an unexpected keyword argument 'params'"
+            )
         if self.fetch_open_orders_failures:
             raise self.fetch_open_orders_failures.pop(0)
         if self.fetch_open_orders_response_override is not None:
             return self.fetch_open_orders_response_override
         if symbol is None:
             return list(self.open_orders)
-        return [order for order in self.open_orders if order.get("symbol", SYMBOL) == symbol]
+        return [
+            order for order in self.open_orders if order.get("symbol", SYMBOL) == symbol
+        ]
 
     def fetch_positions(self, symbols=None, params=None):
         self.fetch_positions_calls += 1
@@ -273,7 +299,11 @@ class FakeExchange:
         wanted = set(symbols or [])
         if not wanted:
             return list(self.positions)
-        return [position for position in self.positions if position.get("symbol", SYMBOL) in wanted]
+        return [
+            position
+            for position in self.positions
+            if position.get("symbol", SYMBOL) in wanted
+        ]
 
     def fetch_order(self, order_id, symbol=None, params=None):
         self.fetch_order_calls.append((str(order_id), symbol, params or {}))
@@ -313,7 +343,7 @@ class FakeExchange:
             return self.fetch_ohlcv_response_override
         rows = list(self.ohlcv.get((symbol, timeframe), []))
         if limit:
-            return rows[-int(limit):]
+            return rows[-int(limit) :]
         return rows
 
     def create_order(self, symbol, type, side, amount, price, params=None):
@@ -457,7 +487,9 @@ class UnifiedBotTests(unittest.TestCase):
                 bot = HtxFuturesBot(
                     profile="long",
                     exchange=raw_exchange,
-                    external_price_feed=StaticExternalPriceFeed(self.external_context()),
+                    external_price_feed=StaticExternalPriceFeed(
+                        self.external_context()
+                    ),
                 )
 
             self.assertIs(bot.exchange.unsafe_exchange(), raw_exchange)
@@ -476,7 +508,9 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(compute_log_return(100.0, 100.0), 0.0)
 
         # Normal positive prices
-        self.assertAlmostEqual(compute_log_return(110.5, 100.0), math.log(110.5 / 100.0))
+        self.assertAlmostEqual(
+            compute_log_return(110.5, 100.0), math.log(110.5 / 100.0)
+        )
         self.assertAlmostEqual(compute_log_return(90.5, 100.0), math.log(90.5 / 100.0))
 
     def test_runtime_diagnostics_artifacts_are_not_git_tracked(self):
@@ -584,7 +618,9 @@ class UnifiedBotTests(unittest.TestCase):
         return instance
 
     @contextmanager
-    def guard_path_against_unbounded_reads(self, target_path: Path, max_read_size: int = 1024 * 1024):
+    def guard_path_against_unbounded_reads(
+        self, target_path: Path, max_read_size: int = 1024 * 1024
+    ):
         target_path = target_path.resolve()
         real_open = Path.open
         read_sizes = []
@@ -755,7 +791,9 @@ class UnifiedBotTests(unittest.TestCase):
             bot.csv_path = Path(raw_tmp) / "csv_path_is_directory"
             bot.csv_path.mkdir()
 
-            bot._log_event("INFO", "test message", event="test_event", symbol=SYMBOL, reason="test")
+            bot._log_event(
+                "INFO", "test message", event="test_event", symbol=SYMBOL, reason="test"
+            )
 
             self.assertTrue(getattr(bot, "_csv_log_failed_once", False))
 
@@ -779,10 +817,16 @@ class UnifiedBotTests(unittest.TestCase):
     def test_signal_analytics_monitoring_failures_do_not_raise_step_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
-            bot.signal_analytics_csv_path = Path(raw_tmp) / "signal_analytics_csv_locked"
+            bot.signal_analytics_csv_path = (
+                Path(raw_tmp) / "signal_analytics_csv_locked"
+            )
             bot.signal_analytics_csv_path.mkdir()
 
-            with patch.object(bot, "_rotate_jsonl_if_needed", side_effect=PermissionError("jsonl locked")):
+            with patch.object(
+                bot,
+                "_rotate_jsonl_if_needed",
+                side_effect=PermissionError("jsonl locked"),
+            ):
                 bot._record_signal_analytics(
                     "signal_built",
                     symbol=SYMBOL,
@@ -795,7 +839,9 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_trade_csv_concurrent_writes_rotate_without_lost_rows(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            monitoring = replace(config.MONITORING, csv_rotate_max_bytes=450, csv_archive_dir="archive")
+            monitoring = replace(
+                config.MONITORING, csv_rotate_max_bytes=450, csv_archive_dir="archive"
+            )
             with override_config(MONITORING=monitoring):
                 tmp_path = Path(raw_tmp)
                 bot = self.make_bot(tmp_path)
@@ -820,12 +866,16 @@ class UnifiedBotTests(unittest.TestCase):
                         continue
                     with csv_path.open(newline="", encoding="utf-8") as handle:
                         rows.extend(
-                            row for row in csv.DictReader(handle)
+                            row
+                            for row in csv.DictReader(handle)
                             if row.get("event") == "concurrent_csv_event"
                         )
 
                 self.assertEqual(len(rows), 40)
-                self.assertEqual({row["reason"] for row in rows}, {f"row_{index}" for index in range(40)})
+                self.assertEqual(
+                    {row["reason"] for row in rows},
+                    {f"row_{index}" for index in range(40)},
+                )
 
     def test_live_state_save_is_atomic_and_loadable(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -857,13 +907,18 @@ class UnifiedBotTests(unittest.TestCase):
                     raise PermissionError("temporary lock")
                 return real_replace(src, dst)
 
-            with patch("htxbot.state.os.replace", side_effect=flaky_replace), patch("htxbot.fileio.time.sleep") as sleep_mock:
+            with (
+                patch("htxbot.state.os.replace", side_effect=flaky_replace),
+                patch("htxbot.fileio.time.sleep") as sleep_mock,
+            ):
                 bot._save_state()
 
             payload = json.loads(bot.state_path.read_text(encoding="utf-8"))
             self.assertEqual(payload[SYMBOL]["position_size"], 2.0)
             self.assertEqual(calls["count"], 3)
-            self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [0.1, 0.2])
+            self.assertEqual(
+                [call.args[0] for call in sleep_mock.call_args_list], [0.1, 0.2]
+            )
             self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
 
     def test_state_save_retries_windows_file_lock_oserror(self):
@@ -883,13 +938,18 @@ class UnifiedBotTests(unittest.TestCase):
                     raise exc
                 return real_replace(src, dst)
 
-            with patch("htxbot.state.os.replace", side_effect=flaky_replace), patch("htxbot.fileio.time.sleep") as sleep_mock:
+            with (
+                patch("htxbot.state.os.replace", side_effect=flaky_replace),
+                patch("htxbot.fileio.time.sleep") as sleep_mock,
+            ):
                 bot._save_state()
 
             payload = json.loads(bot.state_path.read_text(encoding="utf-8"))
             self.assertEqual(payload[SYMBOL]["position_size"], 3.0)
             self.assertEqual(calls["count"], 2)
-            self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [0.1])
+            self.assertEqual(
+                [call.args[0] for call in sleep_mock.call_args_list], [0.1]
+            )
             self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
 
     def test_state_save_retries_transient_write_permission_error(self):
@@ -908,13 +968,22 @@ class UnifiedBotTests(unittest.TestCase):
                         raise PermissionError("temporary write lock")
                 return real_write_text(path_self, data, *args, **kwargs)
 
-            with patch("pathlib.Path.write_text", autospec=True, side_effect=flaky_write_text), patch("htxbot.fileio.time.sleep") as sleep_mock:
+            with (
+                patch(
+                    "pathlib.Path.write_text",
+                    autospec=True,
+                    side_effect=flaky_write_text,
+                ),
+                patch("htxbot.fileio.time.sleep") as sleep_mock,
+            ):
                 bot._save_state()
 
             payload = json.loads(bot.state_path.read_text(encoding="utf-8"))
             self.assertEqual(payload[SYMBOL]["position_size"], 4.0)
             self.assertEqual(calls["count"], 3)
-            self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [0.1, 0.2])
+            self.assertEqual(
+                [call.args[0] for call in sleep_mock.call_args_list], [0.1, 0.2]
+            )
             self.assertEqual(list(bot.state_path.parent.glob("*.tmp")), [])
 
     def test_monitoring_replace_retries_windows_file_lock_oserror(self):
@@ -956,14 +1025,22 @@ class UnifiedBotTests(unittest.TestCase):
             )
             canceled = bot._cancel_order_ref(
                 SYMBOL,
-                {"id": order["id"], "side": config.ENTRY_SIDE, "price": 10.0, "amount": 1.0},
+                {
+                    "id": order["id"],
+                    "side": config.ENTRY_SIDE,
+                    "price": 10.0,
+                    "amount": 1.0,
+                },
                 event="entry_order_canceled",
                 reason="test_cancel",
             )
 
             self.assertEqual(bot.exchange.create_order_calls, 1)
             self.assertTrue(canceled)
-            self.assertEqual(bot.exchange.canceled_orders, [(order["id"], SYMBOL, {"marginMode": config.RISK.margin_mode})])
+            self.assertEqual(
+                bot.exchange.canceled_orders,
+                [(order["id"], SYMBOL, {"marginMode": config.RISK.margin_mode})],
+            )
 
     def test_unknown_short_entry_cancel_logs_entry_event(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
@@ -979,7 +1056,10 @@ class UnifiedBotTests(unittest.TestCase):
             valid = bot._validate_entry_orders(SYMBOL, [unknown_entry])
 
             self.assertFalse(valid)
-            self.assertIn(("manual_short_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+            self.assertIn(
+                ("manual_short_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                bot.exchange.canceled_orders,
+            )
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertTrue(
@@ -992,7 +1072,11 @@ class UnifiedBotTests(unittest.TestCase):
                 )
             )
             self.assertFalse(
-                any(row["event"] == "sell_order_canceled" and row["order_id"] == "manual_short_entry" for row in rows)
+                any(
+                    row["event"] == "sell_order_canceled"
+                    and row["order_id"] == "manual_short_entry"
+                    for row in rows
+                )
             )
 
     def test_one_way_order_accepts_order_request_with_extra_params(self):
@@ -1022,7 +1106,9 @@ class UnifiedBotTests(unittest.TestCase):
 
             bot._acquire_runtime_lock()
 
-            self.assertEqual(bot.lock_path.read_text(encoding="utf-8"), str(os.getpid()))
+            self.assertEqual(
+                bot.lock_path.read_text(encoding="utf-8"), str(os.getpid())
+            )
             bot._release_runtime_lock()
             self.assertFalse(bot.lock_path.exists())
 
@@ -1034,12 +1120,16 @@ class UnifiedBotTests(unittest.TestCase):
 
             bot.lock_path.write_text("999999", encoding="utf-8")
 
-            with self.assertRaisesRegex(RuntimeError, "stopping to prevent duplicate bot instances"):
+            with self.assertRaisesRegex(
+                RuntimeError, "stopping to prevent duplicate bot instances"
+            ):
                 bot._assert_runtime_lock_owned()
             bot._release_runtime_lock()
             self.assertTrue(bot.lock_path.exists())
 
-    def test_windows_live_pid_is_not_treated_as_stale_when_command_line_is_unavailable(self):
+    def test_windows_live_pid_is_not_treated_as_stale_when_command_line_is_unavailable(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp:
             bot = self.make_bot(Path(raw_tmp))
             with (
@@ -1145,15 +1235,24 @@ class UnifiedBotTests(unittest.TestCase):
         )
         for profile_name, payload, expected_net in scenarios:
             with self.subTest(profile=profile_name):
-                with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile(profile_name):
+                with (
+                    tempfile.TemporaryDirectory() as raw_tmp,
+                    config.use_profile(profile_name),
+                ):
                     bot = self.make_bot(Path(raw_tmp))
                     bot.state_path.write_text(
                         json.dumps(
                             {
                                 SYMBOL: {
                                     "symbol": SYMBOL,
-                                    "position_size": payload.get("total_bought_base", payload.get("total_sold_base")),
-                                    "position_available": payload.get("total_bought_base", payload.get("total_sold_base")),
+                                    "position_size": payload.get(
+                                        "total_bought_base",
+                                        payload.get("total_sold_base"),
+                                    ),
+                                    "position_available": payload.get(
+                                        "total_bought_base",
+                                        payload.get("total_sold_base"),
+                                    ),
                                     "entry_price": 11.0,
                                     **payload,
                                 }
@@ -1226,7 +1325,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(reloaded.hard_stop_order["trigger_price"], 10.8)
             self.assertEqual(reloaded.hard_stop_order["loss_rate"], 0.02)
             bot._save_state()
-            saved_payload = json.loads(bot.state_path.read_text(encoding="utf-8"))[SYMBOL]
+            saved_payload = json.loads(bot.state_path.read_text(encoding="utf-8"))[
+                SYMBOL
+            ]
             self.assertNotIn("retired_strategy_counter", saved_payload)
             self.assertNotIn("last_retired_strategy_at", saved_payload)
 
@@ -1244,8 +1345,13 @@ class UnifiedBotTests(unittest.TestCase):
                 reloaded = bot._load_state()[SYMBOL]
 
                 self.assertAlmostEqual(reloaded.pending_exit_ladder_since, 1234.5)
-                self.assertEqual(reloaded.pending_exit_ladder_reason, "no_closeable_position_available")
-                self.assertEqual(reloaded.lifecycle, PositionLifecycle.PENDING_CLOSEABLE.value)
+                self.assertEqual(
+                    reloaded.pending_exit_ladder_reason,
+                    "no_closeable_position_available",
+                )
+                self.assertEqual(
+                    reloaded.lifecycle, PositionLifecycle.PENDING_CLOSEABLE.value
+                )
 
     def test_trade_state_serialization_keeps_pending_close_order_metadata(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -1273,10 +1379,16 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(reloaded.pending_close_order["id"], "12345")
             self.assertEqual(reloaded.pending_close_order["amount"], 2.0)
             self.assertEqual(reloaded.pending_close_reason, "dust_position_close")
-            self.assertAlmostEqual(reloaded.soft_defensive_last_signal_timestamp, 1700000010.0)
+            self.assertAlmostEqual(
+                reloaded.soft_defensive_last_signal_timestamp, 1700000010.0
+            )
             self.assertEqual(reloaded.soft_defensive_consecutive_signals, 2)
-            self.assertAlmostEqual(reloaded.soft_defensive_exit_activated_at, 1700000020.0)
-            self.assertAlmostEqual(reloaded.soft_defensive_exit_last_rebuild_at, 1700000030.0)
+            self.assertAlmostEqual(
+                reloaded.soft_defensive_exit_activated_at, 1700000020.0
+            )
+            self.assertAlmostEqual(
+                reloaded.soft_defensive_exit_last_rebuild_at, 1700000030.0
+            )
             self.assertAlmostEqual(reloaded.soft_defensive_exit_fraction, 0.33)
             self.assertEqual(reloaded.lifecycle, PositionLifecycle.EXITING.value)
 
@@ -1286,7 +1398,9 @@ class UnifiedBotTests(unittest.TestCase):
             state = bot._get_state(SYMBOL)
             self.assertEqual(state.lifecycle, PositionLifecycle.FLAT.value)
 
-            state.entry_orders = [{"id": "entry", "side": config.ENTRY_SIDE, "amount": 1.0}]
+            state.entry_orders = [
+                {"id": "entry", "side": config.ENTRY_SIDE, "amount": 1.0}
+            ]
             bot._refresh_active_side(state)
             self.assertEqual(state.lifecycle, PositionLifecycle.ENTERING.value)
 
@@ -1301,7 +1415,9 @@ class UnifiedBotTests(unittest.TestCase):
             bot._refresh_active_side(state)
             self.assertEqual(state.lifecycle, PositionLifecycle.BREAKEVEN.value)
 
-            state.sell_ladder_signature = bot._pending_exit_ladder_signature("breakeven", SYMBOL, state)
+            state.sell_ladder_signature = bot._pending_exit_ladder_signature(
+                "breakeven", SYMBOL, state
+            )
             state.pending_exit_ladder_since = time.time()
             bot._refresh_active_side(state)
             self.assertEqual(state.lifecycle, PositionLifecycle.PENDING_CLOSEABLE.value)
@@ -1344,7 +1460,9 @@ class UnifiedBotTests(unittest.TestCase):
                 context={"token": "hidden", "note": "kept"},
             )
 
-            with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+            with bot.signal_analytics_csv_path.open(
+                newline="", encoding="utf-8"
+            ) as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[-1]["decision"], "signal_built")
             self.assertEqual(rows[-1]["symbol"], SYMBOL)
@@ -1362,13 +1480,19 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(rows[-1]["volume_profile_valid"], "1")
             self.assertEqual(rows[-1]["volume_profile_break"], "0")
             self.assertEqual(rows[-1]["volume_profile_poc"], "100.500000000000")
-            self.assertEqual(rows[-1]["volume_profile_value_area_low"], "99.500000000000")
-            self.assertEqual(rows[-1]["volume_profile_value_area_high"], "102.500000000000")
+            self.assertEqual(
+                rows[-1]["volume_profile_value_area_low"], "99.500000000000"
+            )
+            self.assertEqual(
+                rows[-1]["volume_profile_value_area_high"], "102.500000000000"
+            )
             self.assertEqual(rows[-1]["volume_reason"], "volume_spike_confirmed")
 
             payloads = [
                 json.loads(line)
-                for line in bot.signal_analytics_jsonl_path.read_text(encoding="utf-8").splitlines()
+                for line in bot.signal_analytics_jsonl_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
                 if line.strip()
             ]
             self.assertEqual(payloads[-1]["signal"]["api_secret"], "<redacted>")
@@ -1404,10 +1528,14 @@ class UnifiedBotTests(unittest.TestCase):
 
             payloads = [
                 json.loads(line)
-                for line in bot.diagnostics_jsonl_path.read_text(encoding="utf-8").splitlines()
+                for line in bot.diagnostics_jsonl_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
                 if line.strip()
             ]
-            self.assertEqual(payloads[-1]["exception"]["exception_type"], "RuntimeError")
+            self.assertEqual(
+                payloads[-1]["exception"]["exception_type"], "RuntimeError"
+            )
 
     def test_signed_htx_urls_are_redacted_in_trade_csv_and_diagnostics(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -1448,10 +1576,14 @@ class UnifiedBotTests(unittest.TestCase):
 
             payloads = [
                 json.loads(line)
-                for line in bot.diagnostics_jsonl_path.read_text(encoding="utf-8").splitlines()
+                for line in bot.diagnostics_jsonl_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
                 if line.strip()
             ]
-            self.assertEqual(payloads[-1]["exception"]["exception_type"], "RuntimeError")
+            self.assertEqual(
+                payloads[-1]["exception"]["exception_type"], "RuntimeError"
+            )
             self.assertEqual(payloads[-1]["exception"]["error_code"], "1492")
             self.assertNotIn("SIG_SECRET", payloads[-1]["exception"]["message"])
 
@@ -1489,20 +1621,23 @@ class UnifiedBotTests(unittest.TestCase):
                     )
                 )
 
-                combined_text = (
-                    bot.csv_path.read_text(encoding="utf-8")
-                    + bot.diagnostics_jsonl_path.read_text(encoding="utf-8")
-                )
+                combined_text = bot.csv_path.read_text(
+                    encoding="utf-8"
+                ) + bot.diagnostics_jsonl_path.read_text(encoding="utf-8")
                 self.assertNotIn("AKIA_TEST", combined_text)
                 self.assertNotIn("SIG_SECRET", combined_text)
                 self.assertIn("<redacted>", combined_text)
 
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = [
-                        row for row in csv.DictReader(handle)
+                        row
+                        for row in csv.DictReader(handle)
                         if row["event"] == "reduce_only_violation_prevented"
                     ]
-                self.assertEqual(rows[-1]["reason"], "closeable_amount_reserved_by_existing_exit_orders")
+                self.assertEqual(
+                    rows[-1]["reason"],
+                    "closeable_amount_reserved_by_existing_exit_orders",
+                )
                 self.assertEqual(rows[-1]["exception_type"], "RuntimeError")
                 self.assertEqual(rows[-1]["error_code"], "1492")
 
@@ -1510,11 +1645,19 @@ class UnifiedBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
             legacy_header = [
-                name for name in bot.CSV_HEADER
+                name
+                for name in bot.CSV_HEADER
                 if name not in {"message", "exception_type", "error_code", "retryable"}
             ]
             row = {name: "" for name in legacy_header}
-            row.update({"ts": "1000", "level": "ERROR", "event": "state_exchange_mismatch", "reason": "legacy"})
+            row.update(
+                {
+                    "ts": "1000",
+                    "level": "ERROR",
+                    "event": "state_exchange_mismatch",
+                    "reason": "legacy",
+                }
+            )
             with bot.csv_path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(legacy_header)
@@ -1538,7 +1681,15 @@ class UnifiedBotTests(unittest.TestCase):
                 for name in bot.CSV_HEADER
             ]
             row = {name: "" for name in legacy_header}
-            row.update({"ts": "1000", "level": "INFO", "event": "ema_signal_valid", "ema30": "50.1", "ema60": "100.1"})
+            row.update(
+                {
+                    "ts": "1000",
+                    "level": "INFO",
+                    "event": "ema_signal_valid",
+                    "ema30": "50.1",
+                    "ema60": "100.1",
+                }
+            )
             with bot.csv_path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(legacy_header)
@@ -1553,7 +1704,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertNotIn("ema30", rows[-1])
             self.assertNotIn("ema60", rows[-1])
 
-    def test_trade_csv_header_migration_streams_legacy_ema_columns_without_unbounded_reads(self):
+    def test_trade_csv_header_migration_streams_legacy_ema_columns_without_unbounded_reads(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
             legacy_header = [
@@ -1609,11 +1762,24 @@ class UnifiedBotTests(unittest.TestCase):
                         writer = csv.writer(handle)
                         writer.writerow(legacy_header)
                         for index in range(250):
-                            writer.writerow([f"{name.lstrip(chr(0xfeff))}_{index}" for name in legacy_header])
+                            writer.writerow(
+                                [
+                                    f"{name.lstrip(chr(0xFEFF))}_{index}"
+                                    for name in legacy_header
+                                ]
+                            )
 
-                    with patch("pathlib.Path.read_text", side_effect=AssertionError("read_text should not be used")):
-                        with patch("pathlib.Path.read_bytes", side_effect=AssertionError("read_bytes should not be used")):
-                            with self.guard_path_against_unbounded_reads(path) as read_sizes:
+                    with patch(
+                        "pathlib.Path.read_text",
+                        side_effect=AssertionError("read_text should not be used"),
+                    ):
+                        with patch(
+                            "pathlib.Path.read_bytes",
+                            side_effect=AssertionError("read_bytes should not be used"),
+                        ):
+                            with self.guard_path_against_unbounded_reads(
+                                path
+                            ) as read_sizes:
                                 bot._ensure_headered_csv_file(path, header)
 
                     self.assertTrue(read_sizes)
@@ -1637,13 +1803,19 @@ class UnifiedBotTests(unittest.TestCase):
 
         # Test base derived from market empty cases
         self.assertEqual(feed.htx_symbol_to_mexc("BTC/USDT", market={}), "BTCUSDT")
-        self.assertEqual(feed.htx_symbol_to_mexc("BTC/USDT", market={"base": ""}), "BTCUSDT")
-        self.assertEqual(feed.htx_symbol_to_mexc("BTC/USDT", market={"base": None}), "BTCUSDT")
+        self.assertEqual(
+            feed.htx_symbol_to_mexc("BTC/USDT", market={"base": ""}), "BTCUSDT"
+        )
+        self.assertEqual(
+            feed.htx_symbol_to_mexc("BTC/USDT", market={"base": None}), "BTCUSDT"
+        )
 
         # Test non-alphanumeric inputs
         self.assertEqual(feed.htx_symbol_to_mexc("!@#$"), "")
         self.assertEqual(feed.htx_symbol_to_mexc("!@#$/USDT"), "")
-        self.assertEqual(feed.htx_symbol_to_mexc("!@#$/USDT", market={"base": "!@#$"}), "")
+        self.assertEqual(
+            feed.htx_symbol_to_mexc("!@#$/USDT", market={"base": "!@#$"}), ""
+        )
 
     def test_external_price_csv_records_mexc_quantities_and_notional(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -1658,7 +1830,9 @@ class UnifiedBotTests(unittest.TestCase):
                 )
             )
 
-            with bot.external_price_csv_path.open(newline="", encoding="utf-8") as handle:
+            with bot.external_price_csv_path.open(
+                newline="", encoding="utf-8"
+            ) as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[-1]["mexc_bid_qty"], "7.00000000")
             self.assertEqual(rows[-1]["mexc_ask_qty"], "8.00000000")
@@ -1671,8 +1845,15 @@ class UnifiedBotTests(unittest.TestCase):
             bot = self.make_bot(tmp_path)
             path = tmp_path / "legacy_external_price.csv"
             old_header = [
-                name for name in bot.EXTERNAL_PRICE_CSV_HEADER
-                if name not in {"mexc_bid_qty", "mexc_ask_qty", "mexc_bid_notional", "mexc_ask_notional"}
+                name
+                for name in bot.EXTERNAL_PRICE_CSV_HEADER
+                if name
+                not in {
+                    "mexc_bid_qty",
+                    "mexc_ask_qty",
+                    "mexc_bid_notional",
+                    "mexc_ask_notional",
+                }
             ]
             row = {name: "" for name in old_header}
             row.update({"ts": "2000", "spread_bps": "12.34000000", "reason": "ok"})
@@ -1698,7 +1879,10 @@ class UnifiedBotTests(unittest.TestCase):
             path = tmp_path / "missing_header.csv"
             path.write_text("legacy,row\n" + ("1,2\n" * 1000), encoding="utf-8")
 
-            with patch("pathlib.Path.read_text", side_effect=AssertionError("read_text should not be used")):
+            with patch(
+                "pathlib.Path.read_text",
+                side_effect=AssertionError("read_text should not be used"),
+            ):
                 with self.guard_path_against_unbounded_reads(path) as read_sizes:
                     bot._ensure_headered_csv_file(path, bot.CSV_HEADER)
 
@@ -1720,11 +1904,13 @@ class UnifiedBotTests(unittest.TestCase):
             min_valid_bid_qty_usdt=1.0,
             min_valid_ask_qty_usdt=1.0,
         )
-        client = FakeMexcClient([
-            BookTicker(99.9, 100.1, 10.0, 10.0, ts=1000.0),
-            BookTicker(100.9, 101.1, 10.0, 10.0, ts=1030.0),
-            BookTicker(101.9, 102.1, 10.0, 10.0, ts=1060.0),
-        ])
+        client = FakeMexcClient(
+            [
+                BookTicker(99.9, 100.1, 10.0, 10.0, ts=1000.0),
+                BookTicker(100.9, 101.1, 10.0, 10.0, ts=1030.0),
+                BookTicker(101.9, 102.1, 10.0, 10.0, ts=1060.0),
+            ]
+        )
         feed = ExternalPriceFeed(settings, mexc_client=client, clock=lambda: now[0])
 
         first = feed.get_context(SYMBOL, {"bid": 100.9, "ask": 101.1}, market=MARKET)
@@ -1761,7 +1947,9 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_external_price_stale_context_is_invalid(self):
         now = [2000.0]
-        settings = replace(config.EXTERNAL_PRICE_FEED, stale_after_ms=3000, max_price_age_ms=3000)
+        settings = replace(
+            config.EXTERNAL_PRICE_FEED, stale_after_ms=3000, max_price_age_ms=3000
+        )
         client = FakeMexcClient([BookTicker(99.9, 100.1, 10.0, 10.0, ts=1990.0)])
         feed = ExternalPriceFeed(settings, mexc_client=client, clock=lambda: now[0])
 
@@ -1807,10 +1995,14 @@ class UnifiedBotTests(unittest.TestCase):
             runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
-                bot.external_price_feed = StaticExternalPriceFeed(self.external_context(spread_bps=25.0))
+                bot.external_price_feed = StaticExternalPriceFeed(
+                    self.external_context(spread_bps=25.0)
+                )
                 bot.signal_cache["symbols"] = {SYMBOL: self.entry_signal()}
 
-                bot._maybe_place_initial_buy(SYMBOL, bot.signal_cache["symbols"][SYMBOL])
+                bot._maybe_place_initial_buy(
+                    SYMBOL, bot.signal_cache["symbols"][SYMBOL]
+                )
 
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
@@ -1822,10 +2014,16 @@ class UnifiedBotTests(unittest.TestCase):
             runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
-                bot.external_price_feed = StaticExternalPriceFeed(self.external_context(spread_bps=-25.0))
-                bot.signal_cache["symbols"] = {SYMBOL: self.entry_signal(rs30=-0.002, rs60=-0.003)}
+                bot.external_price_feed = StaticExternalPriceFeed(
+                    self.external_context(spread_bps=-25.0)
+                )
+                bot.signal_cache["symbols"] = {
+                    SYMBOL: self.entry_signal(rs30=-0.002, rs60=-0.003)
+                }
 
-                bot._maybe_place_initial_buy(SYMBOL, bot.signal_cache["symbols"][SYMBOL])
+                bot._maybe_place_initial_buy(
+                    SYMBOL, bot.signal_cache["symbols"][SYMBOL]
+                )
 
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
@@ -1844,18 +2042,24 @@ class UnifiedBotTests(unittest.TestCase):
 
             bot._maybe_place_initial_buy(SYMBOL, self.entry_signal(ts=1000))
 
-            with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+            with bot.signal_analytics_csv_path.open(
+                newline="", encoding="utf-8"
+            ) as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[-1]["decision"], "entry_gate_checked")
             self.assertEqual(rows[-1]["block_reason"], "entry_top_n_blocked")
 
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
-            bot.external_price_feed = StaticExternalPriceFeed(self.external_context(spread_bps=25.0))
+            bot.external_price_feed = StaticExternalPriceFeed(
+                self.external_context(spread_bps=25.0)
+            )
 
             bot._maybe_place_initial_buy(SYMBOL, self.entry_signal(ts=1001))
 
-            with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+            with bot.signal_analytics_csv_path.open(
+                newline="", encoding="utf-8"
+            ) as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[-1]["decision"], "entry_gate_checked")
             self.assertIn("external_premium_blocked", rows[-1]["block_reason"])
@@ -1870,7 +2074,9 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._maybe_place_initial_buy(SYMBOL, self.entry_signal(ts=1002))
 
-                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     rows = list(csv.DictReader(handle))
             self.assertEqual(rows[-1]["decision"], "entry_budget_blocked")
             self.assertEqual(rows[-1]["block_reason"], "free_margin_below_reserve")
@@ -1880,7 +2086,9 @@ class UnifiedBotTests(unittest.TestCase):
             runtime = config.RUNTIME
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
-                bot.external_price_feed = StaticExternalPriceFeed(self.external_context(valid=False, stale=True, reason="stale"))
+                bot.external_price_feed = StaticExternalPriceFeed(
+                    self.external_context(valid=False, stale=True, reason="stale")
+                )
                 signal = self.entry_signal()
 
                 bot._maybe_place_initial_buy(SYMBOL, signal)
@@ -1893,7 +2101,9 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
-                    self.external_context(valid=False, stale=False, reason="internal_spread_too_wide")
+                    self.external_context(
+                        valid=False, stale=False, reason="internal_spread_too_wide"
+                    )
                 )
 
                 bot._maybe_place_initial_buy(SYMBOL, self.entry_signal())
@@ -1904,7 +2114,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertIn("external_reference_invalid", rows[-1]["reason"])
                 self.assertIn("internal_spread_too_wide", rows[-1]["reason"])
 
-    def test_external_price_disable_stale_reference_blocks_entry_even_when_ignore_is_true(self):
+    def test_external_price_disable_stale_reference_blocks_entry_even_when_ignore_is_true(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = config.RUNTIME
             settings = replace(
@@ -1927,9 +2139,14 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_default_external_impulse_bonus_matches_entry_score_scale(self):
         self.assertAlmostEqual(config.EXTERNAL_PRICE_FEED.impulse_score_bonus, 0.02)
-        self.assertLess(config.EXTERNAL_PRICE_FEED.impulse_score_bonus, config.STRATEGY.entry_min_score)
+        self.assertLess(
+            config.EXTERNAL_PRICE_FEED.impulse_score_bonus,
+            config.STRATEGY.entry_min_score,
+        )
 
-    def test_pending_entry_keeps_external_impulse_bonus_during_signal_revalidation(self):
+    def test_pending_entry_keeps_external_impulse_bonus_during_signal_revalidation(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = config.RUNTIME
             strategy = replace(config.STRATEGY, entry_min_score=0.03)
@@ -1939,7 +2156,9 @@ class UnifiedBotTests(unittest.TestCase):
                 mexc_lead_threshold_bps_30s=5.0,
                 impulse_score_bonus=0.02,
             )
-            with override_config(RUNTIME=runtime, STRATEGY=strategy, EXTERNAL_PRICE_FEED=settings):
+            with override_config(
+                RUNTIME=runtime, STRATEGY=strategy, EXTERNAL_PRICE_FEED=settings
+            ):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
                     self.external_context(
@@ -1963,10 +2182,20 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._manage_entry_orders(
                     SYMBOL,
                     signal,
-                    open_orders=[{"id": "pending_entry", "symbol": SYMBOL, "side": config.ENTRY_SIDE, "amount": 1.0, "remaining": 1.0}],
+                    open_orders=[
+                        {
+                            "id": "pending_entry",
+                            "symbol": SYMBOL,
+                            "side": config.ENTRY_SIDE,
+                            "amount": 1.0,
+                            "remaining": 1.0,
+                        }
+                    ],
                 )
 
-                self.assertEqual([order["id"] for order in state.entry_orders], ["pending_entry"])
+                self.assertEqual(
+                    [order["id"] for order in state.entry_orders], ["pending_entry"]
+                )
 
     def test_external_price_divergence_sets_entry_cooldown(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -1974,7 +2203,9 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
-                    self.external_context(spread_bps=0.0, htx_change_1m_bps=80.0, mexc_change_1m_bps=10.0)
+                    self.external_context(
+                        spread_bps=0.0, htx_change_1m_bps=80.0, mexc_change_1m_bps=10.0
+                    )
                 )
                 signal = self.entry_signal()
 
@@ -2008,7 +2239,11 @@ class UnifiedBotTests(unittest.TestCase):
             bot.external_price_feed = feed
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                contexts = list(executor.map(lambda _index: bot._external_price_context(SYMBOL), range(8)))
+                contexts = list(
+                    executor.map(
+                        lambda _index: bot._external_price_context(SYMBOL), range(8)
+                    )
+                )
 
             self.assertEqual(len(feed.calls), 1)
             self.assertTrue(all(context["spread_bps"] == 0.0 for context in contexts))
@@ -2019,15 +2254,23 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
-                    self.external_context(spread_bps=0.0, htx_change_1m_bps=-60.0, mexc_change_1m_bps=-55.0)
+                    self.external_context(
+                        spread_bps=0.0,
+                        htx_change_1m_bps=-60.0,
+                        mexc_change_1m_bps=-55.0,
+                    )
                 )
 
                 bot._maybe_place_initial_buy(SYMBOL, self.entry_signal())
 
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
-                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn("external_directional_1m_blocked", rows[-1]["block_reason"])
+                self.assertIn(
+                    "external_directional_1m_blocked", rows[-1]["block_reason"]
+                )
 
     def test_htx_orderbook_spread_filter_blocks_fresh_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2038,19 +2281,28 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                bot.external_price_feed = StaticExternalPriceFeed(self.external_context(spread_bps=0.0))
-                bot.exchange.order_book = {"bids": [[10.0, 100.0]], "asks": [[10.2, 100.0]]}
+                bot.external_price_feed = StaticExternalPriceFeed(
+                    self.external_context(spread_bps=0.0)
+                )
+                bot.exchange.order_book = {
+                    "bids": [[10.0, 100.0]],
+                    "asks": [[10.2, 100.0]],
+                }
 
                 bot._maybe_place_initial_buy(SYMBOL, self.entry_signal())
 
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
-                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertIn("htx_orderbook_spread_too_wide", rows[-1]["block_reason"])
 
     def test_order_book_prefetch_serializes_exchange_calls_and_reuses_cycle_cache(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, market_data_max_workers=4, poll_interval_sec=3)
+            runtime = replace(
+                config.RUNTIME, market_data_max_workers=4, poll_interval_sec=3
+            )
             strategy = replace(
                 config.STRATEGY,
                 entry_spread_filter_enabled=True,
@@ -2091,7 +2343,9 @@ class UnifiedBotTests(unittest.TestCase):
                     self.assertGreater(bid, 0.0)
                     self.assertGreater(ask, 0.0)
 
-                self.assertEqual(bot.exchange.fetch_order_book_calls, calls_after_prefetch)
+                self.assertEqual(
+                    bot.exchange.fetch_order_book_calls, calls_after_prefetch
+                )
 
     def test_parallel_order_book_prefetch_preserves_profile_context(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
@@ -2123,12 +2377,20 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ticker_prefetch_serializes_exchange_calls_and_reuses_cycle_cache(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, market_data_max_workers=4, poll_interval_sec=3)
+            runtime = replace(
+                config.RUNTIME, market_data_max_workers=4, poll_interval_sec=3
+            )
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 symbols = [SYMBOL, SECOND_SYMBOL, "ALT3/USDT:USDT", "ALT4/USDT:USDT"]
                 bot.symbols = list(symbols)
-                bot.market_by_symbol.update({symbol: MARKET for symbol in symbols if symbol not in bot.market_by_symbol})
+                bot.market_by_symbol.update(
+                    {
+                        symbol: MARKET
+                        for symbol in symbols
+                        if symbol not in bot.market_by_symbol
+                    }
+                )
                 bot.exchange.has["fetchTickers"] = False
 
                 original_fetch_ticker = bot.exchange.fetch_ticker
@@ -2218,15 +2480,23 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
-                    self.external_context(spread_bps=0.0, htx_change_1m_bps=65.0, mexc_change_1m_bps=60.0)
+                    self.external_context(
+                        spread_bps=0.0, htx_change_1m_bps=65.0, mexc_change_1m_bps=60.0
+                    )
                 )
 
-                bot._maybe_place_initial_buy(SYMBOL, self.entry_signal(rs30=-0.002, rs60=-0.003))
+                bot._maybe_place_initial_buy(
+                    SYMBOL, self.entry_signal(rs30=-0.002, rs60=-0.003)
+                )
 
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
-                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn("external_directional_1m_blocked", rows[-1]["block_reason"])
+                self.assertIn(
+                    "external_directional_1m_blocked", rows[-1]["block_reason"]
+                )
 
     def test_pending_entry_is_canceled_when_directional_1m_turns_adverse(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2234,7 +2504,11 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
-                    self.external_context(spread_bps=0.0, htx_change_1m_bps=-70.0, mexc_change_1m_bps=-52.0)
+                    self.external_context(
+                        spread_bps=0.0,
+                        htx_change_1m_bps=-70.0,
+                        mexc_change_1m_bps=-52.0,
+                    )
                 )
                 state = bot._get_state(SYMBOL)
                 state.entry_orders = [
@@ -2257,36 +2531,70 @@ class UnifiedBotTests(unittest.TestCase):
             external = replace(config.EXTERNAL_PRICE_FEED, exit_adjustment_enabled=True)
             with override_config(RUNTIME=runtime, EXTERNAL_PRICE_FEED=external):
                 bot = self.make_bot(Path(raw_tmp))
-                bot.external_price_feed = StaticExternalPriceFeed(self.external_context(spread_bps=25.0))
+                bot.external_price_feed = StaticExternalPriceFeed(
+                    self.external_context(spread_bps=25.0)
+                )
                 state = bot._get_state(SYMBOL)
                 state.position_size = 100.0
                 state.position_available = 100.0
                 state.entry_price = 100.0
                 state.initial_entry_notional = 10000.0
 
-                bot._place_sell_ladder(SellLadderParams(symbol=SYMBOL, total_contracts=100.0, avg_entry_price=100.0, rebuild=False, closeable_contracts=100.0, mode="normal"))
+                bot._place_sell_ladder(
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
+                )
 
-                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [40.0, 30.0, 20.0])
-                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.5, 101.0, 102.0])
+                self.assertEqual(
+                    [order["amount"] for order in bot.exchange.created_orders],
+                    [40.0, 30.0, 20.0],
+                )
+                self.assertEqual(
+                    [order["price"] for order in bot.exchange.created_orders],
+                    [100.5, 101.0, 102.0],
+                )
                 self.assertEqual(state.exit_runner_contracts, 10.0)
-                self.assertEqual(state.sell_ladder_orders[0]["ladder_name"], "external_tightened")
+                self.assertEqual(
+                    state.sell_ladder_orders[0]["ladder_name"], "external_tightened"
+                )
 
     def test_external_price_stale_keeps_normal_exit_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
-                bot.external_price_feed = StaticExternalPriceFeed(self.external_context(valid=False, stale=True, spread_bps=25.0))
+                bot.external_price_feed = StaticExternalPriceFeed(
+                    self.external_context(valid=False, stale=True, spread_bps=25.0)
+                )
                 state = bot._get_state(SYMBOL)
                 state.position_size = 100.0
                 state.position_available = 100.0
                 state.entry_price = 100.0
                 state.initial_entry_notional = 10000.0
 
-                bot._place_sell_ladder(SellLadderParams(symbol=SYMBOL, total_contracts=100.0, avg_entry_price=100.0, rebuild=False, closeable_contracts=100.0, mode="normal"))
+                bot._place_sell_ladder(
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
+                )
 
-                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [30.0])
-                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8])
+                self.assertEqual(
+                    [order["amount"] for order in bot.exchange.created_orders], [30.0]
+                )
+                self.assertEqual(
+                    [order["price"] for order in bot.exchange.created_orders], [100.8]
+                )
                 self.assertEqual(state.exit_runner_contracts, 70.0)
 
     def test_calculate_rsi_basic_shapes(self):
@@ -2315,12 +2623,12 @@ class UnifiedBotTests(unittest.TestCase):
         #          ln(102/99) = 0.02985, ln(101.5/102) = -0.00491
         # It should just be a positive float.
 
-        with patch('htxbot.indicators.HAS_NUMPY', True):
+        with patch("htxbot.indicators.HAS_NUMPY", True):
             vol_np = realized_volatility(closes, 4)
             self.assertGreater(vol_np, 0.0)
-            self.assertLess(vol_np, 0.1) # shouldn't be massive
+            self.assertLess(vol_np, 0.1)  # shouldn't be massive
 
-        with patch('htxbot.indicators.HAS_NUMPY', False):
+        with patch("htxbot.indicators.HAS_NUMPY", False):
             vol_fallback = realized_volatility(closes, 4)
             self.assertGreater(vol_fallback, 0.0)
             self.assertLess(vol_fallback, 0.1)
@@ -2339,12 +2647,16 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertAlmostEqual(average_true_range(candles, 3), (2.0 + 1.0 + 2.75) / 3.0)
         self.assertEqual(average_true_range(candles[:2], 3), 0.0)
 
-    def macro_regime_bot(self, tmp_path: Path, gold_rsi: float, btc_rsi: float) -> HtxFuturesBot:
+    def macro_regime_bot(
+        self, tmp_path: Path, gold_rsi: float, btc_rsi: float
+    ) -> HtxFuturesBot:
         bot = self.make_bot(tmp_path)
         bot.benchmark_symbol = BTC_SYMBOL
         bot.macro_gold_symbol = XAUT_SYMBOL
         bot._macro_gold_lookup_done = True
-        bot.exchange.ohlcv[(XAUT_SYMBOL, "4h")] = ohlcv_series([100.0] * 40, 4 * 60 * 60)
+        bot.exchange.ohlcv[(XAUT_SYMBOL, "4h")] = ohlcv_series(
+            [100.0] * 40, 4 * 60 * 60
+        )
         bot.exchange.ohlcv[(BTC_SYMBOL, "4h")] = ohlcv_series([100.0] * 40, 4 * 60 * 60)
         values = iter([gold_rsi, btc_rsi])
         bot._calculate_rsi = lambda closes, period: next(values)
@@ -2360,7 +2672,10 @@ class UnifiedBotTests(unittest.TestCase):
         macro = replace(config.MACRO, gold_cache_ttl_sec=0, gold_min_candles=20)
         with override_config(MACRO=macro):
             for gold_rsi, btc_rsi, regime in cases:
-                with tempfile.TemporaryDirectory() as raw_tmp, self.subTest(regime=regime):
+                with (
+                    tempfile.TemporaryDirectory() as raw_tmp,
+                    self.subTest(regime=regime),
+                ):
                     bot = self.macro_regime_bot(Path(raw_tmp), gold_rsi, btc_rsi)
 
                     context = bot._gold_btc_rsi_context()
@@ -2391,9 +2706,14 @@ class UnifiedBotTests(unittest.TestCase):
 
             self.assertEqual(context["regime"], "crypto_underperforms_gold")
             self.assertLess(context["macro_direction_score"], 0.0)
-            self.assertAlmostEqual(context["long_budget_multiplier"], macro.risk_off_long_budget_multiplier)
+            self.assertAlmostEqual(
+                context["long_budget_multiplier"], macro.risk_off_long_budget_multiplier
+            )
             self.assertGreater(context["short_budget_multiplier"], 1.0)
-            self.assertLessEqual(context["short_budget_multiplier"], macro.gold_directional_bias_max_multiplier)
+            self.assertLessEqual(
+                context["short_budget_multiplier"],
+                macro.gold_directional_bias_max_multiplier,
+            )
 
     def test_gold_directional_bias_boosts_long_when_crypto_leads_gold(self):
         macro = replace(
@@ -2420,7 +2740,10 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertGreater(context["macro_direction_score"], 0.0)
             self.assertGreater(context["long_budget_multiplier"], 1.0)
             self.assertLess(context["short_budget_multiplier"], 1.0)
-            self.assertLessEqual(context["long_budget_multiplier"], macro.gold_directional_bias_max_multiplier)
+            self.assertLessEqual(
+                context["long_budget_multiplier"],
+                macro.gold_directional_bias_max_multiplier,
+            )
 
     def test_gold_btc_rsi_context_unavailable_without_xaut(self):
         macro = replace(config.MACRO, gold_cache_ttl_sec=0, gold_min_candles=20)
@@ -2446,7 +2769,7 @@ class UnifiedBotTests(unittest.TestCase):
             )
 
             signal = self.entry_signal()
-            signal["budget_multiplier"] = 0.0 # reflect long_budget_multiplier applied
+            signal["budget_multiplier"] = 0.0  # reflect long_budget_multiplier applied
             bot._maybe_place_initial_buy(SYMBOL, signal)
 
             self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
@@ -2461,7 +2784,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.2
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
                 self.set_macro_context(
                     bot,
                     regime="crypto_underperforms_gold",
@@ -2519,7 +2844,12 @@ class UnifiedBotTests(unittest.TestCase):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 buy_ref = {"id": "buy_1", "side": "buy", "price": 99.0, "amount": 2.0}
-                sell_ref = {"id": "sell_1", "side": "sell", "price": 101.0, "amount": 2.0}
+                sell_ref = {
+                    "id": "sell_1",
+                    "side": "sell",
+                    "price": 101.0,
+                    "amount": 2.0,
+                }
                 state.entry_orders = [buy_ref]
                 state.sell_ladder_orders = [sell_ref]
                 bot.exchange.cancel_fail_ids.add("sell_1")
@@ -2549,7 +2879,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.base_entry_amount = 10.0
                 state.base_entry_price = 10.4
                 state.frozen_no_more_buys = True
-                state.sell_ladder_orders = [{"id": "sell", "side": "sell", "price": 10.6, "amount": 10.0}]
+                state.sell_ladder_orders = [
+                    {"id": "sell", "side": "sell", "price": 10.6, "amount": 10.0}
+                ]
                 signal = self.entry_signal(ts=2000)
                 signal.update(
                     {
@@ -2579,7 +2911,9 @@ class UnifiedBotTests(unittest.TestCase):
                 )
                 self.assertTrue(bot._get_state(SYMBOL).entry_orders)
                 raw_long_price = 10.0 * (1 - config.BUYING.ladder_offsets[0])
-                self.assertLessEqual(bot._get_state(SYMBOL).entry_orders[0]["price"], raw_long_price)
+                self.assertLessEqual(
+                    bot._get_state(SYMBOL).entry_orders[0]["price"], raw_long_price
+                )
 
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             with override_config(RUNTIME=config.RUNTIME):
@@ -2593,7 +2927,9 @@ class UnifiedBotTests(unittest.TestCase):
                 )
                 self.assertTrue(bot._get_state(SYMBOL).entry_orders)
                 raw_short_price = 10.0 * (1 + config.BUYING.ladder_offsets[0])
-                self.assertGreaterEqual(bot._get_state(SYMBOL).entry_orders[0]["price"], raw_short_price)
+                self.assertGreaterEqual(
+                    bot._get_state(SYMBOL).entry_orders[0]["price"], raw_short_price
+                )
 
     def test_ema_entry_ladder_uses_two_one_percent_levels(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2706,14 +3042,18 @@ class UnifiedBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
 
-            self.assertEqual(bot._order_remaining_amount({"amount": 5.0, "remaining": 0.0}), 0.0)
+            self.assertEqual(
+                bot._order_remaining_amount({"amount": 5.0, "remaining": 0.0}), 0.0
+            )
             self.assertEqual(bot._order_remaining_amount({"amount": 5.0}), 5.0)
 
     def test_profile_validation_rejects_mismatched_ema_ladder_lengths(self):
         profile = config.resolve_profile("long")
         invalid = replace(
             profile,
-            buying=replace(profile.buying, ladder_fractions=(0.5, 0.5), ladder_offsets=(0.0,)),
+            buying=replace(
+                profile.buying, ladder_fractions=(0.5, 0.5), ladder_offsets=(0.0,)
+            ),
         )
 
         with self.assertRaisesRegex(ValueError, "ladder_fractions and ladder_offsets"):
@@ -2723,7 +3063,9 @@ class UnifiedBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, post_only_enabled=False)
             risk = replace(config.RISK, leverage=30, account_leverage=0)
-            buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
+            buying = replace(
+                config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,)
+            )
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.account_leverage = 50
@@ -2750,7 +3092,9 @@ class UnifiedBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, post_only_enabled=False)
             risk = replace(config.RISK, leverage=30, account_leverage=0)
-            buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
+            buying = replace(
+                config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,)
+            )
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.account_leverage = 5
@@ -2775,7 +3119,9 @@ class UnifiedBotTests(unittest.TestCase):
     def test_entry_ladder_stops_after_insufficient_margin_rejection(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, post_only_enabled=False)
-            buying = replace(config.BUYING, ladder_fractions=(0.5, 0.5), ladder_offsets=(0.0, 0.01))
+            buying = replace(
+                config.BUYING, ladder_fractions=(0.5, 0.5), ladder_offsets=(0.0, 0.01)
+            )
             with override_config(RUNTIME=runtime, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.create_order_failures = [
@@ -2795,11 +3141,15 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(placed, 0)
                 self.assertEqual(bot.exchange.create_order_calls, 1)
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
-                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertEqual(rows[-1]["decision"], "entry_ladder_rejected")
                 self.assertIn("entry_insufficient_margin", rows[-1]["block_reason"])
-                with bot.diagnostics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.diagnostics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     diagnostics = list(csv.DictReader(handle))
                 self.assertEqual(diagnostics[-1]["event"], "entry_order_canceled")
                 self.assertEqual(diagnostics[-1]["error_code"], "1047")
@@ -2807,7 +3157,9 @@ class UnifiedBotTests(unittest.TestCase):
     def test_step_symbol_places_initial_entry_ladder_when_flat_signal_valid(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, post_only_enabled=False)
-            buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
+            buying = replace(
+                config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,)
+            )
             with override_config(RUNTIME=runtime, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.signal_cache["symbols"] = {SYMBOL: self.entry_signal(ts=2000)}
@@ -2856,8 +3208,14 @@ class UnifiedBotTests(unittest.TestCase):
 
             bot.step_symbol(SYMBOL)
 
-            self.assertIn(("orphan_close", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
-            self.assertIn(("orphan_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+            self.assertIn(
+                ("orphan_close", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                bot.exchange.canceled_orders,
+            )
+            self.assertIn(
+                ("orphan_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                bot.exchange.canceled_orders,
+            )
             self.assertEqual(bot._get_state(SYMBOL).position_size, 0.0)
 
     def test_step_symbol_adopts_unknown_reduce_only_exit_when_position_appears(self):
@@ -2891,7 +3249,10 @@ class UnifiedBotTests(unittest.TestCase):
 
             state = bot._get_state(SYMBOL)
             self.assertEqual(state.position_size, 5.0)
-            self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["orphan_reduce_only_exit"])
+            self.assertEqual(
+                [order["id"] for order in state.sell_ladder_orders],
+                ["orphan_reduce_only_exit"],
+            )
             self.assertEqual(bot.exchange.created_orders, [])
 
     def test_step_symbol_builds_exit_ladder_same_cycle_after_adopting_position(self):
@@ -2918,10 +3279,21 @@ class UnifiedBotTests(unittest.TestCase):
                 state = bot._get_state(SYMBOL)
                 self.assertEqual(state.position_size, 5.0)
                 self.assertTrue(state.sell_ladder_orders)
-                self.assertEqual(sum(ref["amount"] for ref in state.sell_ladder_orders) + state.exit_runner_contracts, 5.0)
-                self.assertTrue(all(order["params"].get("reduceOnly") for order in bot.exchange.created_orders))
+                self.assertEqual(
+                    sum(ref["amount"] for ref in state.sell_ladder_orders)
+                    + state.exit_runner_contracts,
+                    5.0,
+                )
+                self.assertTrue(
+                    all(
+                        order["params"].get("reduceOnly")
+                        for order in bot.exchange.created_orders
+                    )
+                )
 
-    def test_step_symbol_does_not_readopt_stale_tracked_exit_after_position_change(self):
+    def test_step_symbol_does_not_readopt_stale_tracked_exit_after_position_change(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
             state = bot._get_state(SYMBOL)
@@ -2957,7 +3329,10 @@ class UnifiedBotTests(unittest.TestCase):
 
             bot.step_symbol(SYMBOL)
 
-            self.assertIn(("old_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+            self.assertIn(
+                ("old_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                bot.exchange.canceled_orders,
+            )
             self.assertEqual(state.sell_ladder_orders, [])
             self.assertEqual(state.sell_ladder_signature, "")
 
@@ -2990,7 +3365,12 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(profile.risk.tiny_entry_max_notional, 12.0)
 
     def test_profile_reads_global_htxbot_env_prefix(self):
-        env_keys = ("POLL_INTERVAL_SEC", "HTXBOT_POLL_INTERVAL_SEC", "ALIAS_POLL_INTERVAL_SEC", "HTXBOT_ALIAS_POLL_INTERVAL_SEC")
+        env_keys = (
+            "POLL_INTERVAL_SEC",
+            "HTXBOT_POLL_INTERVAL_SEC",
+            "ALIAS_POLL_INTERVAL_SEC",
+            "HTXBOT_ALIAS_POLL_INTERVAL_SEC",
+        )
         previous = {key: os.environ.get(key) for key in env_keys}
         try:
             for key in env_keys:
@@ -3024,7 +3404,9 @@ class UnifiedBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, post_only_enabled=False)
             risk = replace(config.RISK, leverage=30, account_leverage=50)
-            buying = replace(config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,))
+            buying = replace(
+                config.BUYING, ladder_fractions=(1.0,), ladder_offsets=(0.0,)
+            )
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.reject_leverage_above = 20
@@ -3044,7 +3426,11 @@ class UnifiedBotTests(unittest.TestCase):
     def test_normal_exit_ladder_uses_fixed_take_profit_and_trailing_runner(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_trailing_enabled=True,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.balance_free = 10000.0
@@ -3067,18 +3453,37 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertEqual(len(bot.exchange.created_orders), 1)
-                self.assertEqual([order["type"] for order in bot.exchange.created_orders], ["limit"])
-                self.assertEqual([order["side"] for order in bot.exchange.created_orders], ["sell"])
-                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [30.0])
-                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8])
-                self.assertTrue(all(order["params"].get("reduceOnly") for order in bot.exchange.created_orders))
+                self.assertEqual(
+                    [order["type"] for order in bot.exchange.created_orders], ["limit"]
+                )
+                self.assertEqual(
+                    [order["side"] for order in bot.exchange.created_orders], ["sell"]
+                )
+                self.assertEqual(
+                    [order["amount"] for order in bot.exchange.created_orders], [30.0]
+                )
+                self.assertEqual(
+                    [order["price"] for order in bot.exchange.created_orders], [100.8]
+                )
+                self.assertTrue(
+                    all(
+                        order["params"].get("reduceOnly")
+                        for order in bot.exchange.created_orders
+                    )
+                )
                 self.assertEqual(state.exit_runner_contracts, 70.0)
                 self.assertFalse(state.exit_runner_active)
 
-    def test_ensure_sell_ladder_rebuilds_missing_fixed_exit_with_matching_runner_signature(self):
+    def test_ensure_sell_ladder_rebuilds_missing_fixed_exit_with_matching_runner_signature(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_trailing_enabled=True,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3088,20 +3493,32 @@ class UnifiedBotTests(unittest.TestCase):
                 state.initial_entry_notional = 10000.0
                 state.sell_ladder_orders = []
                 state.exit_runner_contracts = 70.0
-                state.sell_ladder_signature = bot._exit_ladder_signature("normal", SYMBOL, state)
+                state.sell_ladder_signature = bot._exit_ladder_signature(
+                    "normal", SYMBOL, state
+                )
 
                 bot._ensure_sell_ladder(SYMBOL)
 
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 self.assertEqual(bot.exchange.created_orders[0]["amount"], 30.0)
-                self.assertTrue(bot.exchange.created_orders[0]["params"].get("reduceOnly"))
-                self.assertEqual([ref["amount"] for ref in state.sell_ladder_orders], [30.0])
+                self.assertTrue(
+                    bot.exchange.created_orders[0]["params"].get("reduceOnly")
+                )
+                self.assertEqual(
+                    [ref["amount"] for ref in state.sell_ladder_orders], [30.0]
+                )
                 self.assertEqual(state.exit_runner_contracts, 70.0)
 
-    def test_short_ensure_sell_ladder_rebuilds_missing_fixed_exit_with_matching_runner_signature(self):
+    def test_short_ensure_sell_ladder_rebuilds_missing_fixed_exit_with_matching_runner_signature(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_trailing_enabled=True,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3111,21 +3528,33 @@ class UnifiedBotTests(unittest.TestCase):
                 state.initial_entry_notional = 10000.0
                 state.sell_ladder_orders = []
                 state.exit_runner_contracts = 70.0
-                state.sell_ladder_signature = bot._exit_ladder_signature("normal", SYMBOL, state)
+                state.sell_ladder_signature = bot._exit_ladder_signature(
+                    "normal", SYMBOL, state
+                )
 
                 bot._ensure_sell_ladder(SYMBOL)
 
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 self.assertEqual(bot.exchange.created_orders[0]["side"], "buy")
                 self.assertEqual(bot.exchange.created_orders[0]["amount"], 30.0)
-                self.assertTrue(bot.exchange.created_orders[0]["params"].get("reduceOnly"))
-                self.assertEqual([ref["amount"] for ref in state.sell_ladder_orders], [30.0])
+                self.assertTrue(
+                    bot.exchange.created_orders[0]["params"].get("reduceOnly")
+                )
+                self.assertEqual(
+                    [ref["amount"] for ref in state.sell_ladder_orders], [30.0]
+                )
                 self.assertEqual(state.exit_runner_contracts, 70.0)
 
-    def test_ensure_sell_ladder_keeps_runner_only_remainder_when_signature_matches(self):
+    def test_ensure_sell_ladder_keeps_runner_only_remainder_when_signature_matches(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_trailing_enabled=True,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3135,7 +3564,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.initial_entry_notional = 10000.0
                 state.sell_ladder_orders = []
                 state.exit_runner_contracts = 65.0
-                state.sell_ladder_signature = bot._exit_ladder_signature("normal", SYMBOL, state)
+                state.sell_ladder_signature = bot._exit_ladder_signature(
+                    "normal", SYMBOL, state
+                )
 
                 bot._ensure_sell_ladder(SYMBOL)
 
@@ -3143,7 +3574,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(state.exit_runner_contracts, 65.0)
 
-    def test_exit_ladder_preflight_caps_to_position_and_blocks_duplicate_tracked_ladder(self):
+    def test_exit_ladder_preflight_caps_to_position_and_blocks_duplicate_tracked_ladder(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             with override_config(RUNTIME=runtime):
@@ -3165,7 +3598,9 @@ class UnifiedBotTests(unittest.TestCase):
                     )
                 )
 
-                self.assertLessEqual(sum(order["amount"] for order in bot.exchange.created_orders), 5.0)
+                self.assertLessEqual(
+                    sum(order["amount"] for order in bot.exchange.created_orders), 5.0
+                )
                 created_before_duplicate = len(bot.exchange.created_orders)
                 bot._place_sell_ladder(
                     SellLadderParams(
@@ -3178,8 +3613,12 @@ class UnifiedBotTests(unittest.TestCase):
                     )
                 )
 
-                self.assertEqual(len(bot.exchange.created_orders), created_before_duplicate)
-                self.assertEqual(len(state.sell_ladder_orders), created_before_duplicate)
+                self.assertEqual(
+                    len(bot.exchange.created_orders), created_before_duplicate
+                )
+                self.assertEqual(
+                    len(state.sell_ladder_orders), created_before_duplicate
+                )
 
     def test_split_exit_keeps_base_ladder_on_base_average_and_adds_recovery(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3203,9 +3642,18 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._ensure_sell_ladder(SYMBOL)
 
-                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 25.0, 15.0, 45.0])
-                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8, 101.6, 103.0, 105.0, 100.04])
-                self.assertEqual([ref["exit_scope"] for ref in state.sell_ladder_orders], ["base", "base", "base", "base", "average_recovery"])
+                self.assertEqual(
+                    [order["amount"] for order in bot.exchange.created_orders],
+                    [35.0, 25.0, 25.0, 15.0, 45.0],
+                )
+                self.assertEqual(
+                    [order["price"] for order in bot.exchange.created_orders],
+                    [100.8, 101.6, 103.0, 105.0, 100.04],
+                )
+                self.assertEqual(
+                    [ref["exit_scope"] for ref in state.sell_ladder_orders],
+                    ["base", "base", "base", "base", "average_recovery"],
+                )
                 self.assertEqual(state.exit_runner_contracts, 0.0)
                 self.assertIn("split_exit=1", state.sell_ladder_signature)
 
@@ -3232,7 +3680,9 @@ class UnifiedBotTests(unittest.TestCase):
                     if calls["count"] == 2:
                         bot.exchange.create_order_calls += 1
                         raise RuntimeError("stage rejected")
-                    return original_create_order(symbol, type, side, amount, price, params=params)
+                    return original_create_order(
+                        symbol, type, side, amount, price, params=params
+                    )
 
                 bot.exchange.create_order = flaky_create_order
 
@@ -3247,14 +3697,22 @@ class UnifiedBotTests(unittest.TestCase):
                     )
                 )
 
-                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [5.0])
-                self.assertEqual([ref["amount"] for ref in state.sell_ladder_orders], [5.0])
+                self.assertEqual(
+                    [order["amount"] for order in bot.exchange.created_orders], [5.0]
+                )
+                self.assertEqual(
+                    [ref["amount"] for ref in state.sell_ladder_orders], [5.0]
+                )
                 self.assertEqual(state.sell_ladder_signature, "")
 
     def test_exit_runner_ladder_full_create_failure_resets_runner_state(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_trailing_enabled=True,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3263,7 +3721,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.initial_entry_notional = 10000.0
 
-                def failing_create_order(symbol, type, side, amount, price, params=None):
+                def failing_create_order(
+                    symbol, type, side, amount, price, params=None
+                ):
                     bot.exchange.create_order_calls += 1
                     raise RuntimeError("exchange rejected")
 
@@ -3306,18 +3766,28 @@ class UnifiedBotTests(unittest.TestCase):
                 state.averaging_entry_fees_quote = 0.405
                 original_create_order = bot.exchange.create_order
 
-                def reject_recovery_order(symbol, type, side, amount, price, params=None):
+                def reject_recovery_order(
+                    symbol, type, side, amount, price, params=None
+                ):
                     if float(amount) == 45.0:
                         bot.exchange.create_order_calls += 1
                         raise RuntimeError("recovery rejected")
-                    return original_create_order(symbol, type, side, amount, price, params=params)
+                    return original_create_order(
+                        symbol, type, side, amount, price, params=params
+                    )
 
                 bot.exchange.create_order = reject_recovery_order
 
                 bot._ensure_sell_ladder(SYMBOL)
 
-                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 25.0, 15.0])
-                self.assertEqual([ref["exit_scope"] for ref in state.sell_ladder_orders], ["base", "base", "base", "base"])
+                self.assertEqual(
+                    [order["amount"] for order in bot.exchange.created_orders],
+                    [35.0, 25.0, 25.0, 15.0],
+                )
+                self.assertEqual(
+                    [ref["exit_scope"] for ref in state.sell_ladder_orders],
+                    ["base", "base", "base", "base"],
+                )
                 self.assertEqual(state.sell_ladder_signature, "")
 
     def test_average_recovery_fill_reduces_only_average_bucket(self):
@@ -3392,7 +3862,10 @@ class UnifiedBotTests(unittest.TestCase):
                         mode="normal",
                     )
                 )
-                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.4, 101.0, 102.0, 103.5])
+                self.assertEqual(
+                    [order["price"] for order in bot.exchange.created_orders],
+                    [100.4, 101.0, 102.0, 103.5],
+                )
                 self.assertEqual(state.exit_runner_contracts, 0.0)
 
                 bot.exchange.created_orders.clear()
@@ -3410,7 +3883,10 @@ class UnifiedBotTests(unittest.TestCase):
                         mode="normal",
                     )
                 )
-                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.3, 100.8, 101.5])
+                self.assertEqual(
+                    [order["price"] for order in bot.exchange.created_orders],
+                    [100.3, 100.8, 101.5],
+                )
 
     def test_exit_ladder_time_decay_removes_runner_after_six_hours(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3436,14 +3912,24 @@ class UnifiedBotTests(unittest.TestCase):
                     )
                 )
 
-                self.assertEqual([order["amount"] for order in bot.exchange.created_orders], [35.0, 25.0, 40.0])
-                self.assertEqual([order["price"] for order in bot.exchange.created_orders], [100.8, 101.6, 103.0])
+                self.assertEqual(
+                    [order["amount"] for order in bot.exchange.created_orders],
+                    [35.0, 25.0, 40.0],
+                )
+                self.assertEqual(
+                    [order["price"] for order in bot.exchange.created_orders],
+                    [100.8, 101.6, 103.0],
+                )
                 self.assertEqual(state.exit_runner_contracts, 0.0)
 
     def test_normal_runner_closes_on_trailing_pullback(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_trailing_enabled=True,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3526,12 +4012,19 @@ class UnifiedBotTests(unittest.TestCase):
                 runner_order = bot.exchange.created_orders[-1]
                 self.assertEqual(runner_order["amount"], 70.0)
                 self.assertEqual(runner_order["price"], 106.6)
-                self.assertIn("volatility_pullback=0.030000", state.sell_ladder_orders[-1]["reason"])
+                self.assertIn(
+                    "volatility_pullback=0.030000",
+                    state.sell_ladder_orders[-1]["reason"],
+                )
 
     def test_short_trailing_runner_profit_lock_and_close_are_mirrored(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True, ema_exit_trailing_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_trailing_enabled=True,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3556,13 +4049,17 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.exit_runner_contracts, 70.0)
 
                 bot.exchange.ticker = {"bid": 97.8, "ask": 97.9, "last": 97.9}
-                self.assertFalse(bot._maybe_manage_exit_runner(SYMBOL, {"trigger_valid": True}))
+                self.assertFalse(
+                    bot._maybe_manage_exit_runner(SYMBOL, {"trigger_valid": True})
+                )
                 self.assertTrue(state.exit_runner_active)
                 self.assertEqual(state.hard_stop_order["side"], "buy")
                 self.assertAlmostEqual(state.hard_stop_order["trigger_price"], 99.96)
 
                 bot.exchange.ticker = {"bid": 98.9, "ask": 99.0, "last": 99.0}
-                self.assertTrue(bot._maybe_manage_exit_runner(SYMBOL, {"trigger_valid": True}))
+                self.assertTrue(
+                    bot._maybe_manage_exit_runner(SYMBOL, {"trigger_valid": True})
+                )
                 runner_order = bot.exchange.created_orders[-1]
                 self.assertEqual(runner_order["side"], "buy")
                 self.assertEqual(runner_order["amount"], 70.0)
@@ -3607,7 +4104,9 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_tiny_partial_entry_timeout_closes_market_reduce_only(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, reduce_only_enabled=True, order_timeout_sec=1)
+            runtime = replace(
+                config.RUNTIME, reduce_only_enabled=True, order_timeout_sec=1
+            )
             risk = replace(
                 config.RISK,
                 dust_position_notional=1.0,
@@ -3657,7 +4156,9 @@ class UnifiedBotTests(unittest.TestCase):
     def test_dust_close_waits_when_closeable_amount_is_frozen(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            risk = replace(config.RISK, dust_position_notional=100.0, dust_close_enabled=True)
+            risk = replace(
+                config.RISK, dust_position_notional=100.0, dust_close_enabled=True
+            )
             with override_config(RUNTIME=runtime, RISK=risk):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3676,7 +4177,9 @@ class UnifiedBotTests(unittest.TestCase):
     def test_dust_close_caps_market_order_to_visible_closeable_amount(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            risk = replace(config.RISK, dust_position_notional=100.0, dust_close_enabled=True)
+            risk = replace(
+                config.RISK, dust_position_notional=100.0, dust_close_enabled=True
+            )
             with override_config(RUNTIME=runtime, RISK=risk):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -3716,10 +4219,26 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
 
-                self.assertTrue(bot._is_entry_signal_valid(self.entry_signal(score=0.04, rs30=0.002, rs60=0.003)))
-                self.assertFalse(bot._is_entry_signal_valid(self.entry_signal(score=0.02, rs30=0.002, rs60=0.003)))
-                self.assertFalse(bot._is_entry_signal_valid(self.entry_signal(score=0.04, rs30=0.002, rs60=0.001)))
-                self.assertFalse(bot._is_entry_signal_valid(self.entry_signal(score=0.04, rs30=0.0005, rs60=0.003)))
+                self.assertTrue(
+                    bot._is_entry_signal_valid(
+                        self.entry_signal(score=0.04, rs30=0.002, rs60=0.003)
+                    )
+                )
+                self.assertFalse(
+                    bot._is_entry_signal_valid(
+                        self.entry_signal(score=0.02, rs30=0.002, rs60=0.003)
+                    )
+                )
+                self.assertFalse(
+                    bot._is_entry_signal_valid(
+                        self.entry_signal(score=0.04, rs30=0.002, rs60=0.001)
+                    )
+                )
+                self.assertFalse(
+                    bot._is_entry_signal_valid(
+                        self.entry_signal(score=0.04, rs30=0.0005, rs60=0.003)
+                    )
+                )
 
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             strategy = replace(
@@ -3731,8 +4250,16 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
 
-                self.assertTrue(bot._is_entry_signal_valid(self.entry_signal(score=0.04, rs30=-0.002, rs60=-0.003)))
-                self.assertFalse(bot._is_entry_signal_valid(self.entry_signal(score=0.04, rs30=0.002, rs60=-0.003)))
+                self.assertTrue(
+                    bot._is_entry_signal_valid(
+                        self.entry_signal(score=0.04, rs30=-0.002, rs60=-0.003)
+                    )
+                )
+                self.assertFalse(
+                    bot._is_entry_signal_valid(
+                        self.entry_signal(score=0.04, rs30=0.002, rs60=-0.003)
+                    )
+                )
 
     def test_entry_gate_limits_to_top_ranked_symbols(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3754,17 +4281,27 @@ class UnifiedBotTests(unittest.TestCase):
                     "benchmark_ok": True,
                     "closed_candle_ts": 1000,
                     "symbols": {
-                        symbols[0]: self.entry_signal(score=0.03, rs30=0.003, rs60=0.003),
-                        symbols[1]: self.entry_signal(score=0.08, rs30=0.002, rs60=0.002),
-                        symbols[2]: self.entry_signal(score=0.05, rs30=0.004, rs60=0.004),
+                        symbols[0]: self.entry_signal(
+                            score=0.03, rs30=0.003, rs60=0.003
+                        ),
+                        symbols[1]: self.entry_signal(
+                            score=0.08, rs30=0.002, rs60=0.002
+                        ),
+                        symbols[2]: self.entry_signal(
+                            score=0.05, rs30=0.004, rs60=0.004
+                        ),
                     },
                 }
 
                 gate = bot._prepare_new_entry_gate()
 
-                self.assertEqual(gate["ranked_symbols"], [symbols[1], symbols[2], symbols[0]])
+                self.assertEqual(
+                    gate["ranked_symbols"], [symbols[1], symbols[2], symbols[0]]
+                )
                 self.assertEqual(gate["allowed_symbols"], {symbols[1], symbols[2]})
-                self.assertIn("entry_top_n_blocked", gate["blocked_reasons"][symbols[0]])
+                self.assertIn(
+                    "entry_top_n_blocked", gate["blocked_reasons"][symbols[0]]
+                )
 
     def test_entry_gate_skips_external_blocked_candidates_before_top_n(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3783,8 +4320,14 @@ class UnifiedBotTests(unittest.TestCase):
                 symbols = (SYMBOL, SECOND_SYMBOL, BTC_SYMBOL)
                 bot.entry_symbols = set(symbols)
                 bot.symbols = list(symbols)
-                bot.market_by_symbol = {SYMBOL: MARKET, SECOND_SYMBOL: SECOND_MARKET, BTC_SYMBOL: BTC_MARKET}
-                valid_context = self.external_context(spread_bps=0.0, htx_mid=10.0, mexc_mid=10.0)
+                bot.market_by_symbol = {
+                    SYMBOL: MARKET,
+                    SECOND_SYMBOL: SECOND_MARKET,
+                    BTC_SYMBOL: BTC_MARKET,
+                }
+                valid_context = self.external_context(
+                    spread_bps=0.0, htx_mid=10.0, mexc_mid=10.0
+                )
                 bot.external_price_feed = PerSymbolExternalPriceFeed(
                     {
                         SYMBOL: self.external_context(
@@ -3804,8 +4347,12 @@ class UnifiedBotTests(unittest.TestCase):
                     "closed_candle_ts": 1000,
                     "symbols": {
                         SYMBOL: self.entry_signal(score=0.10, rs30=0.003, rs60=0.003),
-                        SECOND_SYMBOL: self.entry_signal(score=0.08, rs30=0.002, rs60=0.002),
-                        BTC_SYMBOL: self.entry_signal(score=0.07, rs30=0.001, rs60=0.001),
+                        SECOND_SYMBOL: self.entry_signal(
+                            score=0.08, rs30=0.002, rs60=0.002
+                        ),
+                        BTC_SYMBOL: self.entry_signal(
+                            score=0.07, rs30=0.001, rs60=0.001
+                        ),
                     },
                 }
 
@@ -3814,7 +4361,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(gate["external_blocked_count"], 1)
                 self.assertNotIn(SYMBOL, gate["ranked_symbols"])
                 self.assertEqual(gate["allowed_symbols"], {SECOND_SYMBOL, BTC_SYMBOL})
-                self.assertIn("external_reference_invalid", gate["blocked_reasons"][SYMBOL])
+                self.assertIn(
+                    "external_reference_invalid", gate["blocked_reasons"][SYMBOL]
+                )
 
     def test_entry_gate_rate_limit_counts_recent_positions(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3840,14 +4389,21 @@ class UnifiedBotTests(unittest.TestCase):
                 bot.signal_cache = {
                     "benchmark_ok": True,
                     "closed_candle_ts": 1000,
-                    "symbols": {symbol: self.entry_signal(score=0.05) for symbol in symbols},
+                    "symbols": {
+                        symbol: self.entry_signal(score=0.05) for symbol in symbols
+                    },
                 }
 
                 gate = bot._prepare_new_entry_gate()
 
                 self.assertEqual(gate["allowed_symbols"], set())
                 self.assertEqual(gate["rate_remaining"], 0)
-                self.assertTrue(all("entry_rate_limited" in reason for reason in gate["blocked_reasons"].values()))
+                self.assertTrue(
+                    all(
+                        "entry_rate_limited" in reason
+                        for reason in gate["blocked_reasons"].values()
+                    )
+                )
 
     def test_entry_gate_crowded_mode_tightens_thresholds_and_top_n(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -3873,9 +4429,15 @@ class UnifiedBotTests(unittest.TestCase):
                     "benchmark_ok": True,
                     "closed_candle_ts": 1000,
                     "symbols": {
-                        symbols[0]: self.entry_signal(score=0.06, rs30=0.002, rs60=0.004),
-                        symbols[1]: self.entry_signal(score=0.04, rs30=0.004, rs60=0.004),
-                        symbols[2]: self.entry_signal(score=0.061, rs30=0.001, rs60=0.004),
+                        symbols[0]: self.entry_signal(
+                            score=0.06, rs30=0.002, rs60=0.004
+                        ),
+                        symbols[1]: self.entry_signal(
+                            score=0.04, rs30=0.004, rs60=0.004
+                        ),
+                        symbols[2]: self.entry_signal(
+                            score=0.061, rs30=0.001, rs60=0.004
+                        ),
                     },
                 }
 
@@ -3883,7 +4445,10 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertTrue(gate["crowded"])
                 self.assertEqual(gate["allowed_symbols"], {symbols[0]})
-                self.assertIn("entry_weighted_score_below_min", gate["blocked_reasons"][symbols[1]])
+                self.assertIn(
+                    "entry_weighted_score_below_min",
+                    gate["blocked_reasons"][symbols[1]],
+                )
                 self.assertIn("penalty_rs30", gate["blocked_reasons"][symbols[2]])
 
     def test_ema_long_entry_signal_is_valid(self):
@@ -3891,7 +4456,19 @@ class UnifiedBotTests(unittest.TestCase):
             strategy = self.ema_test_strategy()
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                closes = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                ]
                 benchmark_closes = [100.0] * 120
                 while len(benchmark_closes) < len(closes):
                     benchmark_closes.append(100.0)
@@ -3899,7 +4476,11 @@ class UnifiedBotTests(unittest.TestCase):
                 signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                 )
 
@@ -3927,12 +4508,28 @@ class UnifiedBotTests(unittest.TestCase):
                 bot = self.make_bot(Path(raw_tmp))
                 trigger_closes = [100.0 + index for index in range(79)] + [177.5]
                 macro_closes = [100.0 + index * 2.0 for index in range(80)]
-                pullback_closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                pullback_closes = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                ]
                 benchmark_closes = [100.0] * len(trigger_closes)
                 ctx = SignalContext(
                     closes=trigger_closes,
                     benchmark_closes=benchmark_closes,
-                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    btc_risk={
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                     cache_key=SYMBOL,
                     macro_closes=macro_closes,
@@ -3966,13 +4563,29 @@ class UnifiedBotTests(unittest.TestCase):
                 bot = self.make_bot(Path(raw_tmp))
                 trigger_closes = [200.0 - index for index in range(79)] + [122.5]
                 macro_closes = [260.0 - index * 2.0 for index in range(80)]
-                long_pullback = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                long_pullback = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                ]
                 pullback_closes = [300.0 - close for close in long_pullback]
                 benchmark_closes = [100.0] * len(trigger_closes)
                 ctx = SignalContext(
                     closes=trigger_closes,
                     benchmark_closes=benchmark_closes,
-                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    btc_risk={
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                     cache_key=SYMBOL,
                     macro_closes=macro_closes,
@@ -4005,12 +4618,28 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                closes = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                ]
                 benchmark_closes = [100.0] * len(closes)
                 ctx = SignalContext(
                     closes=closes,
                     benchmark_closes=benchmark_closes,
-                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    btc_risk={
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                     candles=ohlcv_series(closes),
                     cache_key=SYMBOL,
@@ -4058,8 +4687,12 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertIn("rs_confirm_valid=0", block_reason)
             self.assertIn("raw_score=0.012300", block_reason)
 
-            bot._record_signal_analytics("entry_gate_checked", symbol=SYMBOL, signal=signal)
-            with (Path(raw_tmp) / "signal_analytics.csv").open(newline="", encoding="utf-8") as handle:
+            bot._record_signal_analytics(
+                "entry_gate_checked", symbol=SYMBOL, signal=signal
+            )
+            with (Path(raw_tmp) / "signal_analytics.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
                 rows = list(csv.DictReader(handle))
 
             self.assertTrue(rows)
@@ -4096,7 +4729,19 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                closes = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                ]
                 benchmark_closes = [100.0] * len(closes)
                 volumes = [10.0] * (len(closes) - 1) + [80.0]
                 candles = ohlcv_series(closes, volumes=volumes)
@@ -4106,7 +4751,11 @@ class UnifiedBotTests(unittest.TestCase):
                 ctx = SignalContext(
                     closes=closes,
                     benchmark_closes=benchmark_closes,
-                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    btc_risk={
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                     candles=candles,
                     cache_key=SYMBOL,
@@ -4141,7 +4790,9 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                candles = [[index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)]
+                candles = [
+                    [index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)
+                ]
                 candles.append([59, 100.0, 101.0, 89.0, 90.0, 30.0])
 
                 context = bot._ema_market_structure_context(candles)
@@ -4159,7 +4810,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertFalse(context["volume_profile_valid"])
                 self.assertTrue(context["volume_profile_break"])
                 self.assertEqual(context["volume_spike_direction"], "short")
-                self.assertEqual(context["volume_reason"], "volume_profile_adverse_break")
+                self.assertEqual(
+                    context["volume_reason"], "volume_profile_adverse_break"
+                )
                 self.assertIn("volume_profile_break=1", block_reason)
                 self.assertIn("volume_spike_direction=short", block_reason)
 
@@ -4176,13 +4829,29 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                closes = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                ]
                 benchmark_closes = [100.0] * len(closes)
                 volumes = [1.0] * (len(closes) - 5) + [3.0] * 5
                 ctx = SignalContext(
                     closes=closes,
                     benchmark_closes=benchmark_closes,
-                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    btc_risk={
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                     candles=ohlcv_series(closes, volumes=volumes, range_width=8.0),
                     cache_key=SYMBOL,
@@ -4204,19 +4873,36 @@ class UnifiedBotTests(unittest.TestCase):
 
     def test_ema_pullback_recovery_requires_fresh_cross(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            strategy = self.ema_test_strategy(ema_pullback_recovery_max_cross_age_minutes=2)
+            strategy = self.ema_test_strategy(
+                ema_pullback_recovery_max_cross_age_minutes=2
+            )
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = (
-                    list(range(100, 201, 2))
-                    + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196, 198, 200]
-                )
+                closes = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                    198,
+                    200,
+                ]
                 benchmark_closes = [100.0] * len(closes)
 
                 signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                 )
 
@@ -4242,16 +4928,31 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = (
-                    list(range(100, 201, 2))
-                    + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196, 198, 200]
-                )
+                closes = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                    198,
+                    200,
+                ]
                 benchmark_closes = [100.0] * len(closes)
 
                 signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                 )
 
@@ -4261,14 +4962,28 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertFalse(signal["entry_pullback_gate_valid"])
                 self.assertFalse(signal["raw_entry_valid"])
                 self.assertFalse(signal["entry_valid"])
-                self.assertIn("penalty_ema_entry", bot._entry_signal_quality_block_reason(signal))
+                self.assertIn(
+                    "penalty_ema_entry", bot._entry_signal_quality_block_reason(signal)
+                )
 
     def test_signal_build_applies_macro_budget_and_ladder_multipliers(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = self.ema_test_strategy()
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                closes = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                ]
                 benchmark_closes = [100.0] * len(closes)
                 macro_context = self.macro_context(
                     regime="crypto_underperforms_gold",
@@ -4280,7 +4995,11 @@ class UnifiedBotTests(unittest.TestCase):
                 signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 0.80, "ladder_multiplier": 1.20, "reason": "btc_drop"},
+                    {
+                        "budget_multiplier": 0.80,
+                        "ladder_multiplier": 1.20,
+                        "reason": "btc_drop",
+                    },
                     latest_ts=1000,
                     macro_context=macro_context,
                 )
@@ -4301,7 +5020,19 @@ class UnifiedBotTests(unittest.TestCase):
             strategy = self.ema_test_strategy()
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = list(range(100, 201, 2)) + [198, 195, 192, 189, 186, 183, 180, 184, 188, 192, 196]
+                closes = list(range(100, 201, 2)) + [
+                    198,
+                    195,
+                    192,
+                    189,
+                    186,
+                    183,
+                    180,
+                    184,
+                    188,
+                    192,
+                    196,
+                ]
                 benchmark_closes = [100.0] * len(closes)
                 macro_context = self.macro_context(
                     regime="crypto_risk_on",
@@ -4313,7 +5044,11 @@ class UnifiedBotTests(unittest.TestCase):
                 signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "neutral"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "neutral",
+                    },
                     latest_ts=1000,
                     macro_context=macro_context,
                 )
@@ -4333,7 +5068,19 @@ class UnifiedBotTests(unittest.TestCase):
             strategy = self.ema_test_strategy()
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = list(range(200, 99, -2)) + [102, 105, 108, 111, 114, 117, 120, 116, 112, 108, 104]
+                closes = list(range(200, 99, -2)) + [
+                    102,
+                    105,
+                    108,
+                    111,
+                    114,
+                    117,
+                    120,
+                    116,
+                    112,
+                    108,
+                    104,
+                ]
                 benchmark_closes = [100.0] * len(closes)
                 macro_context = self.macro_context(
                     regime="crypto_underperforms_gold",
@@ -4345,7 +5092,11 @@ class UnifiedBotTests(unittest.TestCase):
                 signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "neutral"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "neutral",
+                    },
                     latest_ts=1000,
                     macro_context=macro_context,
                 )
@@ -4360,13 +5111,29 @@ class UnifiedBotTests(unittest.TestCase):
             strategy = self.ema_test_strategy()
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = list(range(200, 99, -2)) + [102, 105, 108, 111, 114, 117, 120, 116, 112, 108, 104]
+                closes = list(range(200, 99, -2)) + [
+                    102,
+                    105,
+                    108,
+                    111,
+                    114,
+                    117,
+                    120,
+                    116,
+                    112,
+                    108,
+                    104,
+                ]
                 benchmark_closes = [100.0] * len(closes)
 
                 signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                 )
 
@@ -4383,13 +5150,28 @@ class UnifiedBotTests(unittest.TestCase):
             strategy = self.ema_test_strategy()
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
-                closes = list(range(150, 99, -2)) + [102, 105, 108, 111, 114, 117, 120, 118, 116, 114]
+                closes = list(range(150, 99, -2)) + [
+                    102,
+                    105,
+                    108,
+                    111,
+                    114,
+                    117,
+                    120,
+                    118,
+                    116,
+                    114,
+                ]
                 benchmark_closes = [100.0] * len(closes)
 
                 signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                 )
 
@@ -4398,7 +5180,19 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertFalse(signal["entry_valid"])
 
     def test_ema_router_routes_same_market_to_one_profile_side(self):
-        closes = list(range(200, 99, -2)) + [102, 105, 108, 111, 114, 117, 120, 116, 112, 108, 104]
+        closes = list(range(200, 99, -2)) + [
+            102,
+            105,
+            108,
+            111,
+            114,
+            117,
+            120,
+            116,
+            112,
+            108,
+            104,
+        ]
         benchmark_closes = [100.0] * len(closes)
 
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -4409,7 +5203,11 @@ class UnifiedBotTests(unittest.TestCase):
                 long_signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                 )
 
@@ -4427,7 +5225,11 @@ class UnifiedBotTests(unittest.TestCase):
                 short_signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                 )
 
@@ -4455,7 +5257,11 @@ class UnifiedBotTests(unittest.TestCase):
                 signal = bot._build_signal_from_closes(
                     closes,
                     benchmark_closes,
-                    {"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "test"},
+                    {
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "test",
+                    },
                     latest_ts=1000,
                 )
 
@@ -4476,21 +5282,29 @@ class UnifiedBotTests(unittest.TestCase):
                     state,
                     reference_price=10.0,
                     is_new_position=True,
-                    signal={"budget_multiplier": 1.0, "volatility_budget_multiplier": 0.50},
+                    signal={
+                        "budget_multiplier": 1.0,
+                        "volatility_budget_multiplier": 0.50,
+                    },
                 )
                 expanded_budget, expanded_reason = bot._risk_budget(
                     SYMBOL,
                     state,
                     reference_price=10.0,
                     is_new_position=True,
-                    signal={"budget_multiplier": 1.0, "volatility_budget_multiplier": 1.50},
+                    signal={
+                        "budget_multiplier": 1.0,
+                        "volatility_budget_multiplier": 1.50,
+                    },
                 )
 
                 self.assertAlmostEqual(reduced_budget, 10.0)
                 self.assertAlmostEqual(expanded_budget, 30.0)
                 self.assertIn("effective_budget_multiplier=0.500", reduced_reason)
                 self.assertIn("effective_budget_multiplier=1.500", expanded_reason)
-                self.assertAlmostEqual(bot._last_risk_budget_context["planned_notional"], 900.0)
+                self.assertAlmostEqual(
+                    bot._last_risk_budget_context["planned_notional"], 900.0
+                )
                 self.assertAlmostEqual(bot._last_risk_budget_context["free"], 1000.0)
 
     def test_risk_budget_counts_combined_profile_notional(self):
@@ -4518,7 +5332,10 @@ class UnifiedBotTests(unittest.TestCase):
                     bot._get_state(SYMBOL),
                     reference_price=10.0,
                     is_new_position=True,
-                    signal={"budget_multiplier": 1.0, "volatility_budget_multiplier": 1.0},
+                    signal={
+                        "budget_multiplier": 1.0,
+                        "volatility_budget_multiplier": 1.0,
+                    },
                 )
 
                 # current_total_notional includes other_state.position_size (490) * 10 = 4900
@@ -4540,7 +5357,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}
+                ]
                 bot.exchange.ticker = {"bid": 9.98, "ask": 10.0, "last": 9.99}
 
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
@@ -4563,7 +5382,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}
+                ]
                 bot.exchange.ticker = {"bid": 9.9, "ask": 10.0, "last": 9.95}
                 signal = self.entry_signal(ts=1000)
                 signal["atr_rate"] = 0.03
@@ -4588,7 +5409,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}
+                ]
 
                 bot.exchange.ticker = {"bid": 9.95, "ask": 9.97, "last": 9.96}
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
@@ -4615,7 +5438,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.2, "amount": 20.0}
+                ]
                 bot.exchange.ticker = {"bid": 9.80, "ask": 9.82, "last": 9.81}
                 signal = self.entry_signal(ts=1000)
                 signal["atr_rate"] = 0.03
@@ -4639,7 +5464,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_available = 20.0
                 state.entry_price = 10.2
                 state.average_stage = 1
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
                 bot.exchange.ticker = {"bid": 9.75, "ask": 9.77, "last": 9.76}
                 signal = self.entry_signal(ts=1000)
                 signal["entry_valid"] = False
@@ -4653,9 +5480,13 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 1)
-                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn("ema_averaging_pullback_recovery_required", rows[-1]["block_reason"])
+                self.assertIn(
+                    "ema_averaging_pullback_recovery_required", rows[-1]["block_reason"]
+                )
 
     def test_first_ema_averaging_can_bypass_pullback_when_btc_not_against(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -4671,7 +5502,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.2
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
                 bot.exchange.ticker = {"bid": 9.75, "ask": 9.77, "last": 9.76}
                 signal = self.entry_signal(ts=1000)
                 signal["entry_valid"] = False
@@ -4699,7 +5532,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.2
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
                 bot.exchange.ticker = {"bid": 9.75, "ask": 9.77, "last": 9.76}
                 signal = self.entry_signal(ts=1000)
                 signal["entry_valid"] = False
@@ -4712,9 +5547,13 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 0)
-                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn("ema_averaging_pullback_recovery_required", rows[-1]["block_reason"])
+                self.assertIn(
+                    "ema_averaging_pullback_recovery_required", rows[-1]["block_reason"]
+                )
 
     def test_ema_averaging_places_power_sized_entry_after_drawdown(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -4735,18 +5574,24 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.2
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
 
                 signal = self.entry_signal(ts=1000)
                 signal.update({"ladder_multiplier": 1.0, "budget_multiplier": 1.0})
 
-                budget, reason = bot._ema_averaging_budget(SYMBOL, state, reference_price=9.9)
+                budget, reason = bot._ema_averaging_budget(
+                    SYMBOL, state, reference_price=9.9
+                )
                 bot._maybe_place_average_buy(SYMBOL, signal)
 
                 self.assertTrue(state.entry_orders)
                 self.assertEqual(state.average_stage, 1)
                 self.assertIsNotNone(state.last_average_at)
-                self.assertAlmostEqual(budget * config.RISK.leverage, 20.0 * 10.2 * 0.45)
+                self.assertAlmostEqual(
+                    budget * config.RISK.leverage, 20.0 * 10.2 * 0.45
+                )
                 self.assertIn("ema_average_power=0.800", reason)
 
     def test_short_averaging_triggers_immediately_on_signal(self):
@@ -4764,7 +5609,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "buy", "price": 9.9, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "buy", "price": 9.9, "amount": 20.0}
+                ]
                 bot.exchange.ticker = {"bid": 9.9, "ask": 10.1, "last": 10.0}
 
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
@@ -4779,22 +5626,32 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
-                    self.external_context(spread_bps=0.0, htx_change_1m_bps=-70.0, mexc_change_1m_bps=-55.0)
+                    self.external_context(
+                        spread_bps=0.0,
+                        htx_change_1m_bps=-70.0,
+                        mexc_change_1m_bps=-55.0,
+                    )
                 )
                 state = bot._get_state(SYMBOL)
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.2
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
 
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
 
                 self.assertFalse(state.entry_orders)
                 self.assertEqual(state.average_stage, 0)
-                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertEqual(rows[-1]["decision"], "averaging_checked")
-                self.assertIn("external_directional_1m_blocked", rows[-1]["block_reason"])
+                self.assertIn(
+                    "external_directional_1m_blocked", rows[-1]["block_reason"]
+                )
 
     def test_ema_averaging_uses_add_signal_even_if_full_entry_invalid(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -4806,7 +5663,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.2
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
                 signal = self.entry_signal(ts=1000)
                 signal["entry_valid"] = False
                 signal["add_valid"] = True
@@ -4842,7 +5701,15 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._manage_entry_orders(
                     SYMBOL,
                     signal,
-                    open_orders=[{"id": "avg_1", "symbol": SYMBOL, "side": config.ENTRY_SIDE, "amount": 5.0, "remaining": 5.0}],
+                    open_orders=[
+                        {
+                            "id": "avg_1",
+                            "symbol": SYMBOL,
+                            "side": config.ENTRY_SIDE,
+                            "amount": 5.0,
+                            "remaining": 5.0,
+                        }
+                    ],
                 )
 
                 self.assertEqual(len(state.entry_orders), 1)
@@ -4890,7 +5757,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 20.0
                 state.position_available = 20.0
                 state.entry_price = 10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
 
                 # Averaging still requires the configured drawdown threshold.
                 bot.exchange.ticker = {"bid": 9.79, "ask": 9.80, "last": 9.79}
@@ -4931,11 +5800,13 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 10.0
                 state.initial_entry_notional = 1000.0
 
-                budget, reason = bot._ema_averaging_budget(SYMBOL, state, reference_price=10.0)
+                budget, reason = bot._ema_averaging_budget(
+                    SYMBOL, state, reference_price=10.0
+                )
                 planned_notional = budget * config.RISK.leverage
                 expected_notional = 0.45 * 2000.0
 
-                expected_notional = 0.45 * 1000.0 * (2.0 ** 0.8)
+                expected_notional = 0.45 * 1000.0 * (2.0**0.8)
                 self.assertAlmostEqual(planned_notional, expected_notional)
                 self.assertIn("ratio=2.000000", reason)
                 self.assertIn("ema_average_base_fraction=0.450", reason)
@@ -4950,7 +5821,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 10.2
                 state.sell_ladder_mode = "breakeven"
                 state.breakeven_activated_at = time.time()
-                state.sell_ladder_orders = [{"id": "be", "side": "sell", "price": 10.21, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "be", "side": "sell", "price": 10.21, "amount": 20.0}
+                ]
 
                 bot._maybe_place_average_buy(
                     SYMBOL,
@@ -4976,7 +5849,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_available = 20.0
                 state.entry_price = 10.2
                 state.cycle_opened_at = time.time() - 49.0 * 60.0 * 60.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
 
                 bot._maybe_place_average_buy(SYMBOL, self.entry_signal(ts=1000))
 
@@ -5000,11 +5875,18 @@ class UnifiedBotTests(unittest.TestCase):
                 state.unrealized_pnl = 1.0
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                    samples = list(executor.map(lambda _: bot._account_pnl_context(force_sample=True), range(40)))
+                    samples = list(
+                        executor.map(
+                            lambda _: bot._account_pnl_context(force_sample=True),
+                            range(40),
+                        )
+                    )
 
                 self.assertEqual(len(samples), 40)
                 self.assertEqual(len(bot.account_pnl_runtime["history"]), 40)
-                self.assertEqual(max(sample["history_samples"] for sample in samples), 40)
+                self.assertEqual(
+                    max(sample["history_samples"] for sample in samples), 40
+                )
 
     def test_account_profit_unload_places_reduce_only_partial_close(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5028,17 +5910,24 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.net_open_pnl = 10.0
                 state.unrealized_pnl = 10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 101.0, "amount": 100.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 101.0, "amount": 100.0}
+                ]
                 bot.exchange.ticker = {"bid": 101.0, "ask": 101.1, "last": 101.0}
                 bot.account_pnl_runtime["history"] = [
                     {"ts": time.time() - 60.0, "open_pnl": 1.0},
                     {"ts": time.time() - 30.0, "open_pnl": 4.0},
                 ]
 
-                applied = bot._maybe_apply_account_profit_unload(SYMBOL, self.entry_signal())
+                applied = bot._maybe_apply_account_profit_unload(
+                    SYMBOL, self.entry_signal()
+                )
 
                 self.assertTrue(applied)
-                self.assertIn(("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 order = bot.exchange.created_orders[0]
                 self.assertEqual(order["side"], "sell")
@@ -5068,30 +5957,65 @@ class UnifiedBotTests(unittest.TestCase):
                 first.entry_price = 100.0
                 first.net_open_pnl = 40.0
                 first.unrealized_pnl = 40.0
-                first.sell_ladder_orders = [{"id": "tp1", "side": "sell", "price": 101.0, "amount": 10.0}]
+                first.sell_ladder_orders = [
+                    {"id": "tp1", "side": "sell", "price": 101.0, "amount": 10.0}
+                ]
                 second = bot._get_state(SECOND_SYMBOL)
                 second.position_size = 10.0
                 second.position_available = 10.0
                 second.entry_price = 100.0
                 second.net_open_pnl = 30.0
                 second.unrealized_pnl = 30.0
-                second.sell_ladder_orders = [{"id": "tp2", "side": "sell", "price": 101.0, "amount": 10.0}]
+                second.sell_ladder_orders = [
+                    {"id": "tp2", "side": "sell", "price": 101.0, "amount": 10.0}
+                ]
                 now = time.time()
                 bot.account_pnl_runtime["history"] = [
-                    {"ts": now - 60.0, "open_pnl": 110.0, "open_notional": 2000.0, "open_pnl_rate": 0.055},
-                    {"ts": now - 30.0, "open_pnl": 90.0, "open_notional": 2000.0, "open_pnl_rate": 0.045},
+                    {
+                        "ts": now - 60.0,
+                        "open_pnl": 110.0,
+                        "open_notional": 2000.0,
+                        "open_pnl_rate": 0.055,
+                    },
+                    {
+                        "ts": now - 30.0,
+                        "open_pnl": 90.0,
+                        "open_notional": 2000.0,
+                        "open_pnl_rate": 0.045,
+                    },
                 ]
                 bot.account_pnl_runtime["last_sample_at"] = now
 
-                applied = bot._maybe_apply_account_pnl_trailing(SYMBOL, self.entry_signal())
+                applied = bot._maybe_apply_account_pnl_trailing(
+                    SYMBOL, self.entry_signal()
+                )
 
                 self.assertTrue(applied)
                 self.assertEqual(len(bot.exchange.created_orders), 2)
-                self.assertTrue(all(order["type"] == "market" for order in bot.exchange.created_orders))
-                self.assertTrue(all(order["params"].get("reduceOnly") for order in bot.exchange.created_orders))
-                self.assertEqual({order["symbol"] for order in bot.exchange.created_orders}, {SYMBOL, SECOND_SYMBOL})
-                self.assertIn(("tp1", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
-                self.assertIn(("tp2", SECOND_SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertTrue(
+                    all(
+                        order["type"] == "market"
+                        for order in bot.exchange.created_orders
+                    )
+                )
+                self.assertTrue(
+                    all(
+                        order["params"].get("reduceOnly")
+                        for order in bot.exchange.created_orders
+                    )
+                )
+                self.assertEqual(
+                    {order["symbol"] for order in bot.exchange.created_orders},
+                    {SYMBOL, SECOND_SYMBOL},
+                )
+                self.assertIn(
+                    ("tp1", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
+                self.assertIn(
+                    ("tp2", SECOND_SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 self.assertEqual(first.sell_ladder_mode, "account_unload")
                 self.assertEqual(second.sell_ladder_mode, "account_unload")
 
@@ -5115,7 +6039,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 10.2
                 state.net_open_pnl = -10.0
                 state.unrealized_pnl = -10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
                 bot.exchange.ticker = {"bid": 9.9, "ask": 10.0, "last": 9.9}
                 now = time.time()
                 bot.account_pnl_runtime["history"] = [
@@ -5152,7 +6078,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 10.2
                 state.net_open_pnl = -8.0
                 state.unrealized_pnl = -8.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 10.3, "amount": 20.0}
+                ]
                 bot.exchange.ticker = {"bid": 9.9, "ask": 10.0, "last": 9.9}
                 now = time.time()
                 bot.account_pnl_runtime["history"] = [
@@ -5166,13 +6094,22 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertTrue(state.entry_orders)
                 self.assertEqual(state.average_stage, 1)
-                self.assertIn("account_budget_scale=0.250", state.entry_orders[0]["reason"])
-                self.assertAlmostEqual(state.planned_quote_budget * config.RISK.leverage, 20.0 * 10.2 * 0.50 * 0.25)
+                self.assertIn(
+                    "account_budget_scale=0.250", state.entry_orders[0]["reason"]
+                )
+                self.assertAlmostEqual(
+                    state.planned_quote_budget * config.RISK.leverage,
+                    20.0 * 10.2 * 0.50 * 0.25,
+                )
 
     def test_ema_breakeven_activates_without_market_or_stop_order(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, ema_breakeven_after_hours=48.0, ema_breakeven_fee_buffer=0.0002)
+            strategy = replace(
+                config.STRATEGY,
+                ema_breakeven_after_hours=48.0,
+                ema_breakeven_fee_buffer=0.0002,
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -5180,21 +6117,33 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_available = 10.0
                 state.entry_price = 100.0
                 state.cycle_opened_at = time.time() - 48.1 * 60.0 * 60.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 101.0, "amount": 10.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 101.0, "amount": 10.0}
+                ]
 
-                applied = bot._maybe_apply_time_based_exit(SYMBOL, signal={"valid": True, "add_valid": True})
+                applied = bot._maybe_apply_time_based_exit(
+                    SYMBOL, signal={"valid": True, "add_valid": True}
+                )
 
                 self.assertTrue(applied)
                 self.assertEqual(state.sell_ladder_mode, "breakeven")
                 self.assertTrue(state.frozen_no_more_buys)
                 self.assertIsNotNone(state.breakeven_activated_at)
-                self.assertIn(("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 order = bot.exchange.created_orders[0]
                 self.assertEqual(order["type"], "limit")
                 self.assertEqual(order["side"], "sell")
                 self.assertTrue(order["params"].get("reduceOnly"))
-                self.assertFalse(any(item["type"].startswith("stop") or item["type"] == "market" for item in bot.exchange.created_orders))
+                self.assertFalse(
+                    any(
+                        item["type"].startswith("stop") or item["type"] == "market"
+                        for item in bot.exchange.created_orders
+                    )
+                )
 
     def test_hard_stop_loss_places_reduce_only_tpsl_for_long_position(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5227,7 +6176,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(order["params"].get("reduceOnly"))
                 self.assertEqual(order["params"].get("stopLossPrice"), 95.0)
                 self.assertEqual(state.hard_stop_order["id"], order["id"])
-                self.assertEqual(state.hard_stop_order["cancel_params"], {"stopLossTakeProfit": True})
+                self.assertEqual(
+                    state.hard_stop_order["cancel_params"], {"stopLossTakeProfit": True}
+                )
 
     def test_hard_stop_loss_uses_atr_cap_when_signal_volatility_is_wider(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5308,7 +6259,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(order["params"].get("reduceOnly"))
                 self.assertNotIn("stopLossPrice", order["params"])
 
-    def test_soft_defensive_exit_waits_when_short_signal_is_alive_and_btc_not_against(self):
+    def test_soft_defensive_exit_waits_when_short_signal_is_alive_and_btc_not_against(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             strategy = replace(
@@ -5325,7 +6278,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_available = 10.0
                 state.position_side = "short"
                 state.entry_price = 10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "buy", "price": 9.9, "amount": 10.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "buy", "price": 9.9, "amount": 10.0}
+                ]
                 bot.exchange.ticker = {"bid": 10.29, "ask": 10.31, "last": 10.30}
                 signal = self.entry_signal(ts=1000)
                 signal["pullback_valid"] = False
@@ -5359,7 +6314,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_available = 10.0
                 state.position_side = "short"
                 state.entry_price = 10.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "buy", "price": 9.9, "amount": 10.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "buy", "price": 9.9, "amount": 10.0}
+                ]
                 bot.exchange.ticker = {"bid": 10.29, "ask": 10.31, "last": 10.30}
                 signal = self.entry_signal(ts=1000)
                 signal["trigger_valid"] = False
@@ -5374,7 +6331,10 @@ class UnifiedBotTests(unittest.TestCase):
                 placed = bot._maybe_apply_soft_defensive_exit(SYMBOL, signal)
 
                 self.assertTrue(placed)
-                self.assertIn(("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 self.assertEqual(state.sell_ladder_mode, "soft_defensive_exit")
                 self.assertEqual(state.soft_defensive_consecutive_signals, 2)
                 self.assertAlmostEqual(state.soft_defensive_exit_fraction, 0.33)
@@ -5384,7 +6344,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(order["side"], "buy")
                 self.assertEqual(order["amount"], 3.0)
                 self.assertTrue(order["params"].get("reduceOnly"))
-                self.assertEqual(state.sell_ladder_orders[0]["reason"], "soft_defensive_exit_partial")
+                self.assertEqual(
+                    state.sell_ladder_orders[0]["reason"], "soft_defensive_exit_partial"
+                )
 
     def test_soft_defensive_wait_clears_freeze_when_signal_recovers_before_order(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
@@ -5461,7 +6423,10 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.sell_ladder_mode, "normal")
                 self.assertFalse(state.sell_ladder_orders)
                 self.assertFalse(state.frozen_no_more_buys)
-                self.assertIn(("soft_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("soft_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
 
     def test_hard_stop_loss_mirrors_trigger_for_short_position(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
@@ -5486,7 +6451,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(order["side"], "buy")
                 self.assertEqual(order["params"].get("stopLossPrice"), 105.0)
 
-    def test_hard_stop_loss_cancels_tp_ladder_and_retries_when_closeable_is_reserved(self):
+    def test_hard_stop_loss_cancels_tp_ladder_and_retries_when_closeable_is_reserved(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
             strategy = replace(
@@ -5502,7 +6469,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 10.0
                 state.position_available = 10.0
                 state.entry_price = 100.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 101.0, "amount": 10.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 101.0, "amount": 10.0}
+                ]
                 original_create_order = bot.exchange.create_order
                 calls = {"count": 0}
 
@@ -5513,7 +6482,9 @@ class UnifiedBotTests(unittest.TestCase):
                             'htx {"status":"error","err_code":1492,'
                             '"err_msg":"Amount of Reduce Only order exceeds the amount available to close."}'
                         )
-                    return original_create_order(symbol, type, side, amount, price, params=params)
+                    return original_create_order(
+                        symbol, type, side, amount, price, params=params
+                    )
 
                 bot.exchange.create_order = reject_first_stop
 
@@ -5521,10 +6492,15 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertTrue(placed)
                 self.assertEqual(calls["count"], 1)
-                self.assertIn(("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(len(bot.exchange.created_orders), 1)
-                self.assertEqual(state.hard_stop_order["id"], bot.exchange.created_orders[0]["id"])
+                self.assertEqual(
+                    state.hard_stop_order["id"], bot.exchange.created_orders[0]["id"]
+                )
 
     def test_hard_stop_loss_crossed_trigger_switches_to_reduce_only_market_close(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5543,7 +6519,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_available = 0.0
                 state.position_frozen = 10.0
                 state.entry_price = 100.0
-                state.sell_ladder_orders = [{"id": "tp", "side": "sell", "price": 101.0, "amount": 10.0}]
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 101.0, "amount": 10.0}
+                ]
                 bot.exchange.reject_stop_loss_trigger_crossed = True
 
                 placed = bot._ensure_hard_stop_loss(SYMBOL)
@@ -5552,7 +6530,10 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(state.frozen_no_more_buys)
                 self.assertEqual(state.sell_ladder_mode, "hard_stop_loss")
                 self.assertEqual(state.sell_ladder_orders, [])
-                self.assertIn(("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 order = bot.exchange.created_orders[0]
                 self.assertEqual(order["type"], "market")
@@ -5562,16 +6543,30 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertNotIn("stopLossPrice", order["params"])
                 self.assertEqual(state.hard_stop_order["id"], order["id"])
                 self.assertTrue(state.hard_stop_order["market_close"])
-                self.assertEqual(state.hard_stop_order["reason"], "hard_stop_loss_market_close")
+                self.assertEqual(
+                    state.hard_stop_order["reason"], "hard_stop_loss_market_close"
+                )
 
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
-                crossed = [row for row in rows if row["event"] == "hard_stop_loss_trigger_crossed"]
+                crossed = [
+                    row
+                    for row in rows
+                    if row["event"] == "hard_stop_loss_trigger_crossed"
+                ]
                 self.assertTrue(crossed)
                 self.assertEqual(crossed[-1]["error_code"], "1407")
-                self.assertTrue(any(row["event"] == "hard_stop_loss_market_close_placed" for row in rows))
+                self.assertTrue(
+                    any(
+                        row["event"] == "hard_stop_loss_market_close_placed"
+                        for row in rows
+                    )
+                )
                 self.assertFalse(
-                    any(row["reason"].startswith("hard_stop_loss_order_rejected") for row in rows)
+                    any(
+                        row["reason"].startswith("hard_stop_loss_order_rejected")
+                        for row in rows
+                    )
                 )
 
     def test_hard_stop_loss_spaced_htx_1407_switches_to_reduce_only_market_close(self):
@@ -5592,14 +6587,18 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 original_create_order = bot.exchange.create_order
 
-                def reject_stop_with_spaced_code(symbol, type, side, amount, price, params=None):
+                def reject_stop_with_spaced_code(
+                    symbol, type, side, amount, price, params=None
+                ):
                     params = params or {}
                     if "stopLossPrice" in params:
                         raise RuntimeError(
                             'htx {"status":"error","err_code": 1407,'
                             '"err_msg":"The stop loss price shall not be >= 98USDT"}'
                         )
-                    return original_create_order(symbol, type, side, amount, price, params=params)
+                    return original_create_order(
+                        symbol, type, side, amount, price, params=params
+                    )
 
                 bot.exchange.create_order = reject_stop_with_spaced_code
 
@@ -5647,9 +6646,13 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.hard_stop_order["id"], order["id"])
                 self.assertTrue(state.hard_stop_order["market_close"])
 
-    def test_pending_hard_stop_market_close_is_not_duplicated_before_position_sync(self):
+    def test_pending_hard_stop_market_close_is_not_duplicated_before_position_sync(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, reduce_only_enabled=True, poll_interval_sec=5.0)
+            runtime = replace(
+                config.RUNTIME, reduce_only_enabled=True, poll_interval_sec=5.0
+            )
             strategy = replace(
                 config.STRATEGY,
                 hard_stop_loss_enabled=True,
@@ -5677,7 +6680,10 @@ class UnifiedBotTests(unittest.TestCase):
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertTrue(
-                    any(row["event"] == "hard_stop_loss_market_close_pending" for row in rows)
+                    any(
+                        row["event"] == "hard_stop_loss_market_close_pending"
+                        for row in rows
+                    )
                 )
 
     def test_hard_stop_loss_market_close_retries_after_closeable_rejection(self):
@@ -5713,7 +6719,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(second)
                 self.assertEqual(bot.exchange.create_order_calls, 3)
                 self.assertEqual(len(bot.exchange.created_orders), 1)
-                self.assertNotIn("stopLossPrice", bot.exchange.created_orders[0]["params"])
+                self.assertNotIn(
+                    "stopLossPrice", bot.exchange.created_orders[0]["params"]
+                )
 
     def test_hard_stop_loss_rejection_logs_original_exception(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5740,14 +6748,17 @@ class UnifiedBotTests(unittest.TestCase):
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
                 errors = [
-                    row for row in rows
+                    row
+                    for row in rows
                     if row["event"] == "reduce_only_violation_prevented"
                     and row["reason"].startswith("hard_stop_loss_order_rejected")
                 ]
                 self.assertTrue(errors)
                 self.assertEqual(errors[-1]["exception_type"], "RuntimeError")
                 self.assertEqual(errors[-1]["error_code"], "1492")
-                self.assertIn("Amount of Reduce Only order exceeds", errors[-1]["message"])
+                self.assertIn(
+                    "Amount of Reduce Only order exceeds", errors[-1]["message"]
+                )
 
     def test_ema_pullback_default_matches_fast_trigger_router(self):
         with config.use_profile("long"):
@@ -5767,7 +6778,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.ema_averaging_atr_period, 14)
             self.assertEqual(config.STRATEGY.ema_averaging_atr_multiplier, 1.0)
             self.assertEqual(config.STRATEGY.ema_averaging_min_atr_multiplier, 1.0)
-            self.assertEqual(config.STRATEGY.ema_averaging_min_daily_volatility_fraction, 0.18)
+            self.assertEqual(
+                config.STRATEGY.ema_averaging_min_daily_volatility_fraction, 0.18
+            )
             self.assertTrue(config.STRATEGY.ema_averaging_require_pullback_recovery)
             self.assertEqual(config.STRATEGY.ema_max_averaging_stages, 2)
             self.assertEqual(config.STRATEGY.max_buy_stages, 3)
@@ -5808,13 +6821,21 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.controlled_loss_ramp_minutes, 24.0 * 60.0)
             self.assertEqual(config.STRATEGY.controlled_loss_reprice_minutes, 60.0)
             self.assertEqual(config.STRATEGY.controlled_loss_macro_gap_reference, 0.02)
-            self.assertEqual(config.STRATEGY.controlled_loss_macro_max_speed_multiplier, 2.0)
+            self.assertEqual(
+                config.STRATEGY.controlled_loss_macro_max_speed_multiplier, 2.0
+            )
             self.assertTrue(config.STRATEGY.controlled_loss_volatility_speed_enabled)
             self.assertEqual(config.STRATEGY.controlled_loss_volatility_reference, 0.0)
-            self.assertEqual(config.STRATEGY.controlled_loss_volatility_trigger_multiplier, 1.5)
-            self.assertEqual(config.STRATEGY.controlled_loss_volatility_max_speed_multiplier, 3.0)
+            self.assertEqual(
+                config.STRATEGY.controlled_loss_volatility_trigger_multiplier, 1.5
+            )
+            self.assertEqual(
+                config.STRATEGY.controlled_loss_volatility_max_speed_multiplier, 3.0
+            )
             self.assertEqual(config.STRATEGY.controlled_loss_volatility_exponent, 2.0)
-            self.assertEqual(config.STRATEGY.controlled_loss_volatility_reprice_min_move_delta, 0.05)
+            self.assertEqual(
+                config.STRATEGY.controlled_loss_volatility_reprice_min_move_delta, 0.05
+            )
             self.assertTrue(config.STRATEGY.hard_stop_loss_enabled)
             self.assertEqual(config.STRATEGY.hard_stop_loss_pct, 0.02)
             self.assertEqual(config.STRATEGY.hard_stop_loss_min_emergency_pct, 0.04)
@@ -5823,7 +6844,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.hard_stop_loss_atr_max_pct, 0.03)
             self.assertTrue(config.STRATEGY.soft_defensive_exit_enabled)
             self.assertEqual(config.STRATEGY.soft_defensive_exit_min_drawdown, 0.02)
-            self.assertEqual(config.STRATEGY.soft_defensive_exit_btc_against_return, 0.003)
+            self.assertEqual(
+                config.STRATEGY.soft_defensive_exit_btc_against_return, 0.003
+            )
             self.assertEqual(config.STRATEGY.soft_defensive_exit_confirmations, 2)
             self.assertEqual(config.STRATEGY.soft_defensive_exit_initial_fraction, 0.33)
             self.assertEqual(config.STRATEGY.soft_defensive_exit_step_fraction, 0.33)
@@ -5846,7 +6869,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(periods["ema_pullback_slow"], 72)
             self.assertEqual(periods["ema_trigger_fast"], 24)
             self.assertEqual(periods["ema_trigger_slow"], 72)
-            self.assertEqual(bot._ema_pullback_recovery_windows(converted=True), (144, 36))
+            self.assertEqual(
+                bot._ema_pullback_recovery_windows(converted=True), (144, 36)
+            )
             self.assertEqual(bot._ema_required_history("pullback", converted=True), 216)
 
     def test_rs_windows_convert_to_trigger_timeframe(self):
@@ -5866,10 +6891,26 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(STRATEGY=strategy, SIGNALS=signals):
                 bot = self.make_bot(Path(raw_tmp))
                 closes = [
-                    80.0, 82.0, 84.0, 86.0, 88.0,
-                    90.0, 89.0, 90.0, 91.0, 92.0,
-                    93.0, 94.0, 95.0, 100.0, 102.0,
-                    104.0, 106.0, 108.0, 110.0, 112.0,
+                    80.0,
+                    82.0,
+                    84.0,
+                    86.0,
+                    88.0,
+                    90.0,
+                    89.0,
+                    90.0,
+                    91.0,
+                    92.0,
+                    93.0,
+                    94.0,
+                    95.0,
+                    100.0,
+                    102.0,
+                    104.0,
+                    106.0,
+                    108.0,
+                    110.0,
+                    112.0,
                 ]
                 benchmark = [100.0] * len(closes)
 
@@ -5886,8 +6927,12 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertIsNotNone(signal)
-                self.assertTrue(math.isclose(signal["rs30"], math.log(112.0 / 100.0), rel_tol=1e-12))
-                self.assertTrue(math.isclose(signal["rs60"], math.log(112.0 / 90.0), rel_tol=1e-12))
+                self.assertTrue(
+                    math.isclose(signal["rs30"], math.log(112.0 / 100.0), rel_tol=1e-12)
+                )
+                self.assertTrue(
+                    math.isclose(signal["rs60"], math.log(112.0 / 90.0), rel_tol=1e-12)
+                )
                 self.assertEqual(signal["btc_return_30m"], 0.0)
 
     def test_signal_builder_handles_missing_macro_context(self):
@@ -5904,9 +6949,15 @@ class UnifiedBotTests(unittest.TestCase):
                 ctx = SignalContext(
                     closes=closes,
                     benchmark_closes=benchmark,
-                    btc_risk={"budget_multiplier": 1.0, "ladder_multiplier": 1.0, "reason": "neutral"},
+                    btc_risk={
+                        "budget_multiplier": 1.0,
+                        "ladder_multiplier": 1.0,
+                        "reason": "neutral",
+                    },
                     latest_ts=1000,
-                    candles=ohlcv_series(closes, volumes=[1.0] * (len(closes) - 5) + [3.0] * 5),
+                    candles=ohlcv_series(
+                        closes, volumes=[1.0] * (len(closes) - 5) + [3.0] * 5
+                    ),
                     cache_key=SYMBOL,
                     macro_context=None,
                 )
@@ -5938,7 +6989,9 @@ class UnifiedBotTests(unittest.TestCase):
                 trigger_start,
                 volumes=trigger_volumes,
             )
-            bot.exchange.ohlcv[(SYMBOL, "1h")] = ohlcv_series(macro_closes, 60 * 60, macro_start)
+            bot.exchange.ohlcv[(SYMBOL, "1h")] = ohlcv_series(
+                macro_closes, 60 * 60, macro_start
+            )
 
             updated = bot._update_signal_cache_if_needed()
 
@@ -5952,7 +7005,9 @@ class UnifiedBotTests(unittest.TestCase):
             limits = {}
             for call in bot.exchange.ohlcv_calls:
                 timeframe = call["timeframe"]
-                limits[timeframe] = max(limits.get(timeframe, 0), int(call["limit"] or 0))
+                limits[timeframe] = max(
+                    limits.get(timeframe, 0), int(call["limit"] or 0)
+                )
             self.assertLess(limits["1h"], 200)
             self.assertLessEqual(limits["5m"], 1500)
 
@@ -5999,7 +7054,9 @@ class UnifiedBotTests(unittest.TestCase):
                     if call["symbol"] == SYMBOL and call["timeframe"] == "1m"
                 ]
                 self.assertTrue(symbol_limits)
-                self.assertGreaterEqual(max(symbol_limits), strategy.ema_volume_profile_window)
+                self.assertGreaterEqual(
+                    max(symbol_limits), strategy.ema_volume_profile_window
+                )
                 self.assertIn(SYMBOL, bot.signal_cache["symbols"])
 
     def test_signal_update_serializes_exchange_candle_fetches(self):
@@ -6037,7 +7094,9 @@ class UnifiedBotTests(unittest.TestCase):
                 active = {"count": 0, "max": 0}
                 lock = threading.Lock()
 
-                def slow_fetch_ohlcv(symbol, timeframe="1m", since=None, limit=None, params=None):
+                def slow_fetch_ohlcv(
+                    symbol, timeframe="1m", since=None, limit=None, params=None
+                ):
                     with lock:
                         active["count"] += 1
                         active["max"] = max(active["max"], active["count"])
@@ -6080,18 +7139,22 @@ class UnifiedBotTests(unittest.TestCase):
                 candles_by_symbol = {
                     BTC_SYMBOL: ohlcv_series([100.0] * 90),
                     SYMBOL: ohlcv_series([100.0 + index * 0.1 for index in range(90)]),
-                    SECOND_SYMBOL: ohlcv_series([120.0 + index * 0.1 for index in range(90)]),
+                    SECOND_SYMBOL: ohlcv_series(
+                        [120.0 + index * 0.1 for index in range(90)]
+                    ),
                 }
                 seen_sides = []
                 lock = threading.Lock()
 
-                def fake_closed_candles(symbol, limit, max_ts=None, timeframe=None, exchange=None):
+                def fake_closed_candles(
+                    symbol, limit, max_ts=None, timeframe=None, exchange=None
+                ):
                     with lock:
                         seen_sides.append(config.POSITION_SIDE)
                     rows = candles_by_symbol[symbol]
                     if max_ts is not None:
                         rows = [row for row in rows if int(row[0]) <= max_ts]
-                    return rows[-int(limit):]
+                    return rows[-int(limit) :]
 
                 bot._closed_candles = fake_closed_candles
 
@@ -6118,7 +7181,11 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 10.0
 
                 now = time.time()
-                for held_minutes, expected_contracts in ((480.0, 25.0), (540.0, 50.0), (660.0, 100.0)):
+                for held_minutes, expected_contracts in (
+                    (480.0, 25.0),
+                    (540.0, 50.0),
+                    (660.0, 100.0),
+                ):
                     state.cycle_opened_at = now - held_minutes * 60.0
                     contracts = bot._controlled_loss_contracts(
                         SYMBOL,
@@ -6186,12 +7253,20 @@ class UnifiedBotTests(unittest.TestCase):
                     neutral = bot._controlled_loss_ramp_context(
                         state,
                         symbol=SYMBOL,
-                        signal={"data_valid": True, "trend_ema_gap": -0.02, "atr_rate": 0.001},
+                        signal={
+                            "data_valid": True,
+                            "trend_ema_gap": -0.02,
+                            "atr_rate": 0.001,
+                        },
                     )
                     spike = bot._controlled_loss_ramp_context(
                         state,
                         symbol=SYMBOL,
-                        signal={"data_valid": True, "trend_ema_gap": -0.02, "atr_rate": 0.003},
+                        signal={
+                            "data_valid": True,
+                            "trend_ema_gap": -0.02,
+                            "atr_rate": 0.003,
+                        },
                     )
 
                 self.assertAlmostEqual(neutral["move_fraction"], 0.325)
@@ -6205,7 +7280,11 @@ class UnifiedBotTests(unittest.TestCase):
     def test_controlled_loss_macro_ramp_is_direction_symmetric(self):
         results = {}
         for profile_name in ("long", "short"):
-            with self.subTest(profile=profile_name), tempfile.TemporaryDirectory() as raw_tmp, config.use_profile(profile_name):
+            with (
+                self.subTest(profile=profile_name),
+                tempfile.TemporaryDirectory() as raw_tmp,
+                config.use_profile(profile_name),
+            ):
                 strategy = replace(
                     config.STRATEGY,
                     controlled_loss_min_move_fraction=0.10,
@@ -6233,7 +7312,11 @@ class UnifiedBotTests(unittest.TestCase):
     def test_controlled_loss_volatility_ramp_is_direction_symmetric(self):
         results = {}
         for profile_name in ("long", "short"):
-            with self.subTest(profile=profile_name), tempfile.TemporaryDirectory() as raw_tmp, config.use_profile(profile_name):
+            with (
+                self.subTest(profile=profile_name),
+                tempfile.TemporaryDirectory() as raw_tmp,
+                config.use_profile(profile_name),
+            ):
                 strategy = replace(
                     config.STRATEGY,
                     controlled_loss_min_move_fraction=0.10,
@@ -6258,7 +7341,11 @@ class UnifiedBotTests(unittest.TestCase):
                         results[profile_name] = bot._controlled_loss_move_fraction(
                             state,
                             symbol=SYMBOL,
-                            signal={"data_valid": True, "trend_ema_gap": -0.02, "atr_rate": 0.003},
+                            signal={
+                                "data_valid": True,
+                                "trend_ema_gap": -0.02,
+                                "atr_rate": 0.003,
+                            },
                         )
 
         self.assertAlmostEqual(results["long"], results["short"])
@@ -6294,7 +7381,13 @@ class UnifiedBotTests(unittest.TestCase):
                 state.time_exit_activated_at = now - 360.0 * 60.0
                 state.sell_ladder_mode = "controlled_loss_exit"
                 state.sell_ladder_orders = [
-                    {"id": "old_exit", "side": "sell", "price": 100.0, "amount": 10.0, "created_at": now - 2.0 * 60.0}
+                    {
+                        "id": "old_exit",
+                        "side": "sell",
+                        "price": 100.0,
+                        "amount": 10.0,
+                        "created_at": now - 2.0 * 60.0,
+                    }
                 ]
 
                 signal = {"data_valid": True, "valid": False, "trend_ema_gap": -0.02}
@@ -6303,13 +7396,24 @@ class UnifiedBotTests(unittest.TestCase):
                     applied = bot._maybe_apply_controlled_loss_exit(SYMBOL, signal)
 
                 self.assertTrue(applied)
-                self.assertIn(("old_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("old_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 self.assertTrue(bot.exchange.created_orders)
                 self.assertEqual(state.sell_ladder_mode, "controlled_loss_exit")
-                self.assertAlmostEqual(state.sell_ladder_orders[0]["loss_move_fraction"], 0.55)
-                self.assertAlmostEqual(state.sell_ladder_orders[0]["loss_macro_intensity"], 1.0)
-                self.assertAlmostEqual(state.sell_ladder_orders[0]["loss_speed_multiplier"], 2.0)
-                self.assertTrue(bot.exchange.created_orders[-1]["params"].get("reduceOnly"))
+                self.assertAlmostEqual(
+                    state.sell_ladder_orders[0]["loss_move_fraction"], 0.55
+                )
+                self.assertAlmostEqual(
+                    state.sell_ladder_orders[0]["loss_macro_intensity"], 1.0
+                )
+                self.assertAlmostEqual(
+                    state.sell_ladder_orders[0]["loss_speed_multiplier"], 2.0
+                )
+                self.assertTrue(
+                    bot.exchange.created_orders[-1]["params"].get("reduceOnly")
+                )
 
     def test_controlled_loss_reprices_immediately_on_adverse_volatility_spike(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6340,7 +7444,11 @@ class UnifiedBotTests(unittest.TestCase):
                 bot = self.make_bot(Path(raw_tmp))
                 now = 1_700_000_000.0
                 bot.exchange.ticker = {"bid": 90.0, "ask": 90.1, "last": 90.0}
-                bot.signal_cache["symbols"][SYMBOL] = {"data_valid": True, "trend_ema_gap": 0.02, "atr_rate": 0.0}
+                bot.signal_cache["symbols"][SYMBOL] = {
+                    "data_valid": True,
+                    "trend_ema_gap": 0.02,
+                    "atr_rate": 0.0,
+                }
                 state = bot._get_state(SYMBOL)
                 state.position_size = 10.0
                 state.position_available = 10.0
@@ -6359,18 +7467,37 @@ class UnifiedBotTests(unittest.TestCase):
                     }
                 ]
 
-                fresh_signal = {"data_valid": True, "valid": False, "trend_ema_gap": -0.02, "atr_rate": 0.003}
+                fresh_signal = {
+                    "data_valid": True,
+                    "valid": False,
+                    "trend_ema_gap": -0.02,
+                    "atr_rate": 0.003,
+                }
                 with patch("time.time", return_value=now):
-                    applied = bot._maybe_apply_controlled_loss_exit(SYMBOL, fresh_signal)
+                    applied = bot._maybe_apply_controlled_loss_exit(
+                        SYMBOL, fresh_signal
+                    )
 
                 self.assertTrue(applied)
-                self.assertIn(("old_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("old_exit", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 self.assertTrue(bot.exchange.created_orders)
                 self.assertEqual(state.sell_ladder_mode, "controlled_loss_exit")
-                self.assertEqual(state.sell_ladder_orders[0]["loss_ramp_profile"], "exponential_volatility")
-                self.assertAlmostEqual(state.sell_ladder_orders[0]["loss_volatility_intensity"], 1.0)
-                self.assertGreater(state.sell_ladder_orders[0]["loss_move_fraction"], 0.66)
-                self.assertTrue(bot.exchange.created_orders[-1]["params"].get("reduceOnly"))
+                self.assertEqual(
+                    state.sell_ladder_orders[0]["loss_ramp_profile"],
+                    "exponential_volatility",
+                )
+                self.assertAlmostEqual(
+                    state.sell_ladder_orders[0]["loss_volatility_intensity"], 1.0
+                )
+                self.assertGreater(
+                    state.sell_ladder_orders[0]["loss_move_fraction"], 0.66
+                )
+                self.assertTrue(
+                    bot.exchange.created_orders[-1]["params"].get("reduceOnly")
+                )
 
     def test_hard_time_exit_uses_wider_loss_cap(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6414,15 +7541,23 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.cycle_opened_at = time.time() - 11.0 * 60.0
 
-                applied = bot._maybe_apply_absolute_force_exit(SYMBOL, reason="test_force_exit")
+                applied = bot._maybe_apply_absolute_force_exit(
+                    SYMBOL, reason="test_force_exit"
+                )
 
                 self.assertTrue(applied)
                 self.assertEqual(bot.exchange.created_orders, [])
                 self.assertEqual(bot.exchange.create_order_calls, 0)
                 self.assertTrue(state.zombie_position)
                 self.assertEqual(state.sell_ladder_mode, "absolute_force_exit")
-                self.assertTrue(state.sell_ladder_signature.startswith("pending_closeable:absolute_force_exit|"))
-                self.assertIn("absolute_force_exit_no_closeable", state.pending_exit_ladder_reason)
+                self.assertTrue(
+                    state.sell_ladder_signature.startswith(
+                        "pending_closeable:absolute_force_exit|"
+                    )
+                )
+                self.assertIn(
+                    "absolute_force_exit_no_closeable", state.pending_exit_ladder_reason
+                )
 
     def test_absolute_force_exit_market_order_is_capped_to_available_amount(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6441,13 +7576,17 @@ class UnifiedBotTests(unittest.TestCase):
                 state.entry_price = 100.0
                 state.cycle_opened_at = time.time() - 11.0 * 60.0
 
-                applied = bot._maybe_apply_absolute_force_exit(SYMBOL, reason="test_force_exit")
+                applied = bot._maybe_apply_absolute_force_exit(
+                    SYMBOL, reason="test_force_exit"
+                )
 
                 self.assertTrue(applied)
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 self.assertEqual(bot.exchange.created_orders[0]["type"], "market")
                 self.assertEqual(bot.exchange.created_orders[0]["amount"], 4.0)
-                self.assertTrue(bot.exchange.created_orders[0]["params"].get("reduceOnly"))
+                self.assertTrue(
+                    bot.exchange.created_orders[0]["params"].get("reduceOnly")
+                )
 
     def test_absolute_force_exit_waits_after_canceling_exit_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6468,21 +7607,30 @@ class UnifiedBotTests(unittest.TestCase):
                     {"id": "sell_1", "side": "sell", "price": 101.0, "amount": 10.0}
                 ]
 
-                applied = bot._maybe_apply_absolute_force_exit(SYMBOL, reason="test_force_exit")
+                applied = bot._maybe_apply_absolute_force_exit(
+                    SYMBOL, reason="test_force_exit"
+                )
 
                 self.assertTrue(applied)
                 self.assertEqual(bot.exchange.created_orders, [])
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(state.sell_ladder_mode, "absolute_force_exit")
-                self.assertIn(("sell_1", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("sell_1", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
 
-                applied = bot._maybe_apply_absolute_force_exit(SYMBOL, reason="test_force_exit")
+                applied = bot._maybe_apply_absolute_force_exit(
+                    SYMBOL, reason="test_force_exit"
+                )
 
                 self.assertTrue(applied)
                 self.assertEqual(len(bot.exchange.created_orders), 1)
                 self.assertEqual(bot.exchange.created_orders[0]["type"], "market")
                 self.assertEqual(bot.exchange.created_orders[0]["amount"], 10.0)
-                self.assertTrue(bot.exchange.created_orders[0]["params"].get("reduceOnly"))
+                self.assertTrue(
+                    bot.exchange.created_orders[0]["params"].get("reduceOnly")
+                )
 
     def test_step_symbol_invokes_absolute_force_exit_before_normal_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6566,7 +7714,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(order["params"].get("reduceOnly"))
                 self.assertNotIn("stopLossPrice", order["params"])
 
-    def test_step_symbol_invokes_hard_time_controlled_exit_when_controlled_disabled(self):
+    def test_step_symbol_invokes_hard_time_controlled_exit_when_controlled_disabled(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = replace(
                 config.STRATEGY,
@@ -6606,7 +7756,12 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertEqual(state.sell_ladder_mode, "controlled_loss_exit")
                 self.assertTrue(bot.exchange.created_orders)
-                self.assertTrue(all(order["params"].get("reduceOnly") for order in bot.exchange.created_orders))
+                self.assertTrue(
+                    all(
+                        order["params"].get("reduceOnly")
+                        for order in bot.exchange.created_orders
+                    )
+                )
 
     def test_step_symbol_invokes_urgent_time_exit_before_breakeven_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6668,7 +7823,10 @@ class UnifiedBotTests(unittest.TestCase):
                 valid = bot._validate_sell_orders(SYMBOL, open_orders)
 
                 self.assertFalse(valid)
-                self.assertIn(("unknown_buy", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("unknown_buy", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
 
     def test_tracked_exit_order_without_reduce_only_is_canceled(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6678,7 +7836,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 5.0
                 state.position_available = 5.0
                 state.entry_price = 100.0
-                state.sell_ladder_orders = [{"id": "sell_1", "side": "sell", "price": 101.0, "amount": 5.0}]
+                state.sell_ladder_orders = [
+                    {"id": "sell_1", "side": "sell", "price": 101.0, "amount": 5.0}
+                ]
 
                 valid = bot._validate_sell_orders(
                     SYMBOL,
@@ -6697,7 +7857,10 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertFalse(valid)
                 self.assertEqual(state.sell_ladder_orders, [])
-                self.assertIn(("sell_1", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("sell_1", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
 
     def test_unknown_reduce_only_exit_orders_are_adopted(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6724,8 +7887,12 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertTrue(valid)
-                self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["orphan_sell"])
-                self.assertEqual(state.sell_ladder_signature, bot._sell_ladder_signature("normal"))
+                self.assertEqual(
+                    [order["id"] for order in state.sell_ladder_orders], ["orphan_sell"]
+                )
+                self.assertEqual(
+                    state.sell_ladder_signature, bot._sell_ladder_signature("normal")
+                )
                 bot._ensure_sell_ladder(SYMBOL)
                 self.assertEqual(bot.exchange.created_orders, [])
 
@@ -6756,9 +7923,14 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertTrue(valid)
-                self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["partial_manual_sell"])
+                self.assertEqual(
+                    [order["id"] for order in state.sell_ladder_orders],
+                    ["partial_manual_sell"],
+                )
                 self.assertEqual(state.sell_ladder_signature, "")
-                self.assertAlmostEqual(state.sell_ladder_orders[0]["created_at"], created_at)
+                self.assertAlmostEqual(
+                    state.sell_ladder_orders[0]["created_at"], created_at
+                )
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertTrue(
@@ -6772,16 +7944,30 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._ensure_sell_ladder(SYMBOL)
 
                 self.assertIn(
-                    ("partial_manual_sell", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    (
+                        "partial_manual_sell",
+                        SYMBOL,
+                        {"marginMode": config.RISK.margin_mode},
+                    ),
                     bot.exchange.canceled_orders,
                 )
                 self.assertTrue(bot.exchange.created_orders)
-                self.assertTrue(all(order["params"].get("reduceOnly") for order in bot.exchange.created_orders))
+                self.assertTrue(
+                    all(
+                        order["params"].get("reduceOnly")
+                        for order in bot.exchange.created_orders
+                    )
+                )
                 self.assertAlmostEqual(
-                    sum(order["amount"] for order in bot.exchange.created_orders) + state.exit_runner_contracts,
+                    sum(order["amount"] for order in bot.exchange.created_orders)
+                    + state.exit_runner_contracts,
                     5.0,
                 )
-                self.assertAlmostEqual(sum(ref["amount"] for ref in state.sell_ladder_orders) + state.exit_runner_contracts, 5.0)
+                self.assertAlmostEqual(
+                    sum(ref["amount"] for ref in state.sell_ladder_orders)
+                    + state.exit_runner_contracts,
+                    5.0,
+                )
 
     def test_offset_close_exit_orders_are_adopted_as_reduce_only(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6808,7 +7994,10 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertTrue(valid)
-                self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["offset_close_sell"])
+                self.assertEqual(
+                    [order["id"] for order in state.sell_ladder_orders],
+                    ["offset_close_sell"],
+                )
                 self.assertEqual(bot.exchange.canceled_orders, [])
 
     def test_adopted_hidden_close_order_cancel_uses_cancel_params(self):
@@ -6839,10 +8028,16 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertTrue(valid)
-                self.assertEqual(state.sell_ladder_orders[0]["cancel_params"], {"orderType": "tpsl"})
+                self.assertEqual(
+                    state.sell_ladder_orders[0]["cancel_params"], {"orderType": "tpsl"}
+                )
                 bot._cancel_sell_orders(SYMBOL, reason="test_hidden_cancel")
                 self.assertIn(
-                    ("hidden_tp", SYMBOL, {"marginMode": config.RISK.margin_mode, "orderType": "tpsl"}),
+                    (
+                        "hidden_tp",
+                        SYMBOL,
+                        {"marginMode": config.RISK.margin_mode, "orderType": "tpsl"},
+                    ),
                     bot.exchange.canceled_orders,
                 )
 
@@ -6867,7 +8062,10 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertFalse(valid)
-                self.assertIn(("flat_close", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("flat_close", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
 
     def test_flat_unknown_unsafe_exit_orders_block_entry_without_cancel(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -6908,7 +8106,9 @@ class UnifiedBotTests(unittest.TestCase):
                 valid = bot._validate_sell_orders(SYMBOL, [])
 
                 self.assertTrue(valid)
-                self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["sell_1"])
+                self.assertEqual(
+                    [order["id"] for order in state.sell_ladder_orders], ["sell_1"]
+                )
                 self.assertFalse(state.frozen_no_more_buys)
                 self.assertEqual(bot.exchange.canceled_orders, [])
                 bot._ensure_sell_ladder(SYMBOL)
@@ -6980,11 +8180,18 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertTrue(valid)
-                self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["rotated_sell"])
-                self.assertEqual(state.sell_ladder_signature, bot._sell_ladder_signature("normal"))
+                self.assertEqual(
+                    [order["id"] for order in state.sell_ladder_orders],
+                    ["rotated_sell"],
+                )
+                self.assertEqual(
+                    state.sell_ladder_signature, bot._sell_ladder_signature("normal")
+                )
                 self.assertEqual(bot.exchange.canceled_orders, [])
 
-    def test_tracked_and_unknown_safe_close_orders_are_merged_without_exceeding_position(self):
+    def test_tracked_and_unknown_safe_close_orders_are_merged_without_exceeding_position(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
@@ -6994,7 +8201,12 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_frozen = 5.0
                 state.entry_price = 100.0
                 state.sell_ladder_orders = [
-                    {"id": "tracked_sell", "side": "sell", "price": 101.0, "amount": 3.0}
+                    {
+                        "id": "tracked_sell",
+                        "side": "sell",
+                        "price": 101.0,
+                        "amount": 3.0,
+                    }
                 ]
 
                 valid = bot._validate_sell_orders(
@@ -7022,8 +8234,13 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertTrue(valid)
-                self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["tracked_sell", "safe_manual_sell"])
-                self.assertAlmostEqual(sum(order["amount"] for order in state.sell_ladder_orders), 5.0)
+                self.assertEqual(
+                    [order["id"] for order in state.sell_ladder_orders],
+                    ["tracked_sell", "safe_manual_sell"],
+                )
+                self.assertAlmostEqual(
+                    sum(order["amount"] for order in state.sell_ladder_orders), 5.0
+                )
                 self.assertEqual(bot.exchange.canceled_orders, [])
 
     def test_tracked_ladder_with_unadoptable_unknown_exit_waits(self):
@@ -7035,7 +8252,12 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_available = 5.0
                 state.entry_price = 100.0
                 state.sell_ladder_orders = [
-                    {"id": "tracked_sell", "side": "sell", "price": 101.0, "amount": 3.0}
+                    {
+                        "id": "tracked_sell",
+                        "side": "sell",
+                        "price": 101.0,
+                        "amount": 3.0,
+                    }
                 ]
 
                 valid = bot._validate_sell_orders(
@@ -7064,7 +8286,10 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertFalse(valid)
                 self.assertTrue(state.frozen_no_more_buys)
-                self.assertEqual([order["id"] for order in state.sell_ladder_orders], ["tracked_sell"])
+                self.assertEqual(
+                    [order["id"] for order in state.sell_ladder_orders],
+                    ["tracked_sell"],
+                )
                 self.assertEqual(bot.exchange.canceled_orders, [])
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
@@ -7124,7 +8349,9 @@ class UnifiedBotTests(unittest.TestCase):
                     state.sell_ladder_signature,
                     bot._pending_exit_ladder_signature("normal"),
                 )
-                self.assertIn("closeable_amount_reserved", state.pending_exit_ladder_reason)
+                self.assertIn(
+                    "closeable_amount_reserved", state.pending_exit_ladder_reason
+                )
                 self.assertEqual(state.exit_runner_contracts, 0.0)
 
     def test_exit_ladder_waits_when_exchange_reports_closeable_reserved(self):
@@ -7151,7 +8378,10 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertGreater(state.pending_exit_ladder_since, 0)
                 self.assertIn(
                     state.pending_exit_ladder_reason,
-                    {"exchange_closeable_amount_reserved", "closeable_amount_reserved_by_existing_exit_orders"},
+                    {
+                        "exchange_closeable_amount_reserved",
+                        "closeable_amount_reserved_by_existing_exit_orders",
+                    },
                 )
 
     def test_pending_closeable_exit_ladder_retries_after_timeout(self):
@@ -7181,7 +8411,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.pending_exit_ladder_since, None)
                 self.assertEqual(state.pending_exit_ladder_reason, "")
 
-    def test_pending_closeable_exit_ladder_does_not_retry_after_timeout_while_frozen(self):
+    def test_pending_closeable_exit_ladder_does_not_retry_after_timeout_while_frozen(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
             with override_config(RUNTIME=runtime):
@@ -7204,9 +8436,13 @@ class UnifiedBotTests(unittest.TestCase):
                     state.sell_ladder_signature,
                     bot._pending_exit_ladder_signature("normal"),
                 )
-                self.assertIn("closeable_amount_reserved", state.pending_exit_ladder_reason)
+                self.assertIn(
+                    "closeable_amount_reserved", state.pending_exit_ladder_reason
+                )
 
-    def test_pending_closeable_exit_ladder_keeps_original_wait_after_force_reset_window(self):
+    def test_pending_closeable_exit_ladder_keeps_original_wait_after_force_reset_window(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
             with override_config(RUNTIME=runtime):
@@ -7224,12 +8460,16 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertEqual(bot.exchange.created_orders, [])
                 self.assertEqual(bot.exchange.canceled_orders, [])
-                self.assertAlmostEqual(state.pending_exit_ladder_since, old_pending_since, places=3)
+                self.assertAlmostEqual(
+                    state.pending_exit_ladder_since, old_pending_since, places=3
+                )
                 self.assertEqual(
                     state.sell_ladder_signature,
                     bot._pending_exit_ladder_signature("normal"),
                 )
-                with bot.diagnostics_csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.diagnostics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
                     reasons = [row["reason"] for row in csv.DictReader(handle)]
                 self.assertNotIn("pending_closeable_force_reset", reasons)
 
@@ -7259,7 +8499,9 @@ class UnifiedBotTests(unittest.TestCase):
                     bot._pending_exit_ladder_signature("breakeven"),
                 )
 
-    def test_urgent_time_exit_preserves_pending_closeable_without_duplicate_ladder(self):
+    def test_urgent_time_exit_preserves_pending_closeable_without_duplicate_ladder(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, order_timeout_sec=1, poll_interval_sec=1)
             strategy = replace(config.STRATEGY, urgent_time_exit_after_minutes=1.0)
@@ -7286,9 +8528,16 @@ class UnifiedBotTests(unittest.TestCase):
                     bot._pending_exit_ladder_signature("urgent_time_exit"),
                 )
 
-    def test_controlled_loss_waits_on_pending_closeable_without_retrying_reduce_only(self):
+    def test_controlled_loss_waits_on_pending_closeable_without_retrying_reduce_only(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, reduce_only_enabled=True, order_timeout_sec=1, poll_interval_sec=1)
+            runtime = replace(
+                config.RUNTIME,
+                reduce_only_enabled=True,
+                order_timeout_sec=1,
+                poll_interval_sec=1,
+            )
             strategy = replace(
                 config.STRATEGY,
                 enable_absolute_force_exit=False,
@@ -7319,7 +8568,11 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(bot.exchange.create_order_calls, 0)
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(state.sell_ladder_mode, "controlled_loss_exit")
-                self.assertTrue(state.sell_ladder_signature.startswith("pending_closeable:controlled_loss_exit|"))
+                self.assertTrue(
+                    state.sell_ladder_signature.startswith(
+                        "pending_closeable:controlled_loss_exit|"
+                    )
+                )
 
     def test_unknown_non_reduce_only_exit_order_blocks_duplicate_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7349,7 +8602,10 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(state.sell_ladder_orders, [])
                 self.assertEqual(bot.exchange.canceled_orders, [])
                 self.assertTrue(state.frozen_no_more_buys)
-                self.assertEqual(state.pending_exit_ladder_reason, "unknown_exit_order_not_reduce_only")
+                self.assertEqual(
+                    state.pending_exit_ladder_reason,
+                    "unknown_exit_order_not_reduce_only",
+                )
 
     def test_stale_unknown_non_reduce_only_exit_order_is_canceled(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7374,11 +8630,16 @@ class UnifiedBotTests(unittest.TestCase):
                 state.pending_exit_ladder_since = time.time() - 120.0
                 self.assertFalse(bot._validate_sell_orders(SYMBOL, [order]))
 
-                self.assertIn(("manual_sell", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("manual_sell", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 self.assertIsNone(state.pending_exit_ladder_since)
                 self.assertEqual(state.pending_exit_ladder_reason, "")
 
-    def test_unknown_exit_orders_cancel_tracked_ladder_when_combined_amount_exceeds_position(self):
+    def test_unknown_exit_orders_cancel_tracked_ladder_when_combined_amount_exceeds_position(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
@@ -7386,7 +8647,9 @@ class UnifiedBotTests(unittest.TestCase):
                 state.position_size = 5.0
                 state.position_available = 5.0
                 state.entry_price = 100.0
-                state.sell_ladder_orders = [{"id": "sell_1", "side": "sell", "price": 101.0, "amount": 4.0}]
+                state.sell_ladder_orders = [
+                    {"id": "sell_1", "side": "sell", "price": 101.0, "amount": 4.0}
+                ]
 
                 valid = bot._validate_sell_orders(
                     SYMBOL,
@@ -7414,7 +8677,10 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertFalse(valid)
                 self.assertEqual(state.sell_ladder_orders, [])
-                self.assertIn(("sell_1", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("sell_1", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
 
     def test_private_snapshots_are_bulk_cached_per_cycle(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7431,7 +8697,13 @@ class UnifiedBotTests(unittest.TestCase):
                     }
                 ]
                 bot.exchange.open_orders = [
-                    {"id": "sell_1", "symbol": SYMBOL, "side": "sell", "price": 101.0, "amount": 5.0}
+                    {
+                        "id": "sell_1",
+                        "symbol": SYMBOL,
+                        "side": "sell",
+                        "price": 101.0,
+                        "amount": 5.0,
+                    }
                 ]
 
                 bot._reset_private_caches()
@@ -7464,10 +8736,16 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._reset_private_caches()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                    snapshots = list(executor.map(lambda _: bot._fetch_position_snapshot(SYMBOL), range(8)))
+                    snapshots = list(
+                        executor.map(
+                            lambda _: bot._fetch_position_snapshot(SYMBOL), range(8)
+                        )
+                    )
 
                 self.assertTrue(all(snapshot["ok"] for snapshot in snapshots))
-                self.assertTrue(all(snapshot["long_size"] == 5.0 for snapshot in snapshots))
+                self.assertTrue(
+                    all(snapshot["long_size"] == 5.0 for snapshot in snapshots)
+                )
                 self.assertEqual(bot.exchange.fetch_positions_calls, 1)
 
     def test_account_snapshot_is_cached_per_cycle_and_singleflight(self):
@@ -7478,9 +8756,13 @@ class UnifiedBotTests(unittest.TestCase):
 
                 bot._reset_private_caches()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                    snapshots = list(executor.map(lambda _index: bot._account_snapshot(), range(8)))
+                    snapshots = list(
+                        executor.map(lambda _index: bot._account_snapshot(), range(8))
+                    )
 
-                self.assertTrue(all(snapshot["free"] == 1000.0 for snapshot in snapshots))
+                self.assertTrue(
+                    all(snapshot["free"] == 1000.0 for snapshot in snapshots)
+                )
                 self.assertEqual(bot.exchange.fetch_balance_calls, 1)
 
                 second = bot._account_snapshot()
@@ -7518,7 +8800,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(snapshot["ok"])
                 self.assertEqual(snapshot["long_size"], 5.0)
                 self.assertEqual(bot.exchange.fetch_positions_calls, 2)
-                self.assertEqual(bot.exchange.urls["hostnames"]["contract"], "api.two.test")
+                self.assertEqual(
+                    bot.exchange.urls["hostnames"]["contract"], "api.two.test"
+                )
 
     def test_private_position_fetch_honors_configured_retry_count(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7551,7 +8835,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(snapshot["ok"])
                 self.assertEqual(snapshot["long_size"], 5.0)
                 self.assertEqual(bot.exchange.fetch_positions_calls, 4)
-                self.assertEqual(bot.exchange.urls["hostnames"]["contract"], "api.two.test")
+                self.assertEqual(
+                    bot.exchange.urls["hostnames"]["contract"], "api.two.test"
+                )
 
     def test_bulk_private_position_network_outage_skips_per_symbol_cascade(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7577,9 +8863,14 @@ class UnifiedBotTests(unittest.TestCase):
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertTrue(
-                    any(row["reason"] == "bulk_positions_fetch_failed_cycle_skipped" for row in rows)
+                    any(
+                        row["reason"] == "bulk_positions_fetch_failed_cycle_skipped"
+                        for row in rows
+                    )
                 )
-                self.assertFalse(any(row["reason"] == "position_fetch_failed" for row in rows))
+                self.assertFalse(
+                    any(row["reason"] == "position_fetch_failed" for row in rows)
+                )
 
     def test_bulk_private_open_orders_network_outage_skips_per_symbol_cascade(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7605,9 +8896,14 @@ class UnifiedBotTests(unittest.TestCase):
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertTrue(
-                    any(row["reason"] == "bulk_open_orders_fetch_failed_cycle_skipped" for row in rows)
+                    any(
+                        row["reason"] == "bulk_open_orders_fetch_failed_cycle_skipped"
+                        for row in rows
+                    )
                 )
-                self.assertFalse(any(row["reason"] == "open_orders_fetch_failed" for row in rows))
+                self.assertFalse(
+                    any(row["reason"] == "open_orders_fetch_failed" for row in rows)
+                )
 
     def test_private_prefetch_stops_after_bulk_position_network_outage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7635,7 +8931,7 @@ class UnifiedBotTests(unittest.TestCase):
             # Set up failures for mock exchange
             bot.exchange.fetch_positions_failures = [
                 RuntimeError("bulk fail"),
-                RuntimeError("symbol fail")
+                RuntimeError("symbol fail"),
             ]
 
             bot._reset_private_caches()
@@ -7719,10 +9015,14 @@ class UnifiedBotTests(unittest.TestCase):
 
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            position_rows = [row for row in rows if row["reason"] == "position_fetch_failed"]
+            position_rows = [
+                row for row in rows if row["reason"] == "position_fetch_failed"
+            ]
             self.assertTrue(position_rows)
             self.assertEqual(position_rows[-1]["level"], "ERROR")
-            self.assertEqual(position_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(
+                position_rows[-1]["exception_type"], "UnexpectedExchangeResponse"
+            )
             self.assertEqual(position_rows[-1]["error_code"], "500")
             self.assertIn("fetch_positions returned dict", position_rows[-1]["message"])
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
@@ -7741,10 +9041,14 @@ class UnifiedBotTests(unittest.TestCase):
 
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            order_rows = [row for row in rows if row["reason"] == "open_orders_fetch_failed"]
+            order_rows = [
+                row for row in rows if row["reason"] == "open_orders_fetch_failed"
+            ]
             self.assertTrue(order_rows)
             self.assertEqual(order_rows[-1]["level"], "ERROR")
-            self.assertEqual(order_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(
+                order_rows[-1]["exception_type"], "UnexpectedExchangeResponse"
+            )
             self.assertEqual(order_rows[-1]["error_code"], "501")
             self.assertIn("fetch_open_orders returned dict", order_rows[-1]["message"])
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
@@ -7765,12 +9069,19 @@ class UnifiedBotTests(unittest.TestCase):
 
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            position_rows = [row for row in rows if row["reason"] == "position_fetch_failed"]
+            position_rows = [
+                row for row in rows if row["reason"] == "position_fetch_failed"
+            ]
             self.assertTrue(position_rows)
             self.assertEqual(position_rows[-1]["level"], "ERROR")
-            self.assertEqual(position_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(
+                position_rows[-1]["exception_type"], "UnexpectedExchangeResponse"
+            )
             self.assertEqual(position_rows[-1]["error_code"], "500")
-            self.assertIn("fetch_positions returned list with error dict item", position_rows[-1]["message"])
+            self.assertIn(
+                "fetch_positions returned list with error dict item",
+                position_rows[-1]["message"],
+            )
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
 
     def test_open_orders_error_dict_item_is_logged_without_step_error(self):
@@ -7789,12 +9100,19 @@ class UnifiedBotTests(unittest.TestCase):
 
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            order_rows = [row for row in rows if row["reason"] == "open_orders_fetch_failed"]
+            order_rows = [
+                row for row in rows if row["reason"] == "open_orders_fetch_failed"
+            ]
             self.assertTrue(order_rows)
             self.assertEqual(order_rows[-1]["level"], "ERROR")
-            self.assertEqual(order_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(
+                order_rows[-1]["exception_type"], "UnexpectedExchangeResponse"
+            )
             self.assertEqual(order_rows[-1]["error_code"], "501")
-            self.assertIn("fetch_open_orders returned list with error dict item", order_rows[-1]["message"])
+            self.assertIn(
+                "fetch_open_orders returned list with error dict item",
+                order_rows[-1]["message"],
+            )
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
 
     def test_bulk_position_dict_response_falls_back_without_step_error(self):
@@ -7812,12 +9130,20 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(bot.exchange.fetch_positions_calls, 2)
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            bulk_rows = [row for row in rows if row["reason"] == "bulk_positions_fetch_failed"]
-            position_rows = [row for row in rows if row["reason"] == "position_fetch_failed"]
+            bulk_rows = [
+                row for row in rows if row["reason"] == "bulk_positions_fetch_failed"
+            ]
+            position_rows = [
+                row for row in rows if row["reason"] == "position_fetch_failed"
+            ]
             self.assertTrue(bulk_rows)
             self.assertTrue(position_rows)
-            self.assertEqual(bulk_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
-            self.assertEqual(position_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(
+                bulk_rows[-1]["exception_type"], "UnexpectedExchangeResponse"
+            )
+            self.assertEqual(
+                position_rows[-1]["exception_type"], "UnexpectedExchangeResponse"
+            )
             self.assertEqual(position_rows[-1]["error_code"], "500")
             self.assertIn("fetch_positions returned dict", position_rows[-1]["message"])
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
@@ -7837,12 +9163,20 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(bot.exchange.fetch_open_orders_calls, 2)
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            bulk_rows = [row for row in rows if row["reason"] == "bulk_open_orders_fetch_failed"]
-            order_rows = [row for row in rows if row["reason"] == "open_orders_fetch_failed"]
+            bulk_rows = [
+                row for row in rows if row["reason"] == "bulk_open_orders_fetch_failed"
+            ]
+            order_rows = [
+                row for row in rows if row["reason"] == "open_orders_fetch_failed"
+            ]
             self.assertTrue(bulk_rows)
             self.assertTrue(order_rows)
-            self.assertEqual(bulk_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
-            self.assertEqual(order_rows[-1]["exception_type"], "UnexpectedExchangeResponse")
+            self.assertEqual(
+                bulk_rows[-1]["exception_type"], "UnexpectedExchangeResponse"
+            )
+            self.assertEqual(
+                order_rows[-1]["exception_type"], "UnexpectedExchangeResponse"
+            )
             self.assertEqual(order_rows[-1]["error_code"], "501")
             self.assertIn("fetch_open_orders returned dict", order_rows[-1]["message"])
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
@@ -7851,7 +9185,12 @@ class UnifiedBotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
             bot.exchange.open_orders = [
-                {"id": "visible_exit", "symbol": SYMBOL, "side": config.EXIT_SIDE, "amount": 1.0}
+                {
+                    "id": "visible_exit",
+                    "symbol": SYMBOL,
+                    "side": config.EXIT_SIDE,
+                    "amount": 1.0,
+                }
             ]
             bot.exchange.fetch_open_orders_type_error_on_params = True
 
@@ -7861,11 +9200,15 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(bot.exchange.fetch_open_orders_calls, 2)
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            order_rows = [row for row in rows if row["reason"] == "open_orders_fetch_failed"]
+            order_rows = [
+                row for row in rows if row["reason"] == "open_orders_fetch_failed"
+            ]
             self.assertTrue(order_rows)
             self.assertEqual(order_rows[-1]["level"], "ERROR")
             self.assertEqual(order_rows[-1]["exception_type"], "TypeError")
-            self.assertIn("unexpected keyword argument 'params'", order_rows[-1]["message"])
+            self.assertIn(
+                "unexpected keyword argument 'params'", order_rows[-1]["message"]
+            )
 
     def test_public_ohlcv_dict_response_raises_typed_exchange_response_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7876,7 +9219,9 @@ class UnifiedBotTests(unittest.TestCase):
                 "err_msg": "unexpected payload",
             }
 
-            with self.assertRaisesRegex(UnexpectedExchangeResponse, "fetch_ohlcv returned dict"):
+            with self.assertRaisesRegex(
+                UnexpectedExchangeResponse, "fetch_ohlcv returned dict"
+            ):
                 bot._closed_candles(SYMBOL, 2, timeframe="1m")
 
     def test_position_mode_already_one_way_skips_write_endpoint(self):
@@ -7947,7 +9292,13 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(len(bot.exchange.set_position_mode_calls), 1)
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
-                row = next(row for row in rows if row["reason"].startswith("position_mode_switch_limited_confirmed"))
+                row = next(
+                    row
+                    for row in rows
+                    if row["reason"].startswith(
+                        "position_mode_switch_limited_confirmed"
+                    )
+                )
                 self.assertEqual(row["level"], "WARNING")
                 self.assertEqual(row["event"], "futures_setup")
                 self.assertEqual(row["exception_type"], "RuntimeError")
@@ -7971,7 +9322,9 @@ class UnifiedBotTests(unittest.TestCase):
                     rows = list(csv.DictReader(handle))
                 self.assertEqual(rows[-1]["level"], "ERROR")
                 self.assertEqual(rows[-1]["event"], "futures_setup")
-                self.assertEqual(rows[-1]["reason"], "position_mode_switch_limited_unverified")
+                self.assertEqual(
+                    rows[-1]["reason"], "position_mode_switch_limited_unverified"
+                )
                 self.assertEqual(rows[-1]["error_code"], "1032")
                 self.assertEqual(rows[-1]["retryable"], "1")
 
@@ -8019,7 +9372,9 @@ class UnifiedBotTests(unittest.TestCase):
                 set_leverage_on_start=True,
             )
             risk = replace(config.RISK, leverage=7)
-            with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config, RISK=risk):
+            with override_config(
+                RUNTIME=config.RUNTIME, EXCHANGE=exchange_config, RISK=risk
+            ):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.symbols = [SYMBOL]
 
@@ -8041,29 +9396,47 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.symbols = [SYMBOL, SECOND_SYMBOL]
-                bot.exchange.set_leverage_errors_by_symbol[SYMBOL] = RuntimeError("leverage rejected")
+                bot.exchange.set_leverage_errors_by_symbol[SYMBOL] = RuntimeError(
+                    "leverage rejected"
+                )
 
                 bot._setup_futures_account()
 
                 self.assertEqual(
                     bot.exchange.set_leverage_calls,
                     [
-                        (config.RISK.leverage, SYMBOL, {"marginMode": config.RISK.margin_mode}),
-                        (config.RISK.leverage, SECOND_SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                        (
+                            config.RISK.leverage,
+                            SYMBOL,
+                            {"marginMode": config.RISK.margin_mode},
+                        ),
+                        (
+                            config.RISK.leverage,
+                            SECOND_SYMBOL,
+                            {"marginMode": config.RISK.margin_mode},
+                        ),
                     ],
                 )
                 self.assertNotIn(SYMBOL, bot.order_leverage_cache)
-                self.assertEqual(bot.order_leverage_cache[SECOND_SYMBOL], float(config.RISK.leverage))
+                self.assertEqual(
+                    bot.order_leverage_cache[SECOND_SYMBOL], float(config.RISK.leverage)
+                )
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
                 reasons = [row["reason"] for row in rows]
                 self.assertIn("set_leverage_failed", reasons)
                 self.assertIn("set_leverage_partial_failure", reasons)
-                failed_row = next(row for row in rows if row["reason"] == "set_leverage_failed")
+                failed_row = next(
+                    row for row in rows if row["reason"] == "set_leverage_failed"
+                )
                 self.assertEqual(failed_row["level"], "WARNING")
                 self.assertEqual(failed_row["symbol"], SYMBOL)
                 self.assertEqual(failed_row["exception_type"], "RuntimeError")
-                partial_row = next(row for row in rows if row["reason"] == "set_leverage_partial_failure")
+                partial_row = next(
+                    row
+                    for row in rows
+                    if row["reason"] == "set_leverage_partial_failure"
+                )
                 self.assertEqual(partial_row["level"], "WARNING")
 
     def test_setup_continues_when_startup_leverage_fails_for_all_symbols(self):
@@ -8076,30 +9449,54 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.symbols = [SYMBOL, SECOND_SYMBOL]
-                bot.exchange.set_leverage_errors_by_symbol[SYMBOL] = RuntimeError("symbol leverage rejected")
-                bot.exchange.set_leverage_errors_by_symbol[SECOND_SYMBOL] = RuntimeError("alt leverage rejected")
+                bot.exchange.set_leverage_errors_by_symbol[SYMBOL] = RuntimeError(
+                    "symbol leverage rejected"
+                )
+                bot.exchange.set_leverage_errors_by_symbol[SECOND_SYMBOL] = (
+                    RuntimeError("alt leverage rejected")
+                )
 
                 bot._setup_futures_account()
 
                 self.assertEqual(
                     bot.exchange.set_leverage_calls,
                     [
-                        (config.RISK.leverage, SYMBOL, {"marginMode": config.RISK.margin_mode}),
-                        (config.RISK.leverage, SECOND_SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                        (
+                            config.RISK.leverage,
+                            SYMBOL,
+                            {"marginMode": config.RISK.margin_mode},
+                        ),
+                        (
+                            config.RISK.leverage,
+                            SECOND_SYMBOL,
+                            {"marginMode": config.RISK.margin_mode},
+                        ),
                     ],
                 )
                 self.assertEqual(bot.order_leverage_cache, {})
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
-                failed_rows = [row for row in rows if row["reason"] == "set_leverage_failed"]
-                self.assertEqual([row["symbol"] for row in failed_rows], [SYMBOL, SECOND_SYMBOL])
+                failed_rows = [
+                    row for row in rows if row["reason"] == "set_leverage_failed"
+                ]
+                self.assertEqual(
+                    [row["symbol"] for row in failed_rows], [SYMBOL, SECOND_SYMBOL]
+                )
                 self.assertTrue(all(row["level"] == "WARNING" for row in failed_rows))
-                partial_row = next(row for row in rows if row["reason"] == "set_leverage_partial_failure")
+                partial_row = next(
+                    row
+                    for row in rows
+                    if row["reason"] == "set_leverage_partial_failure"
+                )
                 self.assertEqual(partial_row["level"], "WARNING")
 
     def test_funding_context_rejects_empty_payload_without_neutral_full_ttl_cache(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            strategy = replace(config.STRATEGY, enable_funding_aware_exit=True, funding_cache_ttl_sec=300)
+            strategy = replace(
+                config.STRATEGY,
+                enable_funding_aware_exit=True,
+                funding_cache_ttl_sec=300,
+            )
             with override_config(STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.has["fetchFundingRate"] = True
@@ -8127,7 +9524,9 @@ class UnifiedBotTests(unittest.TestCase):
                 invalid = bot._funding_rate_context(SYMBOL)
                 invalid["expires_at"] = time.time() - 1.0
                 bot.funding_cache[SYMBOL] = invalid
-                bot.exchange.funding_rate_response = {"info": {"funding_rate": "0.0002"}}
+                bot.exchange.funding_rate_response = {
+                    "info": {"funding_rate": "0.0002"}
+                }
 
                 context = bot._funding_rate_context(SYMBOL)
 
@@ -8159,11 +9558,74 @@ class UnifiedBotTests(unittest.TestCase):
                 bot.exchange.fetch_funding_rate = slow_fetch_funding_rate
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                    contexts = list(executor.map(lambda _index: bot._funding_rate_context(SYMBOL), range(8)))
+                    contexts = list(
+                        executor.map(
+                            lambda _index: bot._funding_rate_context(SYMBOL), range(8)
+                        )
+                    )
 
                 self.assertEqual(calls["count"], 1)
                 self.assertTrue(all(context["valid"] for context in contexts))
-                self.assertTrue(all(context["reason"] == "positive_funding_long_pays" for context in contexts))
+                self.assertTrue(
+                    all(
+                        context["reason"] == "positive_funding_long_pays"
+                        for context in contexts
+                    )
+                )
+
+    def test_shared_exchange_funding_rate_cache_is_singleflight_across_threads(self):
+        class SlowFundingExchange:
+            def __init__(self):
+                self.calls = 0
+                self.lock = threading.Lock()
+
+            def fetch_funding_rate(self, symbol, params=None):
+                with self.lock:
+                    self.calls += 1
+                time.sleep(0.02)
+                return {"symbol": symbol, "fundingRate": 0.0001}
+
+        exchange = SlowFundingExchange()
+        cached = CachedMarketDataExchange(exchange, funding_ttl_sec=60)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(
+                executor.map(lambda _index: cached.fetch_funding_rate(SYMBOL), range(8))
+            )
+
+        self.assertEqual(exchange.calls, 1)
+        self.assertTrue(all(result["symbol"] == SYMBOL for result in results))
+
+    def test_shared_exchange_serializes_distinct_funding_fetches(self):
+        class SlowFundingExchange:
+            def __init__(self):
+                self.calls = []
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+
+            def fetch_funding_rate(self, symbol, params=None):
+                with self.lock:
+                    self.calls.append(symbol)
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    time.sleep(0.03)
+                    return {"symbol": symbol, "fundingRate": 0.0001}
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        exchange = SlowFundingExchange()
+        cached = CachedMarketDataExchange(exchange, funding_ttl_sec=60)
+        symbols = [SYMBOL, SECOND_SYMBOL, BTC_SYMBOL, XAUT_SYMBOL]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(cached.fetch_funding_rate, symbols))
+
+        self.assertEqual(len(results), len(symbols))
+        self.assertEqual(exchange.max_active, 1)
+        self.assertEqual(set(exchange.calls), set(symbols))
 
     def test_shared_exchange_does_not_cache_invalid_funding_payload(self):
         exchange = FakeExchange()
@@ -8180,11 +9642,17 @@ class UnifiedBotTests(unittest.TestCase):
         cached = CachedMarketDataExchange(exchange)
         exchange.fetch_ohlcv_response_override = {"status": "error", "err_code": "502"}
 
-        self.assertEqual(cached.fetch_ohlcv(SYMBOL, timeframe="1m", limit=1), {"status": "error", "err_code": "502"})
+        self.assertEqual(
+            cached.fetch_ohlcv(SYMBOL, timeframe="1m", limit=1),
+            {"status": "error", "err_code": "502"},
+        )
 
         exchange.fetch_ohlcv_response_override = None
         exchange.ohlcv[(SYMBOL, "1m")] = [[1, 100.0, 101.0, 99.0, 100.5, 10.0]]
-        self.assertEqual(cached.fetch_ohlcv(SYMBOL, timeframe="1m", limit=1), exchange.ohlcv[(SYMBOL, "1m")])
+        self.assertEqual(
+            cached.fetch_ohlcv(SYMBOL, timeframe="1m", limit=1),
+            exchange.ohlcv[(SYMBOL, "1m")],
+        )
         self.assertEqual(len(exchange.ohlcv_calls), 2)
 
     def test_shared_exchange_ohlcv_cache_serializes_different_symbol_fetches(self):
@@ -8195,7 +9663,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.max_active = 0
                 self.lock = threading.Lock()
 
-            def fetch_ohlcv(self, symbol, timeframe="1m", since=None, limit=None, params=None):
+            def fetch_ohlcv(
+                self, symbol, timeframe="1m", since=None, limit=None, params=None
+            ):
                 with self.lock:
                     self.calls.append(symbol)
                     self.active += 1
@@ -8212,7 +9682,12 @@ class UnifiedBotTests(unittest.TestCase):
         symbols = [SYMBOL, SECOND_SYMBOL, BTC_SYMBOL, XAUT_SYMBOL]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            results = list(executor.map(lambda item: cached.fetch_ohlcv(item, timeframe="1m", limit=1), symbols))
+            results = list(
+                executor.map(
+                    lambda item: cached.fetch_ohlcv(item, timeframe="1m", limit=1),
+                    symbols,
+                )
+            )
 
         self.assertEqual(len(results), len(symbols))
         self.assertEqual(exchange.max_active, 1)
@@ -8234,7 +9709,9 @@ class UnifiedBotTests(unittest.TestCase):
         cached = CachedMarketDataExchange(exchange, ticker_ttl_sec=60)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            results = list(executor.map(lambda _index: cached.fetch_ticker(SYMBOL), range(8)))
+            results = list(
+                executor.map(lambda _index: cached.fetch_ticker(SYMBOL), range(8))
+            )
 
         self.assertEqual(exchange.calls, 1)
         self.assertTrue(all(result["symbol"] == SYMBOL for result in results))
@@ -8280,13 +9757,21 @@ class UnifiedBotTests(unittest.TestCase):
                 with self.lock:
                     self.calls += 1
                 time.sleep(0.02)
-                return {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]], "symbol": symbol}
+                return {
+                    "bids": [[9.99, 100.0]],
+                    "asks": [[10.01, 100.0]],
+                    "symbol": symbol,
+                }
 
         exchange = SlowOrderBookExchange()
         cached = CachedMarketDataExchange(exchange, order_book_ttl_sec=60)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            results = list(executor.map(lambda _index: cached.fetch_order_book(SYMBOL, limit=5), range(8)))
+            results = list(
+                executor.map(
+                    lambda _index: cached.fetch_order_book(SYMBOL, limit=5), range(8)
+                )
+            )
 
         self.assertEqual(exchange.calls, 1)
         self.assertTrue(all(result["symbol"] == SYMBOL for result in results))
@@ -8306,7 +9791,11 @@ class UnifiedBotTests(unittest.TestCase):
                     self.max_active = max(self.max_active, self.active)
                 try:
                     time.sleep(0.03)
-                    return {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]], "symbol": symbol}
+                    return {
+                        "bids": [[9.99, 100.0]],
+                        "asks": [[10.01, 100.0]],
+                        "symbol": symbol,
+                    }
                 finally:
                     with self.lock:
                         self.active -= 1
@@ -8316,7 +9805,11 @@ class UnifiedBotTests(unittest.TestCase):
         symbols = [SYMBOL, SECOND_SYMBOL, BTC_SYMBOL, XAUT_SYMBOL]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            results = list(executor.map(lambda item: cached.fetch_order_book(item, limit=5), symbols))
+            results = list(
+                executor.map(
+                    lambda item: cached.fetch_order_book(item, limit=5), symbols
+                )
+            )
 
         self.assertEqual(len(results), len(symbols))
         self.assertEqual(exchange.max_active, 1)
@@ -8370,15 +9863,21 @@ class UnifiedBotTests(unittest.TestCase):
         primary.balance_free = primary.balance_total = 100.0
         secondary.balance_free = secondary.balance_total = 250.0
         primary.positions = [{"symbol": SYMBOL, "side": "long", "contracts": 1.0}]
-        secondary.positions = [{"symbol": SECOND_SYMBOL, "side": "long", "contracts": 2.0}]
-        secondary.open_orders = [{"id": "alt_open", "symbol": SECOND_SYMBOL, "side": "buy", "amount": 1.0}]
+        secondary.positions = [
+            {"symbol": SECOND_SYMBOL, "side": "long", "contracts": 2.0}
+        ]
+        secondary.open_orders = [
+            {"id": "alt_open", "symbol": SECOND_SYMBOL, "side": "buy", "amount": 1.0}
+        ]
 
         exchange = MultiAccountExchange(
             {"primary": primary, "secondary": secondary},
             {"alt2": "secondary"},
         )
 
-        exchange.create_order(SECOND_SYMBOL, "limit", "buy", 2.0, 10.0, params={"reduceOnly": False})
+        exchange.create_order(
+            SECOND_SYMBOL, "limit", "buy", 2.0, 10.0, params={"reduceOnly": False}
+        )
         exchange.create_order(SYMBOL, "limit", "buy", 1.0, 10.0, params={})
         positions = exchange.fetch_positions([SYMBOL, SECOND_SYMBOL], params={})
         orders = exchange.fetch_open_orders(SECOND_SYMBOL, params={})
@@ -8388,9 +9887,15 @@ class UnifiedBotTests(unittest.TestCase):
         secondary_balance = exchange.fetch_balance_for_symbol(SECOND_SYMBOL, params={})
         merged_balance = exchange.fetch_balance(params={})
 
-        self.assertEqual([order["symbol"] for order in primary.created_orders], [SYMBOL])
-        self.assertEqual([order["symbol"] for order in secondary.created_orders], [SECOND_SYMBOL])
-        self.assertEqual({position["symbol"] for position in positions}, {SYMBOL, SECOND_SYMBOL})
+        self.assertEqual(
+            [order["symbol"] for order in primary.created_orders], [SYMBOL]
+        )
+        self.assertEqual(
+            [order["symbol"] for order in secondary.created_orders], [SECOND_SYMBOL]
+        )
+        self.assertEqual(
+            {position["symbol"] for position in positions}, {SYMBOL, SECOND_SYMBOL}
+        )
         self.assertEqual([order["id"] for order in orders], ["alt_open"])
         self.assertEqual(primary.fetch_positions_calls, 1)
         self.assertEqual(secondary.fetch_positions_calls, 1)
@@ -8400,7 +9905,9 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(secondary.set_leverage_calls, [(9, SECOND_SYMBOL, {})])
         self.assertEqual(len(primary.set_position_mode_calls), 1)
         self.assertEqual(len(secondary.set_position_mode_calls), 1)
-        self.assertEqual(secondary_balance["free"][config.EXCHANGE.quote_currency], 100.0)
+        self.assertEqual(
+            secondary_balance["free"][config.EXCHANGE.quote_currency], 100.0
+        )
         self.assertEqual(merged_balance["free"][config.EXCHANGE.quote_currency], 100.0)
         self.assertEqual(primary.fetch_balance_calls, 2)
         self.assertEqual(secondary.fetch_balance_calls, 0)
@@ -8408,7 +9915,12 @@ class UnifiedBotTests(unittest.TestCase):
     def test_multi_account_exchange_deduplicates_aggregate_private_reads(self):
         primary = FakeExchange("primary")
         secondary = FakeExchange("secondary")
-        duplicate_order = {"id": "same_order", "symbol": SYMBOL, "side": "sell", "amount": 1.0}
+        duplicate_order = {
+            "id": "same_order",
+            "symbol": SYMBOL,
+            "side": "sell",
+            "amount": 1.0,
+        }
         duplicate_position = {"symbol": SYMBOL, "side": "long", "contracts": 1.0}
         primary.open_orders = [dict(duplicate_order)]
         secondary.open_orders = [dict(duplicate_order)]
@@ -8468,7 +9980,9 @@ class UnifiedBotTests(unittest.TestCase):
             with override_config(RUNTIME=config.RUNTIME, EXCHANGE=exchange_config):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.exchange.fetch_ohlcv_failures = [
-                    ccxt.ExchangeNotAvailable("USDT 504 Gateway Timeout <!DOCTYPE html><html>too much html")
+                    ccxt.ExchangeNotAvailable(
+                        "USDT 504 Gateway Timeout <!DOCTYPE html><html>too much html"
+                    )
                 ]
                 bot.exchange.ohlcv[(SYMBOL, "1m")] = [
                     [1, 100.0, 101.0, 99.0, 100.5, 10.0],
@@ -8479,7 +9993,9 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertEqual(len(candles), 2)
                 self.assertEqual(len(bot.exchange.ohlcv_calls), 2)
-                self.assertEqual(bot.exchange.urls["hostnames"]["contract"], "api.two.test")
+                self.assertEqual(
+                    bot.exchange.urls["hostnames"]["contract"], "api.two.test"
+                )
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertEqual(rows[-1]["level"], "WARNING")
@@ -8518,12 +10034,17 @@ class UnifiedBotTests(unittest.TestCase):
             bot.benchmark_symbol = BTC_SYMBOL
             bot.symbols = [SECOND_SYMBOL]
             bot.entry_symbols = {SECOND_SYMBOL}
-            bot.market_by_symbol = {BTC_SYMBOL: BTC_MARKET, SECOND_SYMBOL: SECOND_MARKET}
+            bot.market_by_symbol = {
+                BTC_SYMBOL: BTC_MARKET,
+                SECOND_SYMBOL: SECOND_MARKET,
+            }
             benchmark_candles = ohlcv_series([100.0 + index for index in range(120)])
 
-            def fake_closed_candles(symbol, limit, max_ts=None, timeframe=None, exchange=None):
+            def fake_closed_candles(
+                symbol, limit, max_ts=None, timeframe=None, exchange=None
+            ):
                 if symbol == BTC_SYMBOL:
-                    return benchmark_candles[-int(limit):]
+                    return benchmark_candles[-int(limit) :]
                 raise ccxt.NetworkError(
                     'htx {"status":"error","err-code":"invalid-parameter",'
                     '"err-msg":"invalid parameter"}'
@@ -8535,7 +10056,8 @@ class UnifiedBotTests(unittest.TestCase):
 
             with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = [
-                    row for row in csv.DictReader(handle)
+                    row
+                    for row in csv.DictReader(handle)
                     if row["reason"] == "symbol_candles_unavailable"
                 ]
             self.assertTrue(rows)
@@ -8543,7 +10065,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(rows[-1]["error_code"], "invalid-parameter")
             self.assertEqual(rows[-1]["retryable"], "0")
 
-    def test_signal_cache_retries_same_candle_after_retryable_symbol_fetch_failure(self):
+    def test_signal_cache_retries_same_candle_after_retryable_symbol_fetch_failure(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = self.ema_test_strategy(
                 ema_use_rs_confirmation=False,
@@ -8558,16 +10082,20 @@ class UnifiedBotTests(unittest.TestCase):
                 bot.entry_symbols = {SYMBOL}
                 bot.market_by_symbol = {BTC_SYMBOL: BTC_MARKET, SYMBOL: MARKET}
                 benchmark_candles = ohlcv_series([100.0] * 120)
-                symbol_candles = ohlcv_series([100.0 + index * 0.1 for index in range(120)])
+                symbol_candles = ohlcv_series(
+                    [100.0 + index * 0.1 for index in range(120)]
+                )
                 calls = {"symbol": 0}
 
-                def fake_closed_candles(symbol, limit, max_ts=None, timeframe=None, exchange=None):
+                def fake_closed_candles(
+                    symbol, limit, max_ts=None, timeframe=None, exchange=None
+                ):
                     if symbol == BTC_SYMBOL:
-                        return benchmark_candles[-int(limit):]
+                        return benchmark_candles[-int(limit) :]
                     calls["symbol"] += 1
                     if calls["symbol"] == 1:
                         raise ccxt.RequestTimeout("temporary ohlcv timeout")
-                    return symbol_candles[-int(limit):]
+                    return symbol_candles[-int(limit) :]
 
                 bot._closed_candles = fake_closed_candles
 
@@ -8577,7 +10105,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(first_updated)
                 self.assertTrue(second_updated)
                 self.assertEqual(calls["symbol"], 2)
-                self.assertEqual(bot.signal_cache["closed_candle_ts"], int(benchmark_candles[-1][0]))
+                self.assertEqual(
+                    bot.signal_cache["closed_candle_ts"], int(benchmark_candles[-1][0])
+                )
                 self.assertIn(SYMBOL, bot.signal_cache["symbols"])
 
     def test_log_message_omits_html_gateway_body(self):
@@ -8588,7 +10118,9 @@ class UnifiedBotTests(unittest.TestCase):
                 "USDT 504 Gateway Timeout <!DOCTYPE html><html><body>cloudflare body</body></html>"
             )
 
-            self.assertEqual(message, "USDT 504 Gateway Timeout [html response omitted]")
+            self.assertEqual(
+                message, "USDT 504 Gateway Timeout [html response omitted]"
+            )
 
     def test_step_network_exception_logs_warning_not_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -8619,12 +10151,17 @@ class UnifiedBotTests(unittest.TestCase):
             runtime = replace(config.RUNTIME, poll_interval_sec=3)
             with override_config(RUNTIME=runtime):
                 bot = self.make_bot(Path(raw_tmp))
-                with patch("htxbot.runner.time.time", return_value=101.25), patch("htxbot.runner.time.sleep") as sleep:
+                with (
+                    patch("htxbot.runner.time.time", return_value=101.25),
+                    patch("htxbot.runner.time.sleep") as sleep,
+                ):
                     bot._sleep_after_poll(100.0)
 
                 sleep.assert_called_once_with(1.75)
 
-    def test_bulk_private_snapshots_fall_back_when_some_payload_symbols_are_missing(self):
+    def test_bulk_private_snapshots_fall_back_when_some_payload_symbols_are_missing(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             with override_config(RUNTIME=config.RUNTIME):
                 bot = self.make_bot(Path(raw_tmp))
@@ -8646,8 +10183,19 @@ class UnifiedBotTests(unittest.TestCase):
                     },
                 ]
                 bot.exchange.open_orders = [
-                    {"id": "with_symbol", "symbol": SYMBOL, "side": "sell", "price": 101.0, "amount": 2.0},
-                    {"id": "without_symbol", "side": "sell", "price": 102.0, "amount": 3.0},
+                    {
+                        "id": "with_symbol",
+                        "symbol": SYMBOL,
+                        "side": "sell",
+                        "price": 101.0,
+                        "amount": 2.0,
+                    },
+                    {
+                        "id": "without_symbol",
+                        "side": "sell",
+                        "price": 102.0,
+                        "amount": 3.0,
+                    },
                 ]
 
                 bot._reset_private_caches()
@@ -8655,7 +10203,9 @@ class UnifiedBotTests(unittest.TestCase):
                 orders = bot._fetch_open_orders(SYMBOL)
 
                 self.assertEqual(snapshot["long_size"], 5.0)
-                self.assertEqual({order["id"] for order in orders}, {"with_symbol", "without_symbol"})
+                self.assertEqual(
+                    {order["id"] for order in orders}, {"with_symbol", "without_symbol"}
+                )
                 self.assertEqual(bot.exchange.fetch_positions_calls, 2)
                 self.assertEqual(bot.exchange.fetch_open_orders_calls, 2)
 
@@ -8723,11 +10273,15 @@ class UnifiedBotTests(unittest.TestCase):
 
         long_profile = replace(
             config.resolve_profile("long"),
-            runtime=replace(config.resolve_profile("long").runtime, market_data_max_workers=2),
+            runtime=replace(
+                config.resolve_profile("long").runtime, market_data_max_workers=2
+            ),
         )
         short_profile = replace(
             config.resolve_profile("short"),
-            runtime=replace(config.resolve_profile("short").runtime, market_data_max_workers=2),
+            runtime=replace(
+                config.resolve_profile("short").runtime, market_data_max_workers=2
+            ),
         )
         combined = object.__new__(CombinedHtxFuturesBot)
         combined.bots = [SignalBot(long_profile), SignalBot(short_profile)]
@@ -8800,7 +10354,9 @@ class UnifiedBotTests(unittest.TestCase):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_reserved_symbols = {SYMBOL}
                 state = bot._get_state(SYMBOL)
-                state.entry_orders = [{"id": "short_entry", "side": "sell", "price": 10.1, "amount": 1.0}]
+                state.entry_orders = [
+                    {"id": "short_entry", "side": "sell", "price": 10.1, "amount": 1.0}
+                ]
 
                 status = bot._sync_state_with_position(
                     SYMBOL,
@@ -8817,7 +10373,10 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(status, "reserved")
                 self.assertNotIn(SYMBOL, bot.disabled_symbols)
                 self.assertFalse(state.entry_orders)
-                self.assertIn(("short_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}), bot.exchange.canceled_orders)
+                self.assertIn(
+                    ("short_entry", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertTrue(
@@ -8830,7 +10389,11 @@ class UnifiedBotTests(unittest.TestCase):
                     )
                 )
                 self.assertFalse(
-                    any(row["event"] == "sell_order_canceled" and row["order_id"] == "short_entry" for row in rows)
+                    any(
+                        row["event"] == "sell_order_canceled"
+                        and row["order_id"] == "short_entry"
+                        for row in rows
+                    )
                 )
                 self.assertTrue(any(row["event"] == "profile_reserved" for row in rows))
                 self.assertFalse(
@@ -8847,7 +10410,10 @@ class UnifiedBotTests(unittest.TestCase):
             ("short", "long", 110.0),
         ):
             with self.subTest(profile=profile_name):
-                with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile(profile_name):
+                with (
+                    tempfile.TemporaryDirectory() as raw_tmp,
+                    config.use_profile(profile_name),
+                ):
                     bot = self.make_bot(Path(raw_tmp))
                     bot.external_reserved_symbols = {SYMBOL}
                     state = bot._get_state(SYMBOL)
@@ -8872,22 +10438,30 @@ class UnifiedBotTests(unittest.TestCase):
                         f"{opposite_side}_entry_price": opposite_entry,
                     }
 
-                    closed_status = bot._sync_state_with_position(SYMBOL, snapshot, open_orders=[])
+                    closed_status = bot._sync_state_with_position(
+                        SYMBOL, snapshot, open_orders=[]
+                    )
 
                     self.assertEqual(closed_status, "closed")
                     self.assertNotIn(SYMBOL, bot.disabled_symbols)
                     self.assertEqual(bot._get_state(SYMBOL).position_size, 0.0)
-                    with bot.cycle_stats_path.open(newline="", encoding="utf-8") as handle:
+                    with bot.cycle_stats_path.open(
+                        newline="", encoding="utf-8"
+                    ) as handle:
                         cycle_rows = list(csv.DictReader(handle))
                     self.assertTrue(cycle_rows)
                     self.assertEqual(
                         cycle_rows[-1]["close_reason"],
                         f"position_replaced_by_{opposite_side}",
                     )
-                    self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), opposite_entry)
+                    self.assertAlmostEqual(
+                        float(cycle_rows[-1]["average_exit_price"]), opposite_entry
+                    )
                     self.assertLess(float(cycle_rows[-1]["realized_pnl_quote"]), 0.0)
 
-                    reserved_status = bot._sync_state_with_position(SYMBOL, snapshot, open_orders=[])
+                    reserved_status = bot._sync_state_with_position(
+                        SYMBOL, snapshot, open_orders=[]
+                    )
 
                     self.assertEqual(reserved_status, "reserved")
                     self.assertNotIn(SYMBOL, bot.disabled_symbols)
@@ -9007,10 +10581,14 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertEqual(status, "closed")
-                self.assertEqual(bot.exchange.fetch_order_calls[-1][0], "market_close_1")
+                self.assertEqual(
+                    bot.exchange.fetch_order_calls[-1][0], "market_close_1"
+                )
                 with bot.csv_path.open(newline="", encoding="utf-8") as handle:
                     trade_rows = list(csv.DictReader(handle))
-                fills = [row for row in trade_rows if row["event"] == "sell_order_filled"]
+                fills = [
+                    row for row in trade_rows if row["event"] == "sell_order_filled"
+                ]
                 self.assertTrue(fills)
                 self.assertEqual(fills[-1]["order_id"], "market_close_1")
                 self.assertAlmostEqual(float(fills[-1]["price"]), 95.0)
@@ -9018,14 +10596,24 @@ class UnifiedBotTests(unittest.TestCase):
                 with bot.cycle_stats_path.open(newline="", encoding="utf-8") as handle:
                     cycle_rows = list(csv.DictReader(handle))
                 self.assertTrue(cycle_rows)
-                self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), 95.0)
-                self.assertEqual(cycle_rows[-1]["close_reason"], "hard_stop_loss_market_close")
+                self.assertAlmostEqual(
+                    float(cycle_rows[-1]["average_exit_price"]), 95.0
+                )
+                self.assertEqual(
+                    cycle_rows[-1]["close_reason"], "hard_stop_loss_market_close"
+                )
                 self.assertLess(float(cycle_rows[-1]["realized_pnl_quote"]), 0.0)
 
     def test_dust_close_cycle_stats_keep_dust_close_reason(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
-            runtime = replace(config.RUNTIME, reduce_only_enabled=True, fetch_fill_details_on_sync=True)
-            risk = replace(config.RISK, dust_position_notional=100.0, dust_close_enabled=True)
+            runtime = replace(
+                config.RUNTIME,
+                reduce_only_enabled=True,
+                fetch_fill_details_on_sync=True,
+            )
+            risk = replace(
+                config.RISK, dust_position_notional=100.0, dust_close_enabled=True
+            )
             with override_config(RUNTIME=runtime, RISK=risk):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -9040,7 +10628,9 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertTrue(placed)
                 self.assertEqual(state.pending_close_reason, "dust_position_close")
-                self.assertEqual(state.pending_close_order["reason"], "dust_position_close")
+                self.assertEqual(
+                    state.pending_close_order["reason"], "dust_position_close"
+                )
                 order_id = state.pending_close_order["id"]
                 bot.exchange.has["fetchOrder"] = True
                 bot.exchange.fetch_order_responses[order_id] = {
@@ -9075,7 +10665,9 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertAlmostEqual(float(cycle_rows[-1]["average_exit_price"]), 9.5)
                 self.assertEqual(bot._get_state(SYMBOL).pending_close_order, {})
 
-    def test_combined_reserved_symbols_include_exchange_side_opposite_profile_activity(self):
+    def test_combined_reserved_symbols_include_exchange_side_opposite_profile_activity(
+        self,
+    ):
         class ReservationBot:
             def __init__(self, profile, positions=None, orders=None):
                 self.profile = profile
@@ -9098,7 +10690,9 @@ class UnifiedBotTests(unittest.TestCase):
                     return default
 
             def _order_remaining_amount(self, order):
-                return self._safe_float(order.get("remaining"), self._safe_float(order.get("amount"), 0.0))
+                return self._safe_float(
+                    order.get("remaining"), self._safe_float(order.get("amount"), 0.0)
+                )
 
             def _get_min_contracts(self, symbol):
                 return 1.0
@@ -9127,12 +10721,16 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertIn(SYMBOL, reserved)
 
         short_bot.positions = []
-        short_bot.orders = [{"symbol": SYMBOL, "side": "sell", "amount": 2.0, "remaining": 2.0}]
+        short_bot.orders = [
+            {"symbol": SYMBOL, "side": "sell", "amount": 2.0, "remaining": 2.0}
+        ]
 
         reserved = CombinedHtxFuturesBot._reserved_symbols(combined, exclude=long_bot)
         self.assertIn(SYMBOL, reserved)
 
-    def make_btc_hedge_combined(self, tmp_path: Path, positions=None, open_orders=None, ticker=None):
+    def make_btc_hedge_combined(
+        self, tmp_path: Path, positions=None, open_orders=None, ticker=None
+    ):
         with config.use_profile("long"):
             long_bot = self.make_bot(tmp_path / "long")
         with config.use_profile("short"):
@@ -9171,8 +10769,20 @@ class UnifiedBotTests(unittest.TestCase):
                 btc_hedge_cooldown_sec=0.0,
             )
             positions = [
-                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
-                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 5.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 10.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
+                {
+                    "symbol": SECOND_SYMBOL,
+                    "side": "short",
+                    "contracts": 5.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
             ]
             with override_config(HEDGE=hedge):
                 combined, exchange = self.make_btc_hedge_combined(
@@ -9200,8 +10810,20 @@ class UnifiedBotTests(unittest.TestCase):
                 btc_hedge_cooldown_sec=0.0,
             )
             positions = [
-                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
-                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 5.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 10.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
+                {
+                    "symbol": SECOND_SYMBOL,
+                    "side": "short",
+                    "contracts": 5.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
             ]
             with override_config(HEDGE=hedge):
                 combined, exchange = self.make_btc_hedge_combined(
@@ -9217,7 +10839,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(exchange.fetch_open_orders_calls, 1)
             with combined.bots[0].csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
-            order_rows = [row for row in rows if row["reason"] == "open_orders_fetch_failed"]
+            order_rows = [
+                row for row in rows if row["reason"] == "open_orders_fetch_failed"
+            ]
             self.assertTrue(order_rows)
             self.assertEqual(order_rows[-1]["event"], "btc_hedge")
             self.assertEqual(order_rows[-1]["exception_type"], "TypeError")
@@ -9231,9 +10855,28 @@ class UnifiedBotTests(unittest.TestCase):
                 btc_hedge_cooldown_sec=0.0,
             )
             positions = [
-                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
-                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 5.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
-                {"symbol": BTC_SYMBOL, "side": "short", "contracts": 8.0, "entryPrice": 100.0, "available": 8.0, "marginMode": config.RISK.margin_mode},
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 10.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
+                {
+                    "symbol": SECOND_SYMBOL,
+                    "side": "short",
+                    "contracts": 5.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
+                {
+                    "symbol": BTC_SYMBOL,
+                    "side": "short",
+                    "contracts": 8.0,
+                    "entryPrice": 100.0,
+                    "available": 8.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
             ]
             with override_config(HEDGE=hedge):
                 combined, exchange = self.make_btc_hedge_combined(
@@ -9260,9 +10903,28 @@ class UnifiedBotTests(unittest.TestCase):
                 btc_hedge_cooldown_sec=0.0,
             )
             positions = [
-                {"symbol": SYMBOL, "side": "long", "contracts": 1.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
-                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 6.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
-                {"symbol": BTC_SYMBOL, "side": "short", "contracts": 3.0, "entryPrice": 100.0, "available": 3.0, "marginMode": config.RISK.margin_mode},
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 1.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
+                {
+                    "symbol": SECOND_SYMBOL,
+                    "side": "short",
+                    "contracts": 6.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
+                {
+                    "symbol": BTC_SYMBOL,
+                    "side": "short",
+                    "contracts": 3.0,
+                    "entryPrice": 100.0,
+                    "available": 3.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
             ]
             with override_config(HEDGE=hedge):
                 combined, exchange = self.make_btc_hedge_combined(
@@ -9289,10 +10951,22 @@ class UnifiedBotTests(unittest.TestCase):
                 btc_hedge_cooldown_sec=0.0,
             )
             positions = [
-                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 10.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
             ]
             open_orders = [
-                {"id": "btc_pending", "symbol": BTC_SYMBOL, "side": "sell", "amount": 1.0, "remaining": 1.0},
+                {
+                    "id": "btc_pending",
+                    "symbol": BTC_SYMBOL,
+                    "side": "sell",
+                    "amount": 1.0,
+                    "remaining": 1.0,
+                },
             ]
             with override_config(HEDGE=hedge):
                 combined, exchange = self.make_btc_hedge_combined(
@@ -9315,9 +10989,28 @@ class UnifiedBotTests(unittest.TestCase):
                 btc_hedge_cooldown_sec=0.0,
             )
             positions = [
-                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
-                {"symbol": SECOND_SYMBOL, "side": "short", "contracts": 5.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
-                {"symbol": BTC_SYMBOL, "side": "short", "contracts": 8.0, "entryPrice": 100.0, "available": 0.0, "marginMode": config.RISK.margin_mode},
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 10.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
+                {
+                    "symbol": SECOND_SYMBOL,
+                    "side": "short",
+                    "contracts": 5.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
+                {
+                    "symbol": BTC_SYMBOL,
+                    "side": "short",
+                    "contracts": 8.0,
+                    "entryPrice": 100.0,
+                    "available": 0.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
             ]
             with override_config(HEDGE=hedge):
                 combined, exchange = self.make_btc_hedge_combined(
@@ -9339,7 +11032,13 @@ class UnifiedBotTests(unittest.TestCase):
                 btc_hedge_cooldown_sec=0.0,
             )
             positions = [
-                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 10.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
             ]
             with override_config(HEDGE=hedge):
                 combined, exchange = self.make_btc_hedge_combined(
@@ -9362,7 +11061,14 @@ class UnifiedBotTests(unittest.TestCase):
                 btc_hedge_cooldown_sec=0.0,
             )
             positions = [
-                {"symbol": BTC_SYMBOL, "side": "short", "contracts": 3.0, "entryPrice": 100.0, "available": 3.0, "marginMode": config.RISK.margin_mode},
+                {
+                    "symbol": BTC_SYMBOL,
+                    "side": "short",
+                    "contracts": 3.0,
+                    "entryPrice": 100.0,
+                    "available": 3.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
             ]
             with override_config(HEDGE=hedge):
                 combined, exchange = self.make_btc_hedge_combined(
@@ -9391,7 +11097,13 @@ class UnifiedBotTests(unittest.TestCase):
                 btc_hedge_cooldown_sec=0.0,
             )
             positions = [
-                {"symbol": SYMBOL, "side": "long", "contracts": 10.0, "entryPrice": 100.0, "marginMode": config.RISK.margin_mode},
+                {
+                    "symbol": SYMBOL,
+                    "side": "long",
+                    "contracts": 10.0,
+                    "entryPrice": 100.0,
+                    "marginMode": config.RISK.margin_mode,
+                },
             ]
             with override_config(HEDGE=hedge):
                 combined, exchange = self.make_btc_hedge_combined(
@@ -9407,11 +11119,15 @@ class UnifiedBotTests(unittest.TestCase):
     def test_combined_rejects_mismatched_api_credentials(self):
         long_profile = replace(
             config.resolve_profile("long"),
-            api_credentials=replace(config.resolve_profile("long").api_credentials, api_key="long_key"),
+            api_credentials=replace(
+                config.resolve_profile("long").api_credentials, api_key="long_key"
+            ),
         )
         short_profile = replace(
             config.resolve_profile("short"),
-            api_credentials=replace(config.resolve_profile("short").api_credentials, api_key="short_key"),
+            api_credentials=replace(
+                config.resolve_profile("short").api_credentials, api_key="short_key"
+            ),
         )
         combined = object.__new__(CombinedHtxFuturesBot)
         combined.profiles = [long_profile, short_profile]
@@ -9448,7 +11164,11 @@ class UnifiedBotTests(unittest.TestCase):
                 profile = config.resolve_profile(name)
                 return replace(
                     profile,
-                    api_credentials=replace(profile.api_credentials, api_key="test_key", api_secret="test_secret"),
+                    api_credentials=replace(
+                        profile.api_credentials,
+                        api_key="test_key",
+                        api_secret="test_secret",
+                    ),
                     runtime=replace(
                         profile.runtime,
                         dry_run=True,
@@ -9463,7 +11183,9 @@ class UnifiedBotTests(unittest.TestCase):
                         external_price_csv_file=str(tmp_path / f"{name}_external.csv"),
                         csv_archive_dir=str(tmp_path / f"{name}_archive"),
                     ),
-                    external_price_feed=replace(profile.external_price_feed, rest_timeout_sec=timeout),
+                    external_price_feed=replace(
+                        profile.external_price_feed, rest_timeout_sec=timeout
+                    ),
                 )
 
             combined = CombinedHtxFuturesBot(
@@ -9473,9 +11195,16 @@ class UnifiedBotTests(unittest.TestCase):
                 )
             )
 
-            self.assertIsNot(combined.bots[0].external_price_feed, combined.bots[1].external_price_feed)
-            self.assertEqual(combined.bots[0].external_price_feed.settings.rest_timeout_sec, 1.0)
-            self.assertEqual(combined.bots[1].external_price_feed.settings.rest_timeout_sec, 9.0)
+            self.assertIsNot(
+                combined.bots[0].external_price_feed,
+                combined.bots[1].external_price_feed,
+            )
+            self.assertEqual(
+                combined.bots[0].external_price_feed.settings.rest_timeout_sec, 1.0
+            )
+            self.assertEqual(
+                combined.bots[1].external_price_feed.settings.rest_timeout_sec, 9.0
+            )
 
     def test_secondary_api_coin_universe_is_loaded_from_env(self):
         with patch.dict(
