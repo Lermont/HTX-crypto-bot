@@ -8,6 +8,18 @@ import config
 
 
 @dataclass
+
+@dataclass
+class OrderRequest:
+    symbol: str
+    order_type: str
+    side: str
+    amount: float
+    price: Optional[float]
+    reduce_only: bool = False
+
+
+@dataclass
 class SignalContext:
     closes: List[float]
     benchmark_closes: List[float]
@@ -161,6 +173,7 @@ class TradeState:
 
 
 __all__ = [
+    "OrderRequest",
     "ExitLadderConfig",
     "ExitLadderPreflight",
     "PositionLifecycle",

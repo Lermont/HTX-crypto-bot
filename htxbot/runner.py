@@ -218,7 +218,6 @@ class RunnerMixin:
             self.setup()
             self._log_event("INFO", "HTX futures bot loop started", event="futures_setup", reason="bot_started")
 
-            from concurrent.futures import ThreadPoolExecutor
 
             while True:
                 self._reset_private_caches()
