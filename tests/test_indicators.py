@@ -64,6 +64,12 @@ class IndicatorMathTests(unittest.TestCase):
         self.assertAlmostEqual(series[1], 16.6666666667)
         self.assertAlmostEqual(series[-1], calculate_ema(prices, 2))
 
+    def test_calculate_ema_returns_zero_for_empty_prices(self):
+        self.assertEqual(calculate_ema([], 10), 0.0)
+
+    def test_calculate_ema_series_returns_empty_list_for_empty_prices(self):
+        self.assertEqual(calculate_ema_series([], 10), [])
+
     def test_rsi_handles_rising_falling_flat_and_short_history(self):
         rising = [float(index) for index in range(1, 40)]
         falling = list(reversed(rising))
