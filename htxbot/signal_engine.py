@@ -1,4 +1,3 @@
-import concurrent.futures
 # -*- coding: utf-8 -*-
 
 import concurrent.futures
