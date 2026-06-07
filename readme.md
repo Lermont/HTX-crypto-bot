@@ -248,7 +248,7 @@ The overlay classifies regimes:
 - `crypto_underperforms_gold`: gold is strong, while BTC is weak or significantly lagging. Long budget is reduced, short side can remain softer, averaging may be disabled, and time-exit accelerates.
 - `crypto_risk_on`: BTC is strong, gold is lagging. The bot maintains normal long behavior and may reduce short aggressiveness.
 - `broad_liquidity_risk_on`: BTC and gold are both strong. This is a constructive regime, but does not automatically increase leverage.
-- `deleveraging`: BTC and gold are both weak. New entries may be blocked, averaging is disabled, and exits are accelerated.
+- `deleveraging`: BTC and gold are both weak. Long entries may be blocked while short entries are allowed with a reduced budget, averaging is disabled, and exits are accelerated.
 - `neutral` or `macro_unavailable`: overlay does not add strong directional filters.
 
 Macro context is cached, written to CSV, and used in decisions for new-entry blocks, averaging blocks, ladder multipliers, and time-exit multipliers. Exact regime logic is described in [strategy.md](strategy.md).

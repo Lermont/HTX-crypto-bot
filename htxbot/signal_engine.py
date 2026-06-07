@@ -752,7 +752,8 @@ class SignalMixin:
                 {
                     "regime": "deleveraging",
                     "ladder_multiplier": 1.4,
-                    "disable_new_entries": bool(macro.panic_disable_new_entries),
+                    "long_budget_multiplier": 0.0 if macro.panic_disable_new_entries else 1.0,
+                    "short_budget_multiplier": 0.25 if macro.panic_disable_new_entries else 1.0,
                     "disable_averaging": True,
                     "time_exit_multiplier": 0.65,
                     "reason": "btc_weak_gold_weak",
