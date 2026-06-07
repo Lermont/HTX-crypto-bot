@@ -18,6 +18,26 @@ class RunnerMixin:
             retryable=is_transient,
         )
 
+    def _post_sync_order_hygiene(self, symbol: str, reason: str):
+        reset_private_caches = getattr(self, "_reset_private_caches", None)
+        if reset_private_caches:
+            reset_private_caches()
+        open_orders = self._fetch_open_orders(symbol)
+        if open_orders is None:
+            self._log_event(
+                "WARNING",
+                f"Skipping post-sync order hygiene for {symbol}: open orders are unavailable",
+                event="state_exchange_mismatch",
+                symbol=symbol,
+                reason=f"{reason}_open_orders_unavailable",
+            )
+            return None
+        sell_orders_valid = self._validate_sell_orders(symbol, open_orders)
+        entry_orders_valid = self._validate_entry_orders(symbol, open_orders)
+        if not sell_orders_valid or not entry_orders_valid:
+            return None
+        return open_orders
+
     def setup(self):
         self._log_event("INFO", "Initializing HTX futures bot", event="futures_setup", reason="startup")
         self._load_markets_with_retry()
@@ -133,6 +153,7 @@ class RunnerMixin:
 
     def step_symbol(self, symbol: str):
         state = self._get_state(symbol)
+        had_tracked_exit_orders = bool(state.sell_ladder_orders or state.hard_stop_order)
         snapshot = self._fetch_position_snapshot(symbol)
         if not snapshot.get("ok", False):
             return
@@ -148,9 +169,21 @@ class RunnerMixin:
             )
             return
         sync_status = self._sync_state_with_position(symbol, snapshot, open_orders=open_orders)
-        if sync_status in {"disabled", "closed", "reserved"}:
+        if sync_status in {"disabled", "reserved"}:
             return
         if sync_status == "position_changed":
+            if not had_tracked_exit_orders:
+                post_sync_open_orders = self._post_sync_order_hygiene(symbol, reason="post_position_change")
+                if post_sync_open_orders is None:
+                    return
+                open_orders = post_sync_open_orders
+                post_sync_state = self._get_state(symbol)
+                if post_sync_state.sell_ladder_orders or post_sync_state.hard_stop_order:
+                    return
+            else:
+                return
+        elif sync_status == "closed":
+            self._post_sync_order_hygiene(symbol, reason="post_position_closed")
             return
         if self._maybe_close_dust_position(symbol, open_orders):
             return
@@ -180,9 +213,17 @@ class RunnerMixin:
                 self._freeze_no_more_buys(symbol, reason="signal_invalid_or_missing")
             if self._maybe_apply_absolute_force_exit(symbol, reason="absolute_force_exit_elapsed"):
                 return
+            self._ensure_hard_stop_loss(symbol, signal=signal)
+            state = self._get_state(symbol)
+            if state.sell_ladder_mode == "hard_stop_loss":
+                return
+            if self._maybe_apply_soft_defensive_exit(symbol, signal):
+                return
             if self._maybe_apply_controlled_loss_exit(symbol, signal):
                 return
             if self._maybe_apply_urgent_time_exit(symbol, signal):
+                return
+            if self._maybe_apply_account_pnl_trailing(symbol, signal):
                 return
             if self._maybe_apply_account_profit_unload(symbol, signal):
                 return
@@ -191,10 +232,7 @@ class RunnerMixin:
                 self._maybe_manage_exit_runner(symbol, signal)
             self._ensure_sell_ladder(symbol)
             state = self._get_state(symbol)
-            if state.frozen_no_more_buys:
-                self._maybe_place_frozen_recovery_buy(symbol, signal)
-            else:
-                self._maybe_place_average_buy(symbol, signal)
+            self._maybe_place_average_buy(symbol, signal)
             return
 
         if state.position_size <= 0:
@@ -209,6 +247,16 @@ class RunnerMixin:
                     reason="flat_symbol_exit_order",
                 )
                 self._cancel_sell_orders(symbol, reason="flat_symbol_exit_order")
+            if state.hard_stop_order:
+                self._log_event(
+                    "WARNING",
+                    f"Tracked {exit_side} hard stop remains on flat {symbol}; canceling tracked bot order",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=exit_side,
+                    reason="flat_symbol_hard_stop_order",
+                )
+                self._cancel_hard_stop_order(symbol, reason="flat_symbol_hard_stop_order")
             if not state.entry_orders:
                 self._maybe_place_initial_buy(symbol, signal)
 
@@ -218,18 +266,27 @@ class RunnerMixin:
             self.setup()
             self._log_event("INFO", "HTX futures bot loop started", event="futures_setup", reason="bot_started")
 
-            from concurrent.futures import ThreadPoolExecutor
-
             while True:
+                started_at = time.time()
+                self._assert_runtime_lock_owned()
                 self._reset_private_caches()
+                reset_market_data = getattr(self, "_reset_market_data_caches", None)
+                if reset_market_data:
+                    reset_market_data()
                 self._update_signal_cache_if_needed()
                 self._prepare_new_entry_gate()
+                prefetch_market_data = getattr(self, "_prefetch_market_data_snapshots", None)
+                if prefetch_market_data:
+                    prefetch_market_data()
+                prefetch_private = getattr(self, "_prefetch_private_snapshots", None)
+                if prefetch_private:
+                    prefetch_private()
 
                 for symbol in self.symbols:
                     self._run_step_symbol_safe(symbol)
 
                 self._save_state()
-                time.sleep(config.RUNTIME.poll_interval_sec)
+                self._sleep_after_poll(started_at)
         finally:
             self._release_runtime_lock()
 
@@ -238,3 +295,8 @@ class RunnerMixin:
             self.step_symbol(symbol)
         except Exception as exc:
             self._log_step_exception(symbol, exc)
+
+    def _sleep_after_poll(self, started_at: float):
+        elapsed = max(0.0, time.time() - started_at)
+        interval = max(0.0, float(config.RUNTIME.poll_interval_sec))
+        time.sleep(max(0.0, interval - elapsed))

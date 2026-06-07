@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
@@ -13,8 +14,51 @@ from typing import Any, Dict, Optional
 
 import config
 
+from .concurrency import instance_rlock
+from .fileio import replace_path_with_retry
+
+
+_monitoring_global_lock = threading.RLock()
+_CSV_STREAM_COPY_CHUNK_SIZE = 1024 * 1024
+
 
 class MonitoringMixin:
+    def _monitoring_write_failed_once(self, path: Optional[Path], action: str, exc: Exception):
+        key = (str(path or ""), action)
+        logged = getattr(self, "_monitoring_write_failures", set())
+        if key in logged:
+            return
+        if not isinstance(logged, set):
+            logged = set()
+        logged.add(key)
+        self._monitoring_write_failures = logged
+        logger = getattr(self, "log", logging.getLogger(__name__))
+        logger.warning("Could not %s %s: %s", action, path, exc)
+
+    def _append_headered_csv_row(self, path: Optional[Path], header: Sequence[str], row: Sequence[Any]) -> bool:
+        if not path:
+            return True
+        try:
+            with _monitoring_global_lock:
+                with instance_rlock(self, "_monitoring_lock"):
+                    self._rotate_csv_if_needed(path, header)
+                    with path.open("a", newline="", encoding="utf-8") as f:
+                        csv.writer(f).writerow(row)
+            return True
+        except Exception as exc:
+            self._monitoring_write_failed_once(path, "append CSV row", exc)
+            return False
+
+    def _replace_path_with_retry(self, src: Path, dst: Path, attempts: int = 30, delay_sec: float = 0.05):
+        replace_path_with_retry(
+            src,
+            dst,
+            attempts=attempts,
+            initial_delay_sec=delay_sec,
+            max_delay_sec=0.5,
+            replace_func=os.replace,
+        )
+
     def _build_logger(self) -> logging.Logger:
         logger = logging.getLogger(f"htx_futures_bot.{config.BOT_NAME}")
         logger.setLevel(getattr(logging, config.MONITORING.log_level.upper(), logging.INFO))
@@ -28,6 +72,7 @@ class MonitoringMixin:
 
     def _ensure_headered_csv_file(self, path: Path, header: Sequence[str]):
         path.parent.mkdir(parents=True, exist_ok=True)
+        header = list(header)
         if not path.exists() or path.stat().st_size == 0:
             with path.open("w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(header)
@@ -40,64 +85,75 @@ class MonitoringMixin:
             self.log.warning("Could not verify CSV header for %s: %s", path, exc)
             return
 
-        normalized_first_row = list(first_row)
-        if normalized_first_row:
-            normalized_first_row[0] = normalized_first_row[0].lstrip("\ufeff")
-        if normalized_first_row == list(header):
+        normalized_first_row = self._normalize_csv_header_row(first_row)
+        if normalized_first_row == header:
             return
 
         if normalized_first_row and normalized_first_row[0] == header[0]:
-            tmp_path = path.with_name(f"{path.name}.tmp")
-            try:
-                with path.open("r", newline="", encoding="utf-8") as src, tmp_path.open("w", newline="", encoding="utf-8") as dst:
-                    reader = csv.DictReader(src)
-                    if reader.fieldnames:
-                        reader.fieldnames = normalized_first_row
-                    writer = csv.DictWriter(dst, fieldnames=header, extrasaction="ignore")
-                    writer.writeheader()
-                    for row in reader:
-                        # Migration for legacy ema names
-                        if "ema30" in row and "ema50" not in row:
-                            row["ema50"] = row["ema30"]
-                        if "ema60" in row and "ema100" not in row:
-                            row["ema100"] = row["ema60"]
-                        writer.writerow({name: row.get(name, "") for name in header})
-                for attempt in range(10):
-                    try:
-                        os.replace(tmp_path, path)
-                        break
-                    except PermissionError:
-                        if attempt < 9:
-                            time.sleep(0.1)
-                        else:
-                            raise
-                return
-            except Exception as exc:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                self.log.warning("Could not replace CSV header for %s: %s", path, exc)
-                return
+            self._rewrite_headered_csv_file(path, header, normalized_first_row)
+            return
 
-        tmp_path = path.with_name(f"{path.name}.tmp")
+        self._prepend_csv_header(path, header)
+
+    def _csv_tmp_path(self, path: Path) -> Path:
+        return path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+
+    def _normalize_csv_header_row(self, row: Sequence[str]) -> list:
+        normalized = list(row or [])
+        if normalized:
+            normalized[0] = normalized[0].lstrip("\ufeff")
+        return normalized
+
+    def _legacy_csv_row_dict(self, source_header: Sequence[str], values: Sequence[Any]) -> Dict[str, Any]:
+        row = {}
+        for index, name in enumerate(source_header):
+            if not name:
+                continue
+            row[str(name)] = values[index] if index < len(values) else ""
+        return row
+
+    def _rewrite_headered_csv_file(self, path: Path, header: Sequence[str], normalized_first_row: Sequence[str]):
+        tmp_path = self._csv_tmp_path(path)
+        header = list(header)
+        source_header = list(normalized_first_row)
         try:
-            with path.open("r", encoding="utf-8") as src, tmp_path.open("w", newline="", encoding="utf-8") as dst:
+            with path.open("r", newline="", encoding="utf-8") as src, tmp_path.open("w", newline="", encoding="utf-8") as dst:
+                reader = csv.reader(src)
+                first_row = next(reader, [])
+                if first_row:
+                    source_header = self._normalize_csv_header_row(first_row)
+                writer = csv.writer(dst)
+                writer.writerow(header)
+                for values in reader:
+                    row = self._legacy_csv_row_dict(source_header, values)
+                    self._apply_legacy_csv_aliases(row)
+                    writer.writerow([row.get(name, "") for name in header])
+            self._replace_path_with_retry(tmp_path, path)
+        except Exception as exc:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.log.warning("Could not replace CSV header for %s: %s", path, exc)
+
+    def _apply_legacy_csv_aliases(self, row: Dict[str, Any]):
+        legacy_aliases = {"ema50": "ema30", "ema100": "ema60"}
+        for current_name, legacy_name in legacy_aliases.items():
+            if legacy_name in row and current_name not in row:
+                row[current_name] = row[legacy_name]
+
+    def _prepend_csv_header(self, path: Path, header: Sequence[str]):
+        tmp_path = self._csv_tmp_path(path)
+        try:
+            with tmp_path.open("w", newline="", encoding="utf-8") as dst:
                 csv.writer(dst).writerow(header)
-                while True:
-                    chunk = src.read(8192)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
-            for attempt in range(10):
-                try:
-                    os.replace(tmp_path, path)
-                    break
-                except PermissionError:
-                    if attempt < 9:
-                        time.sleep(0.1)
-                    else:
-                        raise
+                with path.open("r", newline="", encoding="utf-8") as src:
+                    while True:
+                        chunk = src.read(_CSV_STREAM_COPY_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+            self._replace_path_with_retry(tmp_path, path)
         except Exception as exc:
             try:
                 tmp_path.unlink(missing_ok=True)
@@ -153,7 +209,7 @@ class MonitoringMixin:
 
         timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         millis = int((time.time() % 1) * 1000)
-        return archive_dir / f"{path.stem}.{timestamp}_{millis:03d}{path.suffix}"
+        return archive_dir / f"{path.stem}.{timestamp}_{millis:03d}_{os.getpid()}_{time.time_ns()}{path.suffix}"
 
     def _rotate_csv_if_needed(self, path: Path, header: Sequence[str]):
         max_bytes = max(0, int(config.MONITORING.csv_rotate_max_bytes or 0))
@@ -162,15 +218,7 @@ class MonitoringMixin:
 
         archive_path = self._csv_archive_path(path)
         try:
-            for attempt in range(10):
-                try:
-                    os.replace(path, archive_path)
-                    break
-                except PermissionError:
-                    if attempt < 9:
-                        time.sleep(0.1)
-                    else:
-                        raise
+            self._replace_path_with_retry(path, archive_path)
             self._ensure_headered_csv_file(path, header)
             self.log.info("CSV log rotated: %s -> %s", path, archive_path)
         except Exception as exc:
@@ -183,27 +231,37 @@ class MonitoringMixin:
 
         archive_path = self._csv_archive_path(path)
         try:
-            for attempt in range(10):
-                try:
-                    os.replace(path, archive_path)
-                    break
-                except PermissionError:
-                    if attempt < 9:
-                        time.sleep(0.1)
-                    else:
-                        raise
+            self._replace_path_with_retry(path, archive_path)
             self._ensure_jsonl_file(path)
             self.log.info("JSONL log rotated: %s -> %s", path, archive_path)
         except Exception as exc:
             self.log.warning("Could not rotate JSONL log %s: %s", path, exc)
 
-    def _append_jsonl(self, path: Optional[Path], payload: Dict[str, Any]):
+    def _append_jsonl(self, path: Optional[Path], payload: Dict[str, Any]) -> bool:
         if not path:
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._rotate_jsonl_if_needed(path)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, sort_keys=True) + "\n")
+            return True
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, sort_keys=True) + "\n"
+            with _monitoring_global_lock:
+                with instance_rlock(self, "_monitoring_lock"):
+                    self._rotate_jsonl_if_needed(path)
+                    last_exc = None
+                    for attempt in range(3):
+                        try:
+                            with path.open("a", encoding="utf-8") as f:
+                                f.write(line)
+                            return True
+                        except OSError as exc:
+                            last_exc = exc
+                            time.sleep(0.05 * (attempt + 1))
+                    if last_exc is not None:
+                        self._monitoring_write_failed_once(path, "append JSONL log", last_exc)
+                        return False
+        except Exception as exc:
+            self._monitoring_write_failed_once(path, "append JSONL log", exc)
+            return False
+        return False
 
     def _sanitize_for_log(self, value: Any, depth: int = 0) -> Any:
         if depth > 8:
@@ -337,11 +395,23 @@ class MonitoringMixin:
     def _signal_block_reason(self, signal: Optional[dict]) -> str:
         if not signal:
             return "signal_missing"
-        if not signal.get("valid"):
-            return "signal_invalid"
         if signal.get("entry_valid"):
             return ""
-        for key in ("macro_valid", "pullback_valid", "trigger_valid", "rs_confirm_valid", "btc_entry_valid"):
+        detailed_reason = getattr(self, "_entry_raw_signal_block_reason", None)
+        if callable(detailed_reason):
+            return detailed_reason(signal)
+        if not signal.get("valid"):
+            return "signal_invalid"
+        for key in (
+            "macro_valid",
+            "pullback_valid",
+            "trigger_valid",
+            "rs_confirm_valid",
+            "btc_entry_valid",
+            "volume_valid",
+            "chop_valid",
+            "market_structure_valid",
+        ):
             if key in signal and not signal.get(key):
                 return key
         return "entry_valid_false"
@@ -414,6 +484,16 @@ class MonitoringMixin:
             self._fmt_monitoring_float(signal.get("volatility"), 8),
             self._fmt_monitoring_float(signal.get("budget_multiplier"), 8),
             self._fmt_monitoring_float(signal.get("ladder_multiplier"), 8),
+            int(bool(signal.get("volume_valid", False))) if "volume_valid" in signal else "",
+            self._fmt_monitoring_float(signal.get("volume_ratio"), 8),
+            self._fmt_monitoring_float(signal.get("volume_spike_ratio"), 8),
+            signal.get("volume_spike_direction", ""),
+            int(bool(signal.get("volume_profile_valid", False))) if "volume_profile_valid" in signal else "",
+            int(bool(signal.get("volume_profile_break", False))) if "volume_profile_break" in signal else "",
+            self._fmt_monitoring_float(signal.get("volume_profile_poc"), 12),
+            self._fmt_monitoring_float(signal.get("volume_profile_value_area_low"), 12),
+            self._fmt_monitoring_float(signal.get("volume_profile_value_area_high"), 12),
+            signal.get("volume_reason", ""),
             signal.get("macro_regime", ""),
             int(bool(external_context.get("valid", False))) if external_context else "",
             int(bool(external_context.get("stale", False))) if external_context else "",
@@ -428,9 +508,7 @@ class MonitoringMixin:
 
         csv_path = getattr(self, "signal_analytics_csv_path", None)
         if csv_path:
-            self._rotate_csv_if_needed(csv_path, self.SIGNAL_ANALYTICS_CSV_HEADER)
-            with csv_path.open("a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(row)
+            self._append_headered_csv_row(csv_path, self.SIGNAL_ANALYTICS_CSV_HEADER, row)
 
         payload = {
             "ts": int(time.time()),
@@ -502,80 +580,79 @@ class MonitoringMixin:
             if not ema60:
                 ema60 = state.last_ema60
 
-        self._rotate_csv_if_needed(self.csv_path, self.CSV_HEADER)
-        with self.csv_path.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    int(time.time()),
-                    level,
-                    event,
-                    symbol,
-                    side,
-                    order_id,
-                    f"{price:.12f}" if price else "",
-                    f"{amount:.12f}" if amount else "",
-                    f"{filled:.12f}" if filled else "",
-                    f"{remaining:.12f}" if remaining else "",
-                    f"{position_size:.12f}" if position_size else "",
-                    f"{entry_price:.12f}" if entry_price else "",
-                    f"{notional:.12f}" if notional else "",
-                    f"{fee_quote:.12f}" if fee_quote else "",
-                    fee_currency,
-                    fill_source,
-                    f"{rs30:.8f}" if rs30 else "",
-                    f"{rs60:.8f}" if rs60 else "",
-                    f"{ema30:.12f}" if ema30 else "",
-                    f"{ema60:.12f}" if ema60 else "",
-                    reason,
-                    message,
-                    exception_type,
-                    error_code,
-                    retryable,
-                ]
-            )
+        if not self._append_headered_csv_row(
+            self.csv_path,
+            self.CSV_HEADER,
+            [
+                int(time.time()),
+                level,
+                event,
+                symbol,
+                side,
+                order_id,
+                f"{price:.12f}" if price else "",
+                f"{amount:.12f}" if amount else "",
+                f"{filled:.12f}" if filled else "",
+                f"{remaining:.12f}" if remaining else "",
+                f"{position_size:.12f}" if position_size else "",
+                f"{entry_price:.12f}" if entry_price else "",
+                f"{notional:.12f}" if notional else "",
+                f"{fee_quote:.12f}" if fee_quote else "",
+                fee_currency,
+                fill_source,
+                f"{rs30:.8f}" if rs30 else "",
+                f"{rs60:.8f}" if rs60 else "",
+                f"{ema30:.12f}" if ema30 else "",
+                f"{ema60:.12f}" if ema60 else "",
+                reason,
+                message,
+                exception_type,
+                error_code,
+                retryable,
+            ],
+        ):
+            raise OSError(f"Could not append CSV event log {self.csv_path}")
 
     def _append_cycle_stats_row(self, row: dict):
-        self._rotate_csv_if_needed(self.cycle_stats_path, self.CYCLE_STATS_HEADER)
-        with self.cycle_stats_path.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    row.get("symbol", ""),
-                    int(row.get("opened_at", 0)) if row.get("opened_at") else "",
-                    int(row.get("closed_at", 0)) if row.get("closed_at") else "",
-                    row.get("leverage", ""),
-                    row.get("margin_mode", ""),
-                    f"{row.get('planned_budget', 0):.8f}",
-                    f"{row.get('total_entry_notional', 0):.8f}",
-                    f"{row.get('total_exit_notional', 0):.8f}",
-                    f"{row.get('average_entry_price', 0):.12f}",
-                    f"{row.get('average_exit_price', 0):.12f}",
-                    f"{row.get('buy_fees', 0):.8f}",
-                    f"{row.get('sell_fees', 0):.8f}",
-                    f"{row.get('realized_pnl_quote', 0):.8f}",
-                    f"{row.get('realized_pnl_percent_on_notional', 0):.8f}",
-                    f"{row.get('realized_pnl_percent_on_margin', 0):.8f}",
-                    f"{row.get('holding_minutes', 0):.2f}",
-                    row.get("max_buy_stage", 0),
-                    int(bool(row.get("frozen_no_more_buys", False))),
-                    row.get("close_reason", ""),
-                    f"{row.get('entry_rs30', 0):.8f}",
-                    f"{row.get('entry_rs60', 0):.8f}",
-                    f"{row.get('entry_ema30', 0):.12f}",
-                    f"{row.get('entry_ema60', 0):.12f}",
-                    row.get("strategy_name", ""),
-                    f"{row.get('entry_ema25d', 0):.12f}",
-                    f"{row.get('entry_ema50d', 0):.12f}",
-                    f"{row.get('entry_ema1d', 0):.12f}",
-                    f"{row.get('entry_ema2d', 0):.12f}",
-                    f"{row.get('entry_ema50', 0):.12f}",
-                    f"{row.get('entry_ema100', 0):.12f}",
-                    f"{row.get('entry_btc_return_30m', 0):.8f}",
-                    row.get("max_averaging_stage", 0),
-                    int(bool(row.get("breakeven_activated", False))),
-                ]
-            )
+        self._append_headered_csv_row(
+            self.cycle_stats_path,
+            self.CYCLE_STATS_HEADER,
+            [
+                row.get("symbol", ""),
+                int(row.get("opened_at", 0)) if row.get("opened_at") else "",
+                int(row.get("closed_at", 0)) if row.get("closed_at") else "",
+                row.get("leverage", ""),
+                row.get("margin_mode", ""),
+                f"{row.get('planned_budget', 0):.8f}",
+                f"{row.get('total_entry_notional', 0):.8f}",
+                f"{row.get('total_exit_notional', 0):.8f}",
+                f"{row.get('average_entry_price', 0):.12f}",
+                f"{row.get('average_exit_price', 0):.12f}",
+                f"{row.get('buy_fees', 0):.8f}",
+                f"{row.get('sell_fees', 0):.8f}",
+                f"{row.get('realized_pnl_quote', 0):.8f}",
+                f"{row.get('realized_pnl_percent_on_notional', 0):.8f}",
+                f"{row.get('realized_pnl_percent_on_margin', 0):.8f}",
+                f"{row.get('holding_minutes', 0):.2f}",
+                row.get("max_buy_stage", 0),
+                int(bool(row.get("frozen_no_more_buys", False))),
+                row.get("close_reason", ""),
+                f"{row.get('entry_rs30', 0):.8f}",
+                f"{row.get('entry_rs60', 0):.8f}",
+                f"{row.get('entry_ema30', 0):.12f}",
+                f"{row.get('entry_ema60', 0):.12f}",
+                row.get("strategy_name", ""),
+                f"{row.get('entry_ema25d', 0):.12f}",
+                f"{row.get('entry_ema50d', 0):.12f}",
+                f"{row.get('entry_ema1d', 0):.12f}",
+                f"{row.get('entry_ema2d', 0):.12f}",
+                f"{row.get('entry_ema50', 0):.12f}",
+                f"{row.get('entry_ema100', 0):.12f}",
+                f"{row.get('entry_btc_return_30m', 0):.8f}",
+                row.get("max_averaging_stage", 0),
+                int(bool(row.get("breakeven_activated", False))),
+            ],
+        )
 
     def _append_macro_csv(self, context: dict):
         path = getattr(self, "macro_csv_path", None)
@@ -588,29 +665,30 @@ class MonitoringMixin:
             except (TypeError, ValueError):
                 return ""
 
-        self._rotate_csv_if_needed(path, self.MACRO_CSV_HEADER)
-        with path.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    int(context.get("ts") or time.time()),
-                    getattr(self, "profile_name", config.BOT_NAME),
-                    context.get("regime", ""),
-                    context.get("gold_symbol", ""),
-                    context.get("btc_symbol", ""),
-                    fmt(context.get("gold_rsi", 0.0)),
-                    fmt(context.get("btc_rsi", 0.0)),
-                    fmt(context.get("rsi_spread", 0.0)),
-                    fmt(context.get("gold_btc_ratio_return", 0.0)),
-                    fmt(context.get("long_budget_multiplier", 1.0)),
-                    fmt(context.get("short_budget_multiplier", 1.0)),
-                    fmt(context.get("ladder_multiplier", 1.0)),
-                    int(bool(context.get("disable_new_entries", False))),
-                    int(bool(context.get("disable_averaging", False))),
-                    int(bool(context.get("disable_recovery", False))),
-                    context.get("reason", ""),
-                ]
-            )
+        self._append_headered_csv_row(
+            path,
+            self.MACRO_CSV_HEADER,
+            [
+                int(context.get("ts") or time.time()),
+                getattr(self, "profile_name", config.BOT_NAME),
+                context.get("regime", ""),
+                context.get("gold_symbol", ""),
+                context.get("btc_symbol", ""),
+                fmt(context.get("gold_rsi", 0.0)),
+                fmt(context.get("btc_rsi", 0.0)),
+                fmt(context.get("rsi_spread", 0.0)),
+                fmt(context.get("gold_btc_ratio_return", 0.0)),
+                fmt(context.get("gold_return", 0.0)),
+                fmt(context.get("btc_return", 0.0)),
+                fmt(context.get("macro_direction_score", 0.0)),
+                fmt(context.get("long_budget_multiplier", 1.0)),
+                fmt(context.get("short_budget_multiplier", 1.0)),
+                fmt(context.get("ladder_multiplier", 1.0)),
+                int(bool(context.get("disable_new_entries", False))),
+                int(bool(context.get("disable_averaging", False))),
+                context.get("reason", ""),
+            ],
+        )
 
     def _append_external_price_csv(self, context: dict):
         path = getattr(self, "external_price_csv_path", None)
@@ -623,40 +701,39 @@ class MonitoringMixin:
             except (TypeError, ValueError):
                 return ""
 
-        self._rotate_csv_if_needed(path, self.EXTERNAL_PRICE_CSV_HEADER)
-        with path.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    int(context.get("ts") or time.time()),
-                    getattr(self, "profile_name", config.BOT_NAME),
-                    context.get("symbol", ""),
-                    context.get("mexc_symbol", ""),
-                    int(bool(context.get("valid", False))),
-                    int(bool(context.get("stale", False))),
-                    fmt(context.get("htx_bid", 0.0)),
-                    fmt(context.get("htx_ask", 0.0)),
-                    fmt(context.get("htx_mid", 0.0)),
-                    fmt(context.get("mexc_bid", 0.0)),
-                    fmt(context.get("mexc_ask", 0.0)),
-                    fmt(context.get("mexc_mid", 0.0)),
-                    fmt(context.get("mexc_bid_qty", 0.0)),
-                    fmt(context.get("mexc_ask_qty", 0.0)),
-                    fmt(context.get("mexc_bid_notional", 0.0)),
-                    fmt(context.get("mexc_ask_notional", 0.0)),
-                    fmt(context.get("spread_bps", 0.0)),
-                    fmt(context.get("spread_bps_30s_avg", 0.0)),
-                    fmt(context.get("spread_bps_2m_avg", 0.0)),
-                    fmt(context.get("spread_bps_10m_avg", 0.0)),
-                    fmt(context.get("spread_bps_zscore", 0.0)),
-                    fmt(context.get("htx_change_30s_bps", 0.0)),
-                    fmt(context.get("mexc_change_30s_bps", 0.0)),
-                    fmt(context.get("htx_change_1m_bps", 0.0)),
-                    fmt(context.get("mexc_change_1m_bps", 0.0)),
-                    int(float(context.get("age_ms", 0.0) or 0.0)),
-                    context.get("reason", ""),
-                ]
-            )
+        self._append_headered_csv_row(
+            path,
+            self.EXTERNAL_PRICE_CSV_HEADER,
+            [
+                int(context.get("ts") or time.time()),
+                getattr(self, "profile_name", config.BOT_NAME),
+                context.get("symbol", ""),
+                context.get("mexc_symbol", ""),
+                int(bool(context.get("valid", False))),
+                int(bool(context.get("stale", False))),
+                fmt(context.get("htx_bid", 0.0)),
+                fmt(context.get("htx_ask", 0.0)),
+                fmt(context.get("htx_mid", 0.0)),
+                fmt(context.get("mexc_bid", 0.0)),
+                fmt(context.get("mexc_ask", 0.0)),
+                fmt(context.get("mexc_mid", 0.0)),
+                fmt(context.get("mexc_bid_qty", 0.0)),
+                fmt(context.get("mexc_ask_qty", 0.0)),
+                fmt(context.get("mexc_bid_notional", 0.0)),
+                fmt(context.get("mexc_ask_notional", 0.0)),
+                fmt(context.get("spread_bps", 0.0)),
+                fmt(context.get("spread_bps_30s_avg", 0.0)),
+                fmt(context.get("spread_bps_2m_avg", 0.0)),
+                fmt(context.get("spread_bps_10m_avg", 0.0)),
+                fmt(context.get("spread_bps_zscore", 0.0)),
+                fmt(context.get("htx_change_30s_bps", 0.0)),
+                fmt(context.get("mexc_change_30s_bps", 0.0)),
+                fmt(context.get("htx_change_1m_bps", 0.0)),
+                fmt(context.get("mexc_change_1m_bps", 0.0)),
+                int(float(context.get("age_ms", 0.0) or 0.0)),
+                context.get("reason", ""),
+            ],
+        )
 
     def _append_account_pnl_csv(self, context: dict):
         path = getattr(self, "account_pnl_csv_path", None)
@@ -669,36 +746,34 @@ class MonitoringMixin:
             except (TypeError, ValueError):
                 return ""
 
-        self._rotate_csv_if_needed(path, self.ACCOUNT_PNL_CSV_HEADER)
-        with path.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    int(context.get("ts") or time.time()),
-                    getattr(self, "profile_name", config.BOT_NAME),
-                    fmt(context.get("open_pnl", 0.0)),
-                    fmt(context.get("unrealized_pnl", 0.0)),
-                    fmt(context.get("realized_open_pnl", 0.0)),
-                    fmt(context.get("open_notional", 0.0)),
-                    fmt(context.get("open_pnl_rate", 0.0)),
-                    int(context.get("position_count") or 0),
-                    int(context.get("history_samples") or 0),
-                    fmt(context.get("min_open_pnl", 0.0)),
-                    fmt(context.get("p25_open_pnl", 0.0)),
-                    fmt(context.get("median_open_pnl", 0.0)),
-                    fmt(context.get("p75_open_pnl", 0.0)),
-                    fmt(context.get("max_open_pnl", 0.0)),
-                    fmt(context.get("previous_open_pnl", 0.0)),
-                    fmt(context.get("delta_open_pnl", 0.0)),
-                    context.get("reason", ""),
-                ]
-            )
+        self._append_headered_csv_row(
+            path,
+            self.ACCOUNT_PNL_CSV_HEADER,
+            [
+                int(context.get("ts") or time.time()),
+                getattr(self, "profile_name", config.BOT_NAME),
+                fmt(context.get("open_pnl", 0.0)),
+                fmt(context.get("unrealized_pnl", 0.0)),
+                fmt(context.get("realized_open_pnl", 0.0)),
+                fmt(context.get("open_notional", 0.0)),
+                fmt(context.get("open_pnl_rate", 0.0)),
+                int(context.get("position_count") or 0),
+                int(context.get("history_samples") or 0),
+                fmt(context.get("min_open_pnl", 0.0)),
+                fmt(context.get("p25_open_pnl", 0.0)),
+                fmt(context.get("median_open_pnl", 0.0)),
+                fmt(context.get("p75_open_pnl", 0.0)),
+                fmt(context.get("max_open_pnl", 0.0)),
+                fmt(context.get("previous_open_pnl", 0.0)),
+                fmt(context.get("delta_open_pnl", 0.0)),
+                context.get("reason", ""),
+            ],
+        )
     def _diagnostic_error_code(self, exc: Optional[Exception], message: str = "") -> str:
         text = f"{message} {exc or ''}"
         for pattern in (
-            r'"err_code"\s*:\s*"?([0-9A-Za-z_-]+)"?',
-            r'"code"\s*:\s*"?([0-9A-Za-z_-]+)"?',
-            r"\berr(?:or)?[_ -]?code[=:]\s*([0-9A-Za-z_-]+)",
+            r'"(?:err[_-]?code|error[_-]?code|code)"\s*:\s*"?([0-9A-Za-z_-]+)"?',
+            r"\berr(?:or)?[_ -]?code[\"'\s:=]+\"?([0-9A-Za-z_-]+)\"?",
         ):
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
@@ -791,9 +866,7 @@ class MonitoringMixin:
 
         csv_path = getattr(self, "diagnostics_csv_path", None)
         if csv_path:
-            self._rotate_csv_if_needed(csv_path, self.DIAGNOSTICS_CSV_HEADER)
-            with csv_path.open("a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(row)
+            self._append_headered_csv_row(csv_path, self.DIAGNOSTICS_CSV_HEADER, row)
 
         payload = {
             "ts": int(time.time()),

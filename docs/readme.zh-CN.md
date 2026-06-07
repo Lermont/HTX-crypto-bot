@@ -27,38 +27,38 @@ HTX Futures EMA Pullback Bot 是一个用于 HTX USDT-M 合约的 Python crypto 
 
 | 层级 | 配置 | 默认周期 | 实际 EMA |
 |---|---:|---:|---:|
-| Macro fast | `EMA_MACRO_FAST_MINUTES=36000` | `1d` | EMA25 |
-| Macro slow | `EMA_MACRO_SLOW_MINUTES=72000` | `1d` | EMA50 |
-| Pullback fast | `EMA_PULLBACK_FAST_MINUTES=1440` | `4h` | EMA6 |
-| Pullback slow | `EMA_PULLBACK_SLOW_MINUTES=2880` | `4h` | EMA12 |
-| Trigger fast | `EMA_TRIGGER_FAST_MINUTES=50` | `1m` | EMA50 |
-| Trigger slow | `EMA_TRIGGER_SLOW_MINUTES=100` | `1m` | EMA100 |
+| Macro fast | `EMA_MACRO_FAST_MINUTES=2880` | `1h` | EMA48 |
+| Macro slow | `EMA_MACRO_SLOW_MINUTES=7200` | `1h` | EMA120 |
+| Pullback fast | `EMA_PULLBACK_FAST_MINUTES=120` | `5m` | EMA24 |
+| Pullback slow | `EMA_PULLBACK_SLOW_MINUTES=360` | `5m` | EMA72 |
+| Trigger fast | `EMA_TRIGGER_FAST_MINUTES=120` | `5m` | EMA24 |
+| Trigger slow | `EMA_TRIGGER_SLOW_MINUTES=360` | `5m` | EMA72 |
 
 Long 入场条件：
 
 ```text
-EMA25D > EMA50D
-EMA1D 在近期回调后重新站上 EMA2D
-EMA50 > EMA100
+EMA48H > EMA120H
+EMA24x5m > EMA72x5m
 rs60 >= EMA_LONG_MIN_RS60
 btc_return_30m >= EMA_BTC_LONG_MIN_RETURN_30M
 ```
 
+Pullback recovery 默认作为 quality penalty；如需恢复为硬性入场门槛，设置 `EMA_ENTRY_REQUIRE_PULLBACK_RECOVERY=true`。
+
 Short 入场使用镜像逻辑：
 
 ```text
-EMA25D < EMA50D
-EMA1D 在近期反弹后重新跌破 EMA2D
-EMA50 < EMA100
+EMA48H < EMA120H
+EMA24x5m < EMA72x5m
 rs60 <= EMA_SHORT_MAX_RS60
 btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 ```
 
-信号不是单一均线交叉。它结合了高周期趋势方向、recovery-cross 年龄、recovery gap、短周期触发、相对 BTC 强弱、短期 BTC 风险和用于候选排序的 score。完整实现级说明见 [strategy.md](../strategy.md)。
+信号不是单一均线交叉。它结合了高周期趋势方向、recovery-cross 年龄、recovery gap、短周期触发、相对 BTC 强弱、短期 BTC 风险和用于候选排序的 score。信号评分逻辑使用乘法混合模型，其中负面指标会应用惩罚乘数。完整实现级说明见 [strategy.md](../strategy.md)。
 
 ## 风险与仓位管理
 
-默认主流程不放置传统 stop-loss。风险通过仓位限制、分段入场、补仓上限、信号校验、reduce-only 出场和 breakeven/time-exit 行为管理。
+默认主流程会从入场价放置交易所侧 reduce-only hard stop-loss：`HARD_STOP_LOSS_PCT=0.02`。如果信号包含已收盘 K 线 ATR，止损可按 `HARD_STOP_LOSS_ATR_MULTIPLIER=2.0` 放宽，但不超过 `HARD_STOP_LOSS_ATR_MAX_PCT=0.03`。重启后 ATR 暂不可用时，固定止损仍作为 fallback。
 
 关键默认值：
 
@@ -66,6 +66,7 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 - 默认用两个限价订单完成初始入场。
 - 新入场需要通过 quality gates：score、RS60、RS30、top-N、rate-limit 和 crowded-market rules。
 - 补仓受阶段数、时间间隔、drawdown step 和信号健康状态限制。
+- Stop-loss 使用 exchange-side TPSL/reduce-only market close，数量不会超过当前 `position_size`。
 - Breakeven 会在配置的持仓时间后激活，停止继续补仓，并重新设置 reduce-only 出场。
 - Combined mode 会阻止 long 和 short 配置在同一币种上开出相反方向风险敞口。
 
@@ -75,7 +76,7 @@ btc_return_30m <= EMA_BTC_SHORT_MAX_RETURN_30M
 
 要求：
 
-- 本地已在 Python 3.14 验证；建议 Python 3.11+。
+- 本地已在 Python 3.12 验证；建议 Python 3.11+。
 - 真实交易需要 HTX account：[使用 invite code `6hc25223` 开通 HTX](https://www.htx.com/invite/en-us/1f?invite_code=6hc25223)。
 - 可选的 MEXC account 可用于参考市场研究：[通过此 referral link 开通 MEXC](https://promote.mexc.com/r/lxcLKaZgvh)。当前 MEXC radar 使用公开市场数据，不需要 MEXC API keys。
 - 需要 USDT-M futures 权限。
@@ -105,13 +106,18 @@ python bot.py --profiles long,short
 
 ## 配置
 
-将 `.env.example` 复制为 `.env`，只覆盖你需要修改的值。为了兼容，也支持 `long/.env` 和 `short/.env`。
+将 `.env.example` 复制为 `.env`，只覆盖你需要修改的值。机器人只读取项目根目录的 `.env`；`LONG_`/`SHORT_` 前缀的 profile overrides 也放在同一个共享配置文件中。
 
 与真实交易相关的最小配置：
 
 ```dotenv
 HTX_API_KEY=
 HTX_API_SECRET=
+COINS=aave,ada,...
+# Optional second key for symbols enabled on another HTX API key:
+HTX_API_KEY_2=
+HTX_API_SECRET_2=
+COINS_2=1inch,aixbt,...
 BOT_PROFILES=long,short
 ```
 
@@ -125,19 +131,20 @@ SHORT_LEVERAGE=30
 策略调参示例：
 
 ```dotenv
-EMA_MACRO_TIMEFRAME=1d
-EMA_PULLBACK_TIMEFRAME=4h
-EMA_TRIGGER_TIMEFRAME=1m
-EMA_PULLBACK_RECOVERY_LOOKBACK_MINUTES=2880
-EMA_PULLBACK_RECOVERY_MAX_CROSS_AGE_MINUTES=1440
+EMA_MACRO_TIMEFRAME=1h
+EMA_PULLBACK_TIMEFRAME=5m
+EMA_TRIGGER_TIMEFRAME=5m
+EMA_PULLBACK_RECOVERY_LOOKBACK_MINUTES=720
+EMA_PULLBACK_RECOVERY_MAX_CROSS_AGE_MINUTES=180
 EMA_PULLBACK_RECOVERY_GAP=0.001
+EMA_ENTRY_REQUIRE_PULLBACK_RECOVERY=false
 ENTRY_MIN_SCORE=0.03
 ENTRY_RATE_LIMIT_LADDERS=10
 ```
 
 ## Macro Gold/BTC RSI Overlay
 
-机器人包含一个 macro overlay，用 RSI 和 gold/BTC 相对变化比较黄金代理资产，通常是 XAUT，与 BTC。它不是独立入场策略，而是市场状态层：当加密资产相对防御资产走弱时，它可以降低风险、阻止 recovery 行为，或让出场更保守。
+机器人包含一个 macro overlay，用 RSI 和 gold/BTC 相对变化比较黄金代理资产，通常是 XAUT，与 BTC。它不是独立入场策略，而是市场状态层：当加密资产相对防御资产走弱时，它可以降低风险、阻止 averaging，或让出场更保守。
 
 默认 macro 配置：
 
@@ -156,13 +163,13 @@ RSI_SPREAD_THRESHOLD=15
 
 Overlay 会识别这些状态：
 
-- `crypto_underperforms_gold`：黄金强，而 BTC 弱或明显落后。Long budget 会降低，short 方向可以更宽松，averaging/recovery 可被禁用，time-exit 会更快。
+- `crypto_underperforms_gold`：黄金强，而 BTC 弱或明显落后。Long budget 会降低，short 方向可以更宽松，averaging 可被禁用，time-exit 会更快。
 - `crypto_risk_on`：BTC 强而黄金落后。机器人保持正常 long 行为，并可降低 short 激进度。
 - `broad_liquidity_risk_on`：BTC 和黄金都强。它被视为建设性状态，但不会自动提高杠杆。
-- `deleveraging`：BTC 和黄金都弱。新入场可被阻止，averaging/recovery 禁用，出场加速。
+- `deleveraging`：BTC 和黄金都弱。多头（Long）新入场可能被阻止，空头（Short）被允许但预算减少，averaging 禁用，出场加速。
 - `neutral` 或 `macro_unavailable`：overlay 不增加强方向过滤。
 
-Macro context 会被缓存、写入 CSV，并用于 new-entry block、averaging block、recovery block、ladder multiplier 和 time-exit multiplier 等决策。精确状态逻辑见 [strategy.md](../strategy.md)。
+Macro context 会被缓存、写入 CSV，并用于 new-entry block、averaging block、ladder multiplier 和 time-exit multiplier 等决策。精确状态逻辑见 [strategy.md](../strategy.md)。
 
 ## MEXC Reference Price Signals
 
@@ -239,7 +246,7 @@ docs/                  多语言发布文档
 
 ## 安全
 
-- 不要提交 `.env`、`long/.env` 或 `short/.env`。
+- 不要提交 `.env`。
 - 限制 API key 权限；如果怀疑泄露，请立即轮换。
 - 启动前运行测试，并用 mock/stub exchange 验证关键场景。
 - 在明确启用真实订单前，尽量使用最小 API 权限。

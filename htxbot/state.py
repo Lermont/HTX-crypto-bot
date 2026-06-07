@@ -12,6 +12,8 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 
+from .concurrency import instance_rlock
+from .fileio import is_transient_file_replace_error, replace_path_with_retry, write_text_path_with_retry
 from .models import PositionLifecycle, TradeState
 
 
@@ -19,6 +21,144 @@ _state_io_lock = threading.RLock()
 
 
 class StateMixin:
+    _STATE_FLOAT_FIELDS = {
+        "position_size",
+        "position_available",
+        "position_frozen",
+        "entry_price",
+        "last_buy_price",
+        "last_buy_amount",
+        "planned_quote_budget",
+        "initial_entry_notional",
+        "paid_buy_fees_quote",
+        "paid_sell_fees_quote",
+        "total_bought_amount",
+        "total_bought_quote",
+        "total_sold_amount",
+        "total_sold_quote",
+        "realized_pnl",
+        "unrealized_pnl",
+        "remaining_entry_quote",
+        "remaining_buy_fees_quote",
+        "net_open_pnl",
+        "base_entry_amount",
+        "base_entry_quote",
+        "base_entry_fees_quote",
+        "base_entry_price",
+        "averaging_entry_amount",
+        "averaging_entry_quote",
+        "averaging_entry_fees_quote",
+        "leverage",
+        "last_rs30",
+        "last_rs60",
+        "last_ema30",
+        "last_ema60",
+        "last_ema25d",
+        "last_ema50d",
+        "last_ema1d",
+        "last_ema2d",
+        "last_ema50",
+        "last_ema100",
+        "last_btc_return_30m",
+        "exit_runner_peak_price",
+        "exit_runner_bottom_price",
+        "exit_runner_contracts",
+        "soft_defensive_exit_fraction",
+        "entry_rs30",
+        "entry_rs60",
+        "entry_ema30",
+        "entry_ema60",
+        "entry_ema25d",
+        "entry_ema50d",
+        "entry_ema1d",
+        "entry_ema2d",
+        "entry_ema50",
+        "entry_ema100",
+        "entry_btc_return_30m",
+    }
+    _STATE_OPTIONAL_FLOAT_FIELDS = {
+        "pending_exit_ladder_since",
+        "cycle_opened_at",
+        "cooldown_until",
+        "time_exit_activated_at",
+        "zombie_marked_at",
+        "last_signal_timestamp",
+        "last_entry_ladder_signal_timestamp",
+        "last_average_signal_timestamp",
+        "last_average_at",
+        "last_ema_strategy_signal_timestamp",
+        "breakeven_activated_at",
+        "exit_runner_activated_at",
+        "soft_defensive_last_signal_timestamp",
+        "soft_defensive_exit_activated_at",
+        "soft_defensive_exit_last_rebuild_at",
+        "last_account_unload_at",
+    }
+    _STATE_INT_FIELDS = {
+        "buy_stage",
+        "average_stage",
+        "soft_defensive_consecutive_signals",
+        "account_unload_count",
+    }
+    _STATE_BOOL_FIELDS = {
+        "frozen_no_more_buys",
+        "zombie_position",
+        "exit_runner_active",
+    }
+
+    def _is_transient_replace_error(self, exc: OSError) -> bool:
+        return is_transient_file_replace_error(exc)
+
+    def _coerce_optional_state_float(self, value):
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_state_bool(self, value) -> bool:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off", ""}:
+                return False
+        return bool(value)
+
+    def _coerce_trade_state(self, state: TradeState) -> TradeState:
+        for name in self._STATE_FLOAT_FIELDS:
+            setattr(state, name, self._safe_float(getattr(state, name, 0.0), 0.0))
+        for name in self._STATE_OPTIONAL_FLOAT_FIELDS:
+            setattr(state, name, self._coerce_optional_state_float(getattr(state, name, None)))
+        for name in self._STATE_INT_FIELDS:
+            setattr(state, name, int(self._safe_float(getattr(state, name, 0), 0.0)))
+        for name in self._STATE_BOOL_FIELDS:
+            setattr(state, name, self._coerce_state_bool(getattr(state, name, False)))
+        return state
+
+    def _replace_state_file_with_retry(self, tmp_path, target_path):
+        replace_path_with_retry(
+            tmp_path,
+            target_path,
+            attempts=30,
+            initial_delay_sec=0.1,
+            max_delay_sec=0.5,
+            replace_func=os.replace,
+        )
+
+    def _write_state_file_with_retry(self, tmp_path, payload: str):
+        write_text_path_with_retry(
+            tmp_path,
+            payload,
+            encoding="utf-8",
+            attempts=30,
+            initial_delay_sec=0.1,
+            max_delay_sec=0.5,
+        )
+
     def _load_state(self) -> Dict[str, TradeState]:
         if not self.state_path.exists():
             return {}
@@ -66,6 +206,7 @@ class StateMixin:
             )
             safe_payload = {key: value for key, value in payload.items() if key in known_fields}
             state = TradeState(**safe_payload)
+            self._coerce_trade_state(state)
             state.symbol = state.symbol or symbol
             state.market_symbol = state.market_symbol or state.symbol
             if self._safe_float(getattr(state, "leverage", 0.0), 0.0) <= 0:
@@ -74,6 +215,8 @@ class StateMixin:
                 state.margin_mode = config.RISK.margin_mode
             state.entry_orders = self._normalize_order_refs(state.entry_orders)
             state.sell_ladder_orders = self._normalize_order_refs(state.sell_ladder_orders)
+            state.hard_stop_order = self._normalize_order_ref(state.hard_stop_order)
+            state.pending_close_order = self._normalize_order_ref(state.pending_close_order)
             if has_remaining_cost_basis:
                 self._refresh_net_open_pnl(state)
             else:
@@ -85,39 +228,35 @@ class StateMixin:
         return result
 
     def _save_state(self):
-        with _state_io_lock:
-            payload = {symbol: asdict(state) for symbol, state in list(self.states.items())}
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-            try:
-                tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                for attempt in range(30):
-                    try:
-                        os.replace(tmp_path, self.state_path)
-                        break
-                    except PermissionError:
-                        if attempt < 29:
-                            time.sleep(min(0.05 * (attempt + 1), 0.5))
-                        else:
-                            raise
-            except Exception:
+        with instance_rlock(self, "_state_lock"):
+            with _state_io_lock:
+                payload = {symbol: asdict(state) for symbol, state in list(self.states.items())}
+                self.state_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
                 try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
+                    state_json = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+                    self._write_state_file_with_retry(tmp_path, state_json)
+                    self._replace_state_file_with_retry(tmp_path, self.state_path)
+                except Exception:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
 
     def _pid_is_running(self, pid: int) -> bool:
         if pid <= 0:
             return False
         try:
             os.kill(pid, 0)
+        except PermissionError:
+            return True
         except OSError:
             return False
         if os.name == "nt":
             cmdline = self._pid_command_line(pid)
             if not cmdline:
-                return False
+                return True
             return "bot.py" in cmdline.replace("\\", "/").lower()
         return True
 
@@ -180,6 +319,25 @@ class StateMixin:
             atexit.register(self._release_runtime_lock)
             return
 
+    def _assert_runtime_lock_owned(self):
+        expected_pid = str(os.getpid())
+        try:
+            raw_pid = self.lock_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"Runtime lock {self.lock_path} is missing; stopping to prevent duplicate bot instances."
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not verify runtime lock {self.lock_path}; stopping to prevent duplicate bot instances: {exc}"
+            ) from exc
+        if raw_pid != expected_pid:
+            owner = raw_pid or "<empty>"
+            raise RuntimeError(
+                f"Runtime lock {self.lock_path} is owned by PID {owner}, not {expected_pid}; "
+                "stopping to prevent duplicate bot instances."
+            )
+
     def _release_runtime_lock(self):
         try:
             if not self.lock_path.exists():
@@ -191,45 +349,78 @@ class StateMixin:
             pass
 
     def _get_state(self, symbol: str) -> TradeState:
-        if symbol not in self.states:
-            self.states[symbol] = TradeState(symbol=symbol, market_symbol=symbol)
-        state = self.states[symbol]
-        state.symbol = state.symbol or symbol
-        state.market_symbol = state.market_symbol or symbol
-        if state.position_size <= 0 or self._safe_float(state.leverage, 0.0) <= 0:
-            state.leverage = config.RISK.leverage
-        state.margin_mode = config.RISK.margin_mode
-        self._ensure_entry_buckets_initialized(symbol, state)
-        self._refresh_active_side(state)
-        return state
+        with instance_rlock(self, "_state_lock"):
+            if symbol not in self.states:
+                self.states[symbol] = TradeState(symbol=symbol, market_symbol=symbol)
+            state = self.states[symbol]
+            state.symbol = state.symbol or symbol
+            state.market_symbol = state.market_symbol or symbol
+            if state.position_size <= 0 or self._safe_float(state.leverage, 0.0) <= 0:
+                state.leverage = config.RISK.leverage
+            state.margin_mode = config.RISK.margin_mode
+            self._ensure_entry_buckets_initialized(symbol, state)
+            self._refresh_active_side(state)
+            return state
 
     def _reset_state(self, symbol: str, preserve_cooldown: Optional[float] = None):
-        now = time.time()
-        cooldown = preserve_cooldown if preserve_cooldown and preserve_cooldown > now else None
-        self.states[symbol] = TradeState(
-            symbol=symbol,
-            market_symbol=symbol,
-            cooldown_until=cooldown,
-            leverage=config.RISK.leverage,
-            margin_mode=config.RISK.margin_mode,
-        )
+        with instance_rlock(self, "_state_lock"):
+            now = time.time()
+            cooldown = preserve_cooldown if preserve_cooldown and preserve_cooldown > now else None
+            self.states[symbol] = TradeState(
+                symbol=symbol,
+                market_symbol=symbol,
+                cooldown_until=cooldown,
+                leverage=config.RISK.leverage,
+                margin_mode=config.RISK.margin_mode,
+            )
         self._save_state()
 
     def _clear_pending_exit_ladder(self, state: TradeState):
         state.pending_exit_ladder_since = None
         state.pending_exit_ladder_reason = ""
 
+    def _clear_pending_close_order(self, state: TradeState):
+        state.pending_close_order = {}
+        state.pending_close_reason = ""
+
     def _normalize_order_refs(self, refs: list) -> list:
         normalized = []
-        for item in refs or []:
+        if isinstance(refs, dict):
+            items = [refs]
+        elif isinstance(refs, (list, tuple, set)):
+            items = list(refs)
+        elif refs:
+            items = [refs]
+        else:
+            items = []
+        for item in items:
             if isinstance(item, dict):
                 ref = dict(item)
-                if ref.get("id") is not None:
-                    ref["id"] = str(ref["id"])
-                    normalized.append(ref)
+                order_id = str(ref.get("id") or "")
+                if not order_id:
+                    continue
+                ref["id"] = order_id
+                for key in ("price", "trigger_price", "amount", "filled", "remaining", "created_at", "signal_ts", "loss_rate"):
+                    if key in ref and ref.get(key) is not None:
+                        ref[key] = self._safe_float(ref.get(key), 0.0)
+                if "stage" in ref and ref.get("stage") is not None:
+                    ref["stage"] = int(self._safe_float(ref.get("stage"), 0.0))
+                normalized.append(ref)
             elif item:
                 normalized.append({"id": str(item), "created_at": 0.0})
         return normalized
+
+    def _normalize_order_ref(self, ref) -> dict:
+        if isinstance(ref, dict):
+            normalized = dict(ref)
+            refs = self._normalize_order_refs([normalized])
+            return refs[0] if refs else {}
+        if isinstance(ref, list):
+            refs = self._normalize_order_refs(ref)
+            return refs[0] if refs else {}
+        if ref:
+            return {"id": str(ref), "created_at": 0.0}
+        return {}
 
     def _order_ids(self, refs: list) -> set:
         return {str(item.get("id")) for item in refs or [] if item.get("id") is not None}
@@ -311,6 +502,10 @@ class StateMixin:
             str(ref.get("side") or config.EXIT_SIDE).lower()
             for ref in state.sell_ladder_orders or []
         )
+        if state.hard_stop_order:
+            sides.add(str(state.hard_stop_order.get("side") or config.EXIT_SIDE).lower())
+        if state.pending_close_order:
+            sides.add(str(state.pending_close_order.get("side") or config.EXIT_SIDE).lower())
         sides.discard("")
         if len(sides) > 1:
             state.active_side = "both"
@@ -329,7 +524,7 @@ class StateMixin:
 
         if pending_closeable:
             return PositionLifecycle.PENDING_CLOSEABLE.value
-        if mode == "absolute_force_exit":
+        if mode in {"absolute_force_exit", "hard_stop_loss"}:
             return PositionLifecycle.FORCE_EXIT.value
         if getattr(state, "zombie_position", False):
             return PositionLifecycle.ZOMBIE.value
@@ -337,13 +532,19 @@ class StateMixin:
         if self._safe_float(getattr(state, "position_size", 0.0), 0.0) <= 0:
             if getattr(state, "entry_orders", None):
                 return PositionLifecycle.ENTERING.value
-            if getattr(state, "sell_ladder_orders", None):
+            if (
+                getattr(state, "sell_ladder_orders", None)
+                or getattr(state, "hard_stop_order", None)
+                or getattr(state, "pending_close_order", None)
+            ):
                 return PositionLifecycle.EXITING.value
             return PositionLifecycle.FLAT.value
 
         if mode == "breakeven" or getattr(state, "breakeven_activated_at", None):
             return PositionLifecycle.BREAKEVEN.value
-        if mode in {"account_unload", "controlled_loss_exit", "urgent_time_exit"}:
+        if getattr(state, "pending_close_order", None):
+            return PositionLifecycle.EXITING.value
+        if mode in {"account_unload", "controlled_loss_exit", "urgent_time_exit", "soft_defensive_exit"}:
             return PositionLifecycle.EXITING.value
         return PositionLifecycle.OPEN.value
 
@@ -557,6 +758,12 @@ class StateMixin:
                 since = int(max(0.0, created_at - config.RUNTIME.fill_detail_lookback_sec) * 1000)
             try:
                 trades = self.exchange.fetch_my_trades(symbol, since=since, limit=100, params=self._position_params())
+                trades = self._expect_ccxt_list_response(
+                    trades,
+                    "fetch_my_trades",
+                    symbol=symbol,
+                    item_types=(dict,),
+                )
                 trade_snapshot = self._fill_snapshot_from_trades(symbol, order_id, trades)
                 if trade_snapshot:
                     snapshot = trade_snapshot
@@ -646,7 +853,11 @@ class StateMixin:
         if side == config.ENTRY_SIDE:
             refs = state.entry_orders
         elif side == config.EXIT_SIDE:
-            refs = state.sell_ladder_orders
+            refs = list(state.sell_ladder_orders or [])
+            if state.hard_stop_order:
+                refs.append(state.hard_stop_order)
+            if state.pending_close_order:
+                refs.append(state.pending_close_order)
         else:
             refs = []
         open_lookup = {str(order.get("id")): order for order in (open_orders or []) if order.get("id") is not None}
@@ -700,7 +911,11 @@ class StateMixin:
     def _refresh_net_open_pnl(self, state: TradeState):
         state.remaining_entry_quote = max(0.0, self._safe_float(state.remaining_entry_quote, 0.0))
         state.remaining_buy_fees_quote = max(0.0, self._safe_float(state.remaining_buy_fees_quote, 0.0))
-        state.net_open_pnl = self._safe_float(state.realized_pnl, 0.0) + self._safe_float(state.unrealized_pnl, 0.0)
+        state.net_open_pnl = (
+            self._safe_float(state.realized_pnl, 0.0)
+            + self._safe_float(state.unrealized_pnl, 0.0)
+            - state.remaining_buy_fees_quote
+        )
 
     def _entry_bucket_total_amount(self, state: TradeState) -> float:
         return (
@@ -752,6 +967,82 @@ class StateMixin:
             if str(ref.get("id") or "") == order_id:
                 return ref
         return None
+
+    def _canonical_close_reason(self, reason: str) -> str:
+        text = str(reason or "").strip()
+        if not text:
+            return ""
+        return text.split(";", 1)[0].strip()
+
+    def _close_reason_from_exit_ref(self, ref: Optional[dict]) -> str:
+        if not isinstance(ref, dict) or not ref:
+            return ""
+
+        reason = self._canonical_close_reason(ref.get("reason", ""))
+        if reason:
+            return reason
+
+        if ref.get("hard_stop_loss"):
+            return "hard_stop_loss_market_close" if ref.get("market_close") else "hard_stop_loss"
+        if ref.get("account_unload"):
+            return "account_unload_filled"
+        if ref.get("runner"):
+            return "exit_runner_filled"
+
+        mode = str(ref.get("mode") or "").strip()
+        if mode and mode != "normal":
+            return f"{mode}_filled"
+
+        exit_scope = str(ref.get("exit_scope") or "").strip()
+        if exit_scope == "average_recovery":
+            return "average_recovery_exit_filled"
+        return ""
+
+    def _position_close_reason(self, state: TradeState, fill_details: Optional[List[dict]], fallback: str) -> str:
+        hard_stop_reason = self._close_reason_from_exit_ref(state.hard_stop_order)
+        if hard_stop_reason:
+            return hard_stop_reason
+
+        details = [dict(item) for item in (fill_details or []) if isinstance(item, dict)]
+        for detail in details:
+            detail_reason = self._canonical_close_reason(detail.get("ref_reason") or detail.get("reason") or "")
+            if detail_reason:
+                return detail_reason
+
+        pending_reason = self._close_reason_from_exit_ref(state.pending_close_order)
+        if not pending_reason:
+            pending_reason = self._canonical_close_reason(getattr(state, "pending_close_reason", ""))
+        if pending_reason:
+            pending_id = str((state.pending_close_order or {}).get("id") or "")
+            detail_ids = {str(detail.get("order_id") or "") for detail in details}
+            if (
+                not state.sell_ladder_orders
+                or bool(pending_id and pending_id in detail_ids)
+                or bool(getattr(state, "zombie_position", False))
+            ):
+                return pending_reason
+
+        for ref in state.sell_ladder_orders or []:
+            ref_reason = self._close_reason_from_exit_ref(ref)
+            if ref_reason:
+                return ref_reason
+
+        mode = str(getattr(state, "sell_ladder_mode", "") or "normal").strip()
+        if mode and mode != "normal":
+            return f"{mode}_filled"
+        if state.sell_ladder_orders:
+            return "exit_ladder_filled"
+        return fallback or "position_closed"
+
+    def _clear_pending_close_order_if_filled(self, symbol: str, state: TradeState):
+        ref = state.pending_close_order if isinstance(state.pending_close_order, dict) else {}
+        if not ref:
+            return
+        amount = self._safe_float(ref.get("amount"), 0.0)
+        filled = self._safe_float(ref.get("filled"), 0.0)
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+        if amount > 0 and filled + eps >= amount:
+            self._clear_pending_close_order(state)
 
     def _entry_fill_is_averaging(self, state: TradeState, detail: dict, reason: str) -> bool:
         text = ";".join(
@@ -1055,9 +1346,11 @@ class StateMixin:
         if contracts <= 0:
             return
         self._ensure_cost_basis_initialized(state)
-        fallback_quote = self._estimate_sell_quote_from_refs(symbol, state, contracts)
-        if fallback_quote <= 0 and fallback_price > 0:
-            fallback_quote = self._contracts_to_notional(symbol, contracts, fallback_price)
+        fallback_quote = (
+            self._contracts_to_notional(symbol, contracts, fallback_price)
+            if fallback_price > 0
+            else self._estimate_sell_quote_from_refs(symbol, state, contracts)
+        )
         details = self._fill_details_with_fallback(
             symbol,
             side,
@@ -1223,6 +1516,37 @@ class StateMixin:
             else:
                 self._record_sell_fill(symbol, state, contracts, reason=reason, fill_details=fill_details, entry_price=price)
 
+        if opposite_size > eps and old_size > eps and new_size <= eps:
+            opposite_entry = self._safe_float(snapshot.get(f"{opposite_side}_entry_price"), 0.0)
+            fallback_exit_price = opposite_entry or state.entry_price
+            self._log_event(
+                "WARNING",
+                f"Tracked {position_side} state disappeared while exchange now has a {opposite_side} position for {symbol}; closing stale state",
+                event="state_exchange_mismatch",
+                symbol=symbol,
+                side=opposite_side,
+                amount=opposite_size,
+                position_size=old_size,
+                entry_price=state.entry_price,
+                reason=f"state_{position_side}_replaced_by_{opposite_side}",
+            )
+            fill_details = self._collect_order_fill_details(symbol, state, exit_side, old_size, open_orders)
+            record_side_fill(
+                exit_side,
+                old_size,
+                fallback_exit_price,
+                reason=f"position_replaced_by_{opposite_side}",
+                fill_details=fill_details,
+            )
+            state.position_size = 0.0
+            state.position_available = 0.0
+            state.position_frozen = 0.0
+            state.position_side = ""
+            state.entry_price = 0.0
+            self._clear_pending_exit_ladder(state)
+            self._close_cycle(symbol, reason=f"position_replaced_by_{opposite_side}")
+            return "closed"
+
         if opposite_size > eps:
             external_reserved_symbols = getattr(self, "external_reserved_symbols", set())
             if symbol in external_reserved_symbols and old_size <= eps:
@@ -1230,6 +1554,8 @@ class StateMixin:
                     self._cancel_entry_orders(symbol, reason="reserved_by_other_profile")
                 if state.sell_ladder_orders:
                     self._cancel_sell_orders(symbol, reason="reserved_by_other_profile")
+                if state.hard_stop_order:
+                    self._cancel_hard_stop_order(symbol, reason="reserved_by_other_profile")
                 if symbol in self.disabled_symbols:
                     self.disabled_symbols.discard(symbol)
                 self._log_reserved_by_other_profile(symbol, side=opposite_side, amount=opposite_size)
@@ -1247,6 +1573,7 @@ class StateMixin:
                 )
             self._cancel_entry_orders(symbol, reason=f"unexpected_{opposite_side}_position")
             self._cancel_sell_orders(symbol, reason=f"unexpected_{opposite_side}_position")
+            self._cancel_hard_stop_order(symbol, reason=f"unexpected_{opposite_side}_position")
             self.disabled_symbols.add(symbol)
             return "disabled"
 
@@ -1286,7 +1613,7 @@ class StateMixin:
                 # Use current equity and config budget as a better guess for initial notional
                 # if we have no state, as it helps averaging ratio logic stay conservative.
                 leverage = max(self._safe_float(state.leverage, 0.0), self._safe_float(config.RISK.leverage, 1.0), 1.0)
-                account = self._account_snapshot()
+                account = self._account_snapshot(symbol)
                 equity = account.get("total") or account.get("free", 0.0)
                 planned_margin = equity * config.BUYING.position_budget_fraction
                 state.initial_entry_notional = max(planned_margin * leverage, self._contracts_to_notional(symbol, new_size, new_entry))
@@ -1294,6 +1621,7 @@ class StateMixin:
             self._refresh_net_open_pnl(state)
             self._clear_pending_exit_ladder(state)
             self._cancel_sell_orders(symbol, reason="rebuild_after_entry_fill")
+            self._cancel_hard_stop_order(symbol, reason="rebuild_after_entry_fill")
             self._save_state()
             return "position_changed"
 
@@ -1319,19 +1647,21 @@ class StateMixin:
             self._refresh_net_open_pnl(state)
             self._clear_pending_exit_ladder(state)
             self._cancel_sell_orders(symbol, reason="rebuild_after_add")
+            self._cancel_hard_stop_order(symbol, reason="rebuild_after_add")
             self._save_state()
             return "position_changed"
 
         if old_size > new_size + eps:
             closed = old_size - new_size
             fill_details = self._collect_order_fill_details(symbol, state, exit_side, closed, open_orders)
-            record_side_fill(exit_side, closed, 0.0, reason="position_decreased", fill_details=fill_details)
+            record_side_fill(exit_side, closed, state.entry_price, reason="position_decreased", fill_details=fill_details)
             if new_size <= eps:
+                close_reason = self._position_close_reason(state, fill_details, fallback="exit_ladder_filled")
                 state.position_size = 0.0
                 state.position_side = ""
                 state.entry_price = 0.0
                 self._clear_pending_exit_ladder(state)
-                self._close_cycle(symbol, reason="exit_ladder_filled")
+                self._close_cycle(symbol, reason=close_reason)
                 return "closed"
 
             state.position_size = new_size
@@ -1342,7 +1672,9 @@ class StateMixin:
             state.unrealized_pnl = self._safe_float(snapshot.get("unrealized_pnl"), 0.0)
             self._refresh_net_open_pnl(state)
             self._clear_pending_exit_ladder(state)
+            self._clear_pending_close_order_if_filled(symbol, state)
             self._cancel_sell_orders(symbol, reason="rebuild_after_partial_exit")
+            self._cancel_hard_stop_order(symbol, reason="rebuild_after_partial_exit")
             self._save_state()
             return "position_changed"
 
@@ -1367,14 +1699,15 @@ class StateMixin:
 
         if old_size > eps and new_size <= eps:
             fill_details = self._collect_order_fill_details(symbol, state, exit_side, old_size, open_orders)
-            record_side_fill(exit_side, old_size, 0.0, reason="position_gone", fill_details=fill_details)
+            record_side_fill(exit_side, old_size, state.entry_price, reason="position_gone", fill_details=fill_details)
+            close_reason = self._position_close_reason(state, fill_details, fallback="position_closed")
             state.position_size = 0.0
             state.position_available = 0.0
             state.position_frozen = 0.0
             state.position_side = ""
             state.entry_price = 0.0
             self._clear_pending_exit_ladder(state)
-            self._close_cycle(symbol, reason="position_closed")
+            self._close_cycle(symbol, reason=close_reason)
             return "closed"
 
         state.position_available = 0.0
@@ -1385,6 +1718,7 @@ class StateMixin:
         state = self._get_state(symbol)
         self._cancel_sell_orders(symbol, reason="cycle_closed")
         self._cancel_entry_orders(symbol, reason="cycle_closed")
+        self._cancel_hard_stop_order(symbol, reason="cycle_closed")
 
         if config.POSITION_SIDE == "short":
             entry_notional = state.total_sold_quote

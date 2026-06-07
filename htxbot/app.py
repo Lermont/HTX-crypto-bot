@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
+import threading
 from typing import Dict, List, Optional
 
 import config
 
+from .concurrency import ensure_runtime_locks
 from .exchange import ExchangeMixin
 from .external_price import ExternalPriceFeed
 from .models import TradeState
 from .monitoring import MonitoringMixin
 from .runner import RunnerMixin
 from .signal_engine import SignalMixin
+from .shared_exchange import ensure_thread_safe_exchange
 from .state import StateMixin
 from .strategy import StrategyMixin
 
@@ -45,8 +48,9 @@ class HtxFuturesBot(
     MACRO_CSV_HEADER = (
         "ts", "profile", "regime", "gold_symbol", "btc_symbol",
         "gold_rsi", "btc_rsi", "rsi_spread", "gold_btc_ratio_return",
+        "gold_return", "btc_return", "macro_direction_score",
         "long_budget_multiplier", "short_budget_multiplier", "ladder_multiplier",
-        "disable_new_entries", "disable_averaging", "disable_recovery", "reason",
+        "disable_new_entries", "disable_averaging", "reason",
     )
     EXTERNAL_PRICE_CSV_HEADER = (
         "ts", "profile", "symbol", "mexc_symbol", "valid", "stale",
@@ -68,7 +72,10 @@ class HtxFuturesBot(
         "block_reason", "score", "rs30", "rs60", "ema50", "ema100",
         "ema1d", "ema2d", "ema25d", "ema50d", "macro_gap", "trigger_gap",
         "pullback_depth", "btc_return_30m", "volatility", "budget_multiplier",
-        "ladder_multiplier", "macro_regime",
+        "ladder_multiplier", "volume_valid", "volume_ratio", "volume_spike_ratio",
+        "volume_spike_direction", "volume_profile_valid", "volume_profile_break",
+        "volume_profile_poc", "volume_profile_value_area_low", "volume_profile_value_area_high",
+        "volume_reason", "macro_regime",
         "external_valid", "external_stale", "external_spread_bps",
         "planned_budget", "planned_orders", "planned_notional",
         "placed_orders", "filled_notional", "realized_pnl_quote",
@@ -88,8 +95,9 @@ class HtxFuturesBot(
         self.profile = config.resolve_profile(profile)
         with config.use_profile(self.profile):
             self.profile_name = self.profile.name
+            ensure_runtime_locks(self)
             self.log = self._build_logger()
-            self.exchange = exchange or self._create_exchange()
+            self.exchange = ensure_thread_safe_exchange(exchange) if exchange is not None else self._create_exchange()
             self.external_price_feed = external_price_feed or ExternalPriceFeed(config.EXTERNAL_PRICE_FEED)
             self.state_path = Path(config.RUNTIME.state_file)
             self.lock_path = self.state_path.with_suffix(".lock")
@@ -130,6 +138,9 @@ class HtxFuturesBot(
             self.skip_futures_account_setup = False
             self.funding_cache: Dict[str, dict] = {}
             self.order_leverage_cache: Dict[str, float] = {}
+            self._account_pnl_lock = threading.RLock()
+            self._funding_cache_lock = threading.RLock()
+            self._private_cache_lock = threading.RLock()
             self._reset_private_caches()
             self.states = self._load_state()
             self.signal_cache = {

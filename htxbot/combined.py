@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import concurrent.futures
+import threading
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -21,6 +23,7 @@ class CombinedHtxFuturesBot:
         shared_exchange = None
         shared_external_price_feeds: Dict[config.ExternalPriceFeedSettings, object] = {}
         shared_account_pnl_runtime = {"history": [], "last_sample_at": 0.0}
+        shared_account_pnl_lock = threading.RLock()
         for profile in self.profiles:
             feed_settings = profile.external_price_feed
             shared_external_price_feed = shared_external_price_feeds.get(feed_settings)
@@ -32,6 +35,7 @@ class CombinedHtxFuturesBot:
             bot.skip_futures_account_setup = bool(self.bots)
             bot.skip_live_balance_log = bool(self.bots)
             bot.account_pnl_runtime = shared_account_pnl_runtime
+            bot._account_pnl_lock = shared_account_pnl_lock
             self.bots.append(bot)
         for bot in self.bots:
             bot.account_pnl_bots = list(self.bots)
@@ -52,10 +56,11 @@ class CombinedHtxFuturesBot:
                 reset_private_caches = getattr(bot, "_reset_private_caches", None)
                 if reset_private_caches:
                     reset_private_caches()
+                reset_market_data = getattr(bot, "_reset_market_data_caches", None)
+                if reset_market_data:
+                    reset_market_data()
 
-        for bot in self.bots:
-            with config.use_profile(bot.profile):
-                bot._update_signal_cache_if_needed()
+        self._update_signal_caches()
 
         for bot in self.bots:
             bot.external_reserved_symbols = self._reserved_symbols(exclude=bot)
@@ -63,6 +68,12 @@ class CombinedHtxFuturesBot:
                 prepare_entry_gate = getattr(bot, "_prepare_new_entry_gate", None)
                 if prepare_entry_gate:
                     prepare_entry_gate()
+                prefetch_market_data = getattr(bot, "_prefetch_market_data_snapshots", None)
+                if prefetch_market_data:
+                    prefetch_market_data()
+                prefetch_private = getattr(bot, "_prefetch_private_snapshots", None)
+                if prefetch_private:
+                    prefetch_private()
                 for symbol in bot.symbols:
                     try:
                         bot.step_symbol(symbol)
@@ -93,11 +104,50 @@ class CombinedHtxFuturesBot:
                 throttle_sec=60.0,
             )
 
+    def _combined_market_data_max_workers(self) -> int:
+        workers = 1
+        for bot in getattr(self, "bots", []) or []:
+            resolver = getattr(bot, "_market_data_max_workers", None)
+            if resolver:
+                try:
+                    workers = max(workers, int(resolver()))
+                    continue
+                except Exception:
+                    pass
+            try:
+                workers = max(workers, int(getattr(bot.profile.runtime, "market_data_max_workers", 1) or 1))
+            except Exception:
+                workers = max(workers, 1)
+        return max(1, workers)
+
+    def _update_signal_caches(self):
+        bots = list(getattr(self, "bots", []) or [])
+        if not bots:
+            return
+
+        max_workers = min(len(bots), self._combined_market_data_max_workers())
+
+        def update_bot_signal_cache(bot: HtxFuturesBot):
+            with config.use_profile(bot.profile):
+                return bot._update_signal_cache_if_needed()
+
+        if max_workers <= 1 or len(bots) <= 1:
+            for bot in bots:
+                update_bot_signal_cache(bot)
+            return
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(update_bot_signal_cache, bot) for bot in bots]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+
     def _validate_shared_exchange_profiles(self):
         first = self.profiles[0]
         for profile in self.profiles[1:]:
             if profile.api_credentials != first.api_credentials:
-                raise RuntimeError("Combined live profiles must use the same HTX API credentials")
+                raise RuntimeError("Combined live profiles must use the same primary HTX API credentials")
+            if tuple(getattr(profile, "api_accounts", ()) or ()) != tuple(getattr(first, "api_accounts", ()) or ()):
+                raise RuntimeError("Combined live profiles must use the same HTX API account routing")
             if profile.runtime.dry_run != first.runtime.dry_run:
                 raise RuntimeError("Combined profiles must all have the same DRY_RUN setting")
 
@@ -108,7 +158,7 @@ class CombinedHtxFuturesBot:
                 continue
             with config.use_profile(bot.profile):
                 for symbol, state in bot.states.items():
-                    if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders:
+                    if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders or state.hard_stop_order:
                         reserved.add(symbol)
                 reserved.update(self._exchange_reserved_symbols(bot))
         return reserved
@@ -134,7 +184,6 @@ class CombinedHtxFuturesBot:
 
     def _exchange_reserved_symbols(self, bot: HtxFuturesBot) -> set:
         reserved = set()
-        symbols = set(getattr(bot, "symbols", []) or [])
         min_contracts = getattr(bot, "_get_min_contracts", None)
 
         positions_by_symbol = None
@@ -155,8 +204,6 @@ class CombinedHtxFuturesBot:
                 positions_by_symbol = None
 
         for symbol, positions in (positions_by_symbol or {}).items():
-            if symbols and symbol not in symbols:
-                continue
             epsilon = 1e-12
             if min_contracts:
                 try:
@@ -189,8 +236,6 @@ class CombinedHtxFuturesBot:
 
         reserved_order_sides = {bot.profile.entry_side, bot.profile.exit_side}
         for symbol, orders in (orders_by_symbol or {}).items():
-            if symbols and symbol not in symbols:
-                continue
             epsilon = 1e-12
             if min_contracts:
                 try:
@@ -271,7 +316,7 @@ class CombinedHtxFuturesBot:
             symbols.update(getattr(bot, "symbols", []) or [])
             states = getattr(bot, "states", {}) or {}
             for symbol, state in states.items():
-                if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders:
+                if state.position_size > 0 or state.entry_orders or state.sell_ladder_orders or state.hard_stop_order:
                     symbols.add(symbol)
         symbols.discard(hedge_symbol)
         return symbols
@@ -340,11 +385,16 @@ class CombinedHtxFuturesBot:
         ordered_symbols = sorted(symbols)
         with config.use_profile(bot.profile):
             try:
-                return bot._private_fetch_with_retry(
+                positions = bot._private_fetch_with_retry(
                     "",
                     "btc_hedge_positions_fetch_failed",
                     "BTC hedge positions",
                     lambda: bot.exchange.fetch_positions(ordered_symbols, bot._position_params()),
+                )
+                return bot._expect_ccxt_list_response(
+                    positions,
+                    "fetch_positions",
+                    item_types=(dict,),
                 )
             except Exception as exc:
                 level = "WARNING" if bot._is_transient_exchange_error(exc) else "ERROR"
@@ -361,31 +411,18 @@ class CombinedHtxFuturesBot:
     def _fetch_btc_hedge_open_orders(self, bot: HtxFuturesBot, symbol: str) -> Optional[List[dict]]:
         with config.use_profile(bot.profile):
             try:
-                return bot._private_fetch_with_retry(
+                orders = bot._private_fetch_with_retry(
                     symbol,
                     "btc_hedge_open_orders_fetch_failed",
                     f"BTC hedge open orders for {symbol}",
                     lambda: bot.exchange.fetch_open_orders(symbol, params=bot._position_params()),
                 )
-            except TypeError:
-                try:
-                    return bot._private_fetch_with_retry(
-                        symbol,
-                        "btc_hedge_open_orders_fetch_failed",
-                        f"BTC hedge open orders for {symbol}",
-                        lambda: bot.exchange.fetch_open_orders(symbol),
-                    )
-                except Exception as exc:
-                    level = "WARNING" if bot._is_transient_exchange_error(exc) else "ERROR"
-                    self._log_btc_hedge(
-                        level,
-                        f"BTC hedge skipped: could not fetch open orders for {symbol}: {exc}",
-                        reason="open_orders_fetch_failed",
-                        symbol=symbol,
-                        exception=exc,
-                        throttle_sec=60.0,
-                    )
-                    return None
+                return bot._expect_ccxt_list_response(
+                    orders,
+                    "fetch_open_orders",
+                    symbol=symbol,
+                    item_types=(dict,),
+                )
             except Exception as exc:
                 level = "WARNING" if bot._is_transient_exchange_error(exc) else "ERROR"
                 self._log_btc_hedge(
@@ -878,6 +915,9 @@ class CombinedHtxFuturesBot:
 
             while True:
                 started_at = time.time()
+                for bot in self.bots:
+                    with config.use_profile(bot.profile):
+                        bot._assert_runtime_lock_owned()
                 self.run_once()
                 elapsed = time.time() - started_at
                 time.sleep(max(0.0, self.poll_interval() - elapsed))
