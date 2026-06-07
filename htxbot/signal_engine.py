@@ -2,7 +2,6 @@
 
 import math
 import time
-import concurrent.futures
 from typing import List, Optional
 
 import config
