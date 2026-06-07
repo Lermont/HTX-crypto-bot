@@ -2,7 +2,7 @@
 
 import math
 import unittest
-from unittest import mock
+import pytest
 
 from htxbot.indicators import (
     average_true_range,
@@ -80,10 +80,7 @@ class IndicatorMathTests(unittest.TestCase):
         self.assertEqual(calculate_rsi(flat, 14), 50.0)
         self.assertEqual(calculate_rsi([1.0, 2.0], 14), 0.0)
 
-    def test_log_return_rejects_non_positive_prices(self):
-        self.assertEqual(compute_log_return(0.0, 100.0), 0.0)
-        self.assertEqual(compute_log_return(100.0, 0.0), 0.0)
-        self.assertEqual(compute_log_return(-5.0, 100.0), 0.0)
+    def test_log_return_valid_positive_prices(self):
         self.assertAlmostEqual(compute_log_return(110.0, 100.0), math.log(1.1))
 
     def test_realized_volatility_uses_recent_window_log_returns_and_sample_variance(self):
@@ -545,3 +542,18 @@ class SignalMathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize(
+    ("price_now", "price_then"),
+    [
+        (-5.0, 100.0),
+        (0.0, 100.0),
+        (100.0, -5.0),
+        (100.0, 0.0),
+        (-5.0, -5.0),
+        (0.0, 0.0),
+    ],
+)
+def test_log_return_rejects_non_positive_prices(price_now, price_then):
+    assert compute_log_return(price_now, price_then) == 0.0
