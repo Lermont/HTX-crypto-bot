@@ -2577,10 +2577,33 @@ class ExchangeMixin:
     def _apply_configured_leverage_on_start(self) -> bool:
         leverage = int(config.RISK.leverage)
         failed_symbols = []
-        for symbol in self.symbols:
-            if self._set_leverage_safe(symbol, leverage):
-                continue
-            failed_symbols.append(symbol)
+
+        max_workers = min(
+            len(self.symbols),
+            max(1, int(getattr(config.RUNTIME, "market_data_max_workers", 1) or 1)),
+            5,
+        )
+
+        if max_workers <= 1 or len(self.symbols) <= 1:
+            for symbol in self.symbols:
+                if not self._set_leverage_safe(symbol, leverage):
+                    failed_symbols.append(symbol)
+        else:
+
+            def _set_leverage_wrapper(item):
+                idx, symbol = item
+                return idx, symbol, self._set_leverage_safe(symbol, leverage)
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                items = list(enumerate(self.symbols))
+                results = list(executor.map(_set_leverage_wrapper, items))
+
+            results.sort(key=lambda x: x[0])
+            for _, symbol, success in results:
+                if not success:
+                    failed_symbols.append(symbol)
 
         if failed_symbols:
             preview = ", ".join(failed_symbols[:10])
