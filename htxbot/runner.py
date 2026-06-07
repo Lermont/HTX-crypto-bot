@@ -236,7 +236,7 @@ class RunnerMixin:
             return
 
         if state.position_size <= 0:
-            exit_side = config.EXIT_SIDEhttps://github.com/Lermont/HTX-crypto-bot/pulls
+            exit_side = config.EXIT_SIDE
             if state.sell_ladder_orders:
                 self._log_event(
                     "WARNING",
