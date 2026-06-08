@@ -1,0 +1,7 @@
+🎯 **What:** The testing gap addressed is the lack of unit tests for the `replace_path_with_retry` function in `htxbot/fileio.py`.
+📊 **Coverage:** Tests now cover:
+- Successful first execution
+- Retries on transient errors (like `PermissionError`) with correct exponential backoff times
+- Immediate failure on non-transient errors (like `FileNotFoundError`)
+- Correct behavior when retry limit is exhausted
+✨ **Result:** The test suite now safely confirms the retry behavior and allows confident refactoring.
