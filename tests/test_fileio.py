@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
-
+import errno
 import unittest
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
-from htxbot.fileio import replace_path_with_retry
+from htxbot.fileio import is_transient_file_lock_error, replace_path_with_retry
 
 
 class TestFileIO(unittest.TestCase):
@@ -74,6 +73,39 @@ class TestFileIO(unittest.TestCase):
 
         replace_mock.assert_called_once()
         sleep_mock.assert_not_called()
+
+    def test_is_transient_file_lock_error(self):
+        # Non-OSError should return False
+        self.assertFalse(is_transient_file_lock_error(ValueError("Not an OSError")))
+
+        # PermissionError should return True
+        self.assertTrue(is_transient_file_lock_error(PermissionError("Access denied")))
+
+        # OSError with winerror 5 or 32 should return True
+        exc = OSError("Access denied")
+        exc.winerror = 5
+        self.assertTrue(is_transient_file_lock_error(exc))
+
+        exc = OSError("Sharing violation")
+        exc.winerror = 32
+        self.assertTrue(is_transient_file_lock_error(exc))
+
+        # OSError with other winerror should return False if not nt or not in errnos
+        exc = OSError("Some other error")
+        exc.winerror = 123
+        self.assertFalse(is_transient_file_lock_error(exc))
+
+        # OSError with specific errno on 'nt' should return True
+        exc = OSError("Access denied")
+        exc.errno = errno.EACCES
+        with patch('htxbot.fileio.os.name', 'nt'):
+            self.assertTrue(is_transient_file_lock_error(exc))
+
+        # OSError with specific errno on 'posix' should return False
+        exc = OSError("Access denied")
+        exc.errno = errno.EACCES
+        with patch('htxbot.fileio.os.name', 'posix'):
+            self.assertFalse(is_transient_file_lock_error(exc))
 
 if __name__ == "__main__":
     unittest.main()
