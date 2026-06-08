@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import ccxt
 
+import functools
 import config
 from .models import OrderRequest
 
@@ -17,7 +18,26 @@ from .concurrency import instance_rlock
 from .shared_exchange import MultiAccountExchange, ThreadSafeExchange
 
 
+
+
+@functools.lru_cache(maxsize=16)
+def _compute_gold_coin_candidates(gold_coins: Tuple[str, ...]) -> Tuple[str, ...]:
+    aliases = {
+        "xault": ("xault", "xaut"),
+        "xaut": ("xaut", "xault"),
+    }
+    candidates = []
+    seen = set()
+    for coin in gold_coins:
+        normalized = str(coin or "").strip().lower()
+        for item in aliases.get(normalized, (normalized,)):
+            if item and item not in seen:
+                seen.add(item)
+                candidates.append(item)
+    return tuple(candidates)
+
 class UnexpectedExchangeResponse(RuntimeError):
+
     """Raised when CCXT returns a payload shape that cannot be trusted."""
 
 
@@ -2486,19 +2506,7 @@ class ExchangeMixin:
         return candidates[0] if candidates else None
 
     def _macro_gold_coin_candidates(self) -> Tuple[str, ...]:
-        aliases = {
-            "xault": ("xault", "xaut"),
-            "xaut": ("xaut", "xault"),
-        }
-        candidates = []
-        seen = set()
-        for coin in config.MACRO.gold_coins:
-            normalized = str(coin or "").strip().lower()
-            for item in aliases.get(normalized, (normalized,)):
-                if item and item not in seen:
-                    seen.add(item)
-                    candidates.append(item)
-        return tuple(candidates)
+        return _compute_gold_coin_candidates(tuple(config.MACRO.gold_coins))
 
     def _find_macro_gold_symbol(self) -> Optional[str]:
         self.macro_gold_is_spot = False
