@@ -244,8 +244,16 @@ class CombinedHtxFuturesBot:
             if min_contracts:
                 try:
                     epsilon = max(min_contracts(symbol) * 1e-9, epsilon)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event = getattr(bot, "_log_event", None)
+                    if log_event:
+                        log_event(
+                            "WARNING",
+                            f"Combined reservation could not get min contracts for {symbol}: {exc}",
+                            event="state_exchange_mismatch",
+                            reason="combined_reserved_min_contracts_failed",
+                            exception=exc,
+                        )
             for position in positions or []:
                 side = str((position or {}).get("side") or "").lower()
                 contracts = self._safe_float(
@@ -278,8 +286,16 @@ class CombinedHtxFuturesBot:
             if min_contracts:
                 try:
                     epsilon = max(min_contracts(symbol) * 1e-9, epsilon)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event = getattr(bot, "_log_event", None)
+                    if log_event:
+                        log_event(
+                            "WARNING",
+                            f"Combined reservation could not get min contracts for {symbol}: {exc}",
+                            event="state_exchange_mismatch",
+                            reason="combined_reserved_min_contracts_failed",
+                            exception=exc,
+                        )
             for order in orders or []:
                 side = str((order or {}).get("side") or "").lower()
                 if side not in reserved_order_sides:
