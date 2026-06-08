@@ -444,6 +444,46 @@ class UnifiedBotTests(unittest.TestCase):
             with self.subTest(module=module):
                 importlib.import_module(module)
 
+    def test_apply_configured_leverage_on_start_optimizations(self):
+        from htxbot.app import HtxFuturesBot
+        from unittest.mock import MagicMock
+        from dataclasses import replace
+
+        bot = HtxFuturesBot(
+            profile="long", exchange=MagicMock(), external_price_feed=MagicMock()
+        )
+        bot.symbols = ["BTC-USDT", "ETH-USDT", "LTC-USDT", "XRP-USDT", "ADA-USDT"]
+        bot.exchange.set_leverage = MagicMock()
+        bot.exchange.set_leverage.side_effect = lambda leverage, symbol, params: None
+
+        # set 2 max workers
+        bot.profile = replace(
+            bot.profile, runtime=replace(bot.profile.runtime, market_data_max_workers=2)
+        )
+
+        self.assertTrue(bot._apply_configured_leverage_on_start())
+        self.assertEqual(bot.exchange.set_leverage.call_count, 5)
+
+        def failing_leverage(leverage, symbol, params):
+            if symbol in ["ETH-USDT", "XRP-USDT"]:
+                raise Exception("Network error")
+            return None
+
+        bot.exchange.set_leverage.side_effect = failing_leverage
+        bot.exchange.set_leverage.call_count = 0
+
+        bot._log_event = MagicMock()
+        self.assertFalse(bot._apply_configured_leverage_on_start())
+
+        # It might be called multiple times due to the individual failures.
+        # Check the last call which should be the summary warning.
+        args, kwargs = bot._log_event.call_args
+        self.assertEqual(kwargs.get("reason"), "set_leverage_partial_failure")
+        self.assertEqual(
+            kwargs.get("diagnostic_context").get("failed_symbols"),
+            ["ETH-USDT", "XRP-USDT"],
+        )
+
     def test_strategy_components_are_separately_testable_mixins(self):
         from htxbot.strategy import StrategyMixin
         from htxbot.strategy_entry import EntryStrategy
