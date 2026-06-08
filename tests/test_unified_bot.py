@@ -5310,6 +5310,35 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(signal["daily_volatility_multiplier"], 1.0)
                 self.assertEqual(signal["volatility_budget_multiplier"], 1.0)
 
+    def test_risk_budget_finish_method_updates_context(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+
+            # Use bot._account_snapshot to trigger 'free_margin_below_reserve' condition early
+            # which calls finish()
+            with patch.object(
+                bot, "_account_snapshot", return_value={"free": 0.0, "total": 0.0}
+            ):
+                budget, reason = bot._risk_budget(
+                    SYMBOL,
+                    state,
+                    reference_price=10.0,
+                    is_new_position=True,
+                    signal=None,
+                )
+
+            self.assertEqual(budget, 0.0)
+            self.assertEqual(reason, "free_margin_below_reserve")
+
+            context = bot._last_risk_budget_context
+            self.assertIsNotNone(context)
+            self.assertEqual(context["free"], 0.0)
+            self.assertEqual(context["equity"], 0.0)
+            self.assertEqual(context["reserve"], config.RISK.min_quote_reserve)
+            self.assertTrue(context["is_new_position"])
+            self.assertEqual(context["budget_scale"], 1.0)
+
     def test_risk_budget_applies_volatility_budget_multiplier(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             buying = replace(config.BUYING, position_budget_fraction=0.02)
