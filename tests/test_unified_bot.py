@@ -9613,6 +9613,60 @@ class UnifiedBotTests(unittest.TestCase):
                     )
                 )
 
+    def test_shared_exchange_funding_rate_cache_is_singleflight_across_threads(self):
+        class SlowFundingExchange:
+            def __init__(self):
+                self.calls = 0
+                self.lock = threading.Lock()
+
+            def fetch_funding_rate(self, symbol, params=None):
+                with self.lock:
+                    self.calls += 1
+                time.sleep(0.02)
+                return {"symbol": symbol, "fundingRate": 0.0001}
+
+        exchange = SlowFundingExchange()
+        cached = CachedMarketDataExchange(exchange, funding_ttl_sec=60)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(
+                executor.map(lambda _index: cached.fetch_funding_rate(SYMBOL), range(8))
+            )
+
+        self.assertEqual(exchange.calls, 1)
+        self.assertTrue(all(result["symbol"] == SYMBOL for result in results))
+
+    def test_shared_exchange_serializes_distinct_funding_fetches(self):
+        class SlowFundingExchange:
+            def __init__(self):
+                self.calls = []
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+
+            def fetch_funding_rate(self, symbol, params=None):
+                with self.lock:
+                    self.calls.append(symbol)
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    time.sleep(0.03)
+                    return {"symbol": symbol, "fundingRate": 0.0001}
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        exchange = SlowFundingExchange()
+        cached = CachedMarketDataExchange(exchange, funding_ttl_sec=60)
+        symbols = [SYMBOL, SECOND_SYMBOL, BTC_SYMBOL, XAUT_SYMBOL]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(cached.fetch_funding_rate, symbols))
+
+        self.assertEqual(len(results), len(symbols))
+        self.assertEqual(exchange.max_active, 1)
+        self.assertEqual(set(exchange.calls), set(symbols))
+
     def test_shared_exchange_does_not_cache_invalid_funding_payload(self):
         exchange = FakeExchange()
         cached = CachedMarketDataExchange(exchange, funding_ttl_sec=300)
