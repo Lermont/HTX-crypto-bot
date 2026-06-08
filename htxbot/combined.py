@@ -403,8 +403,16 @@ class CombinedHtxFuturesBot:
                 price = self._safe_float(bot, ticker.get(key), 0.0)
                 if price > 0:
                     return price
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event = getattr(bot, "_log_event", None)
+            if log_event:
+                log_event(
+                    "WARNING",
+                    f"Combined position payload could not fetch ticker for {symbol}: {exc}",
+                    event="position_payload_ticker_failed",
+                    reason="ticker_fetch_failed",
+                    exception=exc,
+                )
         return 0.0
 
     def _position_payload_available(
