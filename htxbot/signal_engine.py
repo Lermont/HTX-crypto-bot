@@ -1582,7 +1582,7 @@ class SignalMixin:
                 raise TypeError(
                     "_build_signal_from_closes requires benchmark_closes and latest_ts"
                 )
-            ctx = SignalContext(
+            return SignalContext(
                 closes=list(ctx or []),
                 benchmark_closes=list(benchmark_closes or []),
                 btc_risk=dict(btc_risk or {}),
@@ -1635,6 +1635,19 @@ class SignalMixin:
             closes, benchmark_closes, rs_fast_window, rs_slow_window
         )
 
+    def _calculate_ema_indicator_values(
+        self,
+        closes: List[float],
+        latest_ts: int,
+        pullback_closes: List[float],
+        pullback_latest_ts: int,
+        macro_closes: List[float],
+        macro_latest_ts: int,
+        cache_key: str,
+        periods: dict,
+        timeframes: dict,
+        use_timeframe_ema: bool,
+    ) -> Optional[dict]:
         trigger_periods = {
             "ema_trigger_fast": periods["ema_trigger_fast"],
             "ema_trigger_slow": periods["ema_trigger_slow"],
@@ -1647,6 +1660,7 @@ class SignalMixin:
             "ema_macro_fast": periods["ema_macro_fast"],
             "ema_macro_slow": periods["ema_macro_slow"],
         }
+
         trigger_values = self._ema_values_from_closes(
             closes,
             latest_ts,
@@ -1677,6 +1691,7 @@ class SignalMixin:
             if use_timeframe_ema
             else None,
         )
+
         if not trigger_values or not pullback_values or not macro_values:
             return None, None, None, None
 
@@ -1747,6 +1762,7 @@ class SignalMixin:
         btc_ladder_multiplier = max(
             0.0, self._safe_float(btc_risk.get("ladder_multiplier"), 1.0)
         )
+
         if config.POSITION_SIDE == "short":
             macro_budget_multiplier = max(
                 0.0, self._safe_float(macro_context.get("short_budget_multiplier"), 1.0)
@@ -1761,6 +1777,7 @@ class SignalMixin:
         entry_quality_budget_multiplier = self._safe_float(
             entry_quality.get("quality_budget_multiplier"), 1.0
         )
+
         budget_multiplier = (
             signal_budget_multiplier
             * btc_budget_multiplier
