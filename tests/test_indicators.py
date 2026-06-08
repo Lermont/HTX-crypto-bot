@@ -33,7 +33,6 @@ from htxbot.signal_math import (
 )
 
 
-
 def _sample_standard_deviation(values):
     mean = sum(values) / len(values)
     variance = sum((item - mean) ** 2 for item in values) / (len(values) - 1)
@@ -41,7 +40,7 @@ def _sample_standard_deviation(values):
 
 
 def _expected_realized_volatility(closes, window):
-    sample = closes[-window - 1:]
+    sample = closes[-window - 1 :]
     returns = [
         math.log(sample[index] / sample[index - 1])
         for index in range(1, len(sample))
@@ -124,7 +123,9 @@ class IndicatorMathTests(unittest.TestCase):
     def test_log_return_valid_positive_prices(self):
         self.assertAlmostEqual(compute_log_return(110.0, 100.0), math.log(1.1))
 
-    def test_realized_volatility_uses_recent_window_log_returns_and_sample_variance(self):
+    def test_realized_volatility_uses_recent_window_log_returns_and_sample_variance(
+        self,
+    ):
         closes = [100.0, 110.0, 121.0, 133.1, 120.0, 108.0]
         window = 2
 
@@ -148,6 +149,7 @@ class IndicatorMathTests(unittest.TestCase):
 
     def test_realized_volatility_numpy_and_fallback_paths_match(self):
         import htxbot.indicators as indicators
+
         closes = [95.0, 101.0, 97.5, 106.0, 104.0, 111.0]
         window = 5
 
