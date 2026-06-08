@@ -2,9 +2,27 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import config
+
+
+@dataclass
+class DiagnosticEvent:
+    severity: str
+    category: str
+    event: str
+    message: str
+    symbol: str = ""
+    operation_id: str = ""
+    signal_id: str = ""
+    order_id: str = ""
+    reason: str = ""
+    exception: Optional[Exception] = None
+    retryable: Optional[bool] = None
+    attempt: Any = ""
+    hostname: str = ""
+    context: Optional[dict] = None
 
 
 @dataclass
