@@ -1,0 +1,5 @@
+🧪 [testing improvement] Add tests for write_text_path_with_retry
+
+🎯 **What:** Adds comprehensive unit tests for `write_text_path_with_retry` located in `htxbot/fileio.py`.
+📊 **Coverage:** Covers happy path file creation, mocked interactions, transient failure recovery with backoff validation, exhaustion of transient failures, and non-transient failures.
+✨ **Result:** Provides a safety net for robust transient file IO handling preventing regressions during future refactors.
