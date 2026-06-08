@@ -2,6 +2,7 @@
 
 import math
 import unittest
+import pytest
 
 from htxbot.indicators import (
     average_true_range,
@@ -29,6 +30,25 @@ from htxbot.signal_math import (
 )
 
 
+
+def _sample_standard_deviation(values):
+    mean = sum(values) / len(values)
+    variance = sum((item - mean) ** 2 for item in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def _expected_realized_volatility(closes, window):
+    sample = closes[-window - 1:]
+    returns = [
+        math.log(sample[index] / sample[index - 1])
+        for index in range(1, len(sample))
+        if sample[index] > 0 and sample[index - 1] > 0
+    ]
+    if len(returns) < 2:
+        return 0.0
+    return _sample_standard_deviation(returns)
+
+
 class IndicatorMathTests(unittest.TestCase):
     def test_clamp_bounds_value_without_side_effects(self):
         self.assertEqual(clamp(5, 1, 10), 5)
@@ -44,6 +64,12 @@ class IndicatorMathTests(unittest.TestCase):
         self.assertAlmostEqual(series[1], 16.6666666667)
         self.assertAlmostEqual(series[-1], calculate_ema(prices, 2))
 
+    def test_calculate_ema_returns_zero_for_empty_prices(self):
+        self.assertEqual(calculate_ema([], 10), 0.0)
+
+    def test_calculate_ema_series_returns_empty_list_for_empty_prices(self):
+        self.assertEqual(calculate_ema_series([], 10), [])
+
     def test_rsi_handles_rising_falling_flat_and_short_history(self):
         rising = [float(index) for index in range(1, 40)]
         falling = list(reversed(rising))
@@ -54,21 +80,41 @@ class IndicatorMathTests(unittest.TestCase):
         self.assertEqual(calculate_rsi(flat, 14), 50.0)
         self.assertEqual(calculate_rsi([1.0, 2.0], 14), 0.0)
 
-    def test_log_return_rejects_non_positive_prices(self):
-        self.assertEqual(compute_log_return(0.0, 100.0), 0.0)
-        self.assertEqual(compute_log_return(100.0, 0.0), 0.0)
-        self.assertEqual(compute_log_return(-5.0, 100.0), 0.0)
+    def test_log_return_valid_positive_prices(self):
         self.assertAlmostEqual(compute_log_return(110.0, 100.0), math.log(1.1))
 
-    def test_realized_volatility_matches_sample_variance(self):
-        closes = [100.0, 105.0, 102.0, 108.0]
-        returns = [math.log(105.0 / 100.0), math.log(102.0 / 105.0), math.log(108.0 / 102.0)]
-        mean = sum(returns) / len(returns)
-        expected = math.sqrt(sum((item - mean) ** 2 for item in returns) / (len(returns) - 1))
+    def test_realized_volatility_uses_recent_window_log_returns_and_sample_variance(self):
+        closes = [100.0, 110.0, 121.0, 133.1, 120.0, 108.0]
+        window = 2
 
-        self.assertAlmostEqual(realized_volatility(closes, 3), expected)
-        self.assertEqual(realized_volatility(closes, 1), 0.0)
-        self.assertEqual(realized_volatility([100.0, 0.0, -1.0, 102.0], 3), 0.0)
+        expected = _expected_realized_volatility(closes, window)
+
+        self.assertAlmostEqual(realized_volatility(closes, window), expected, places=12)
+
+    def test_realized_volatility_ignores_non_positive_price_pairs(self):
+        closes = [100.0, 105.0, 0.0, 110.0, 121.0]
+        window = 4
+
+        expected = _expected_realized_volatility(closes, window)
+
+        self.assertGreater(expected, 0.0)
+        self.assertAlmostEqual(realized_volatility(closes, window), expected, places=12)
+
+    def test_realized_volatility_requires_at_least_two_valid_returns(self):
+        self.assertEqual(realized_volatility([100.0, 101.0], 1), 0.0)
+        self.assertEqual(realized_volatility([100.0, 0.0, 101.0], 2), 0.0)
+        self.assertEqual(realized_volatility([100.0, 101.0], 2), 0.0)
+
+    def test_realized_volatility_numpy_and_fallback_paths_match(self):
+        import htxbot.indicators as indicators
+        closes = [95.0, 101.0, 97.5, 106.0, 104.0, 111.0]
+        window = 5
+
+        numpy_result = indicators.realized_volatility(closes, window)
+        with mock.patch.object(indicators, "HAS_NUMPY", False):
+            fallback_result = indicators.realized_volatility(closes, window)
+
+        self.assertAlmostEqual(fallback_result, numpy_result, places=12)
 
     def test_average_true_range_from_ohlcv(self):
         candles = [
@@ -129,8 +175,12 @@ class SignalMathTests(unittest.TestCase):
         btc = [100.0, 105.0, 110.25]
         context = relative_strength_context(closes, btc, fast_window=1, slow_window=2)
 
-        self.assertAlmostEqual(context["rs30"], math.log(121.0 / 110.0) - math.log(110.25 / 105.0))
-        self.assertAlmostEqual(context["rs60"], math.log(121.0 / 100.0) - math.log(110.25 / 100.0))
+        self.assertAlmostEqual(
+            context["rs30"], math.log(121.0 / 110.0) - math.log(110.25 / 105.0)
+        )
+        self.assertAlmostEqual(
+            context["rs60"], math.log(121.0 / 100.0) - math.log(110.25 / 100.0)
+        )
         self.assertAlmostEqual(context["btc_return_30m"], math.log(110.25 / 105.0))
 
     def test_pullback_recovery_context_is_mirrored_for_long_and_short(self):
@@ -311,7 +361,9 @@ class SignalMathTests(unittest.TestCase):
 
     def test_budget_and_volatility_multipliers_are_pure_math(self):
         self.assertEqual(signal_budget_multiplier(10.0, False, 1.0, 0.25, 1.0), 1.0)
-        self.assertAlmostEqual(signal_budget_multiplier(0.5, True, 1.0, 0.25, 1.0), 0.625)
+        self.assertAlmostEqual(
+            signal_budget_multiplier(0.5, True, 1.0, 0.25, 1.0), 0.625
+        )
         self.assertEqual(volatility_multiplier(10.0, False, 1.0, 0.5, 2.0), 1.0)
         self.assertEqual(volatility_multiplier(10.0, True, 1.0, 0.5, 2.0), 2.0)
 
@@ -368,8 +420,14 @@ class SignalMathTests(unittest.TestCase):
         btc = [50.0, 50.0, 55.0]
         direct = [2.0, 2.1, 2.0]
 
-        self.assertAlmostEqual(gold_btc_ratio_return(gold, btc, 2), math.log((110.0 / 55.0) / (100.0 / 50.0)))
-        self.assertAlmostEqual(gold_btc_ratio_return(gold, btc, 2, direct_closes=direct), math.log(2.0 / 2.0))
+        self.assertAlmostEqual(
+            gold_btc_ratio_return(gold, btc, 2),
+            math.log((110.0 / 55.0) / (100.0 / 50.0)),
+        )
+        self.assertAlmostEqual(
+            gold_btc_ratio_return(gold, btc, 2, direct_closes=direct),
+            math.log(2.0 / 2.0),
+        )
         self.assertEqual(gold_btc_ratio_return(gold[:1], btc[:1], 2), 0.0)
 
     def test_local_reversion_context_uses_side_specific_edge(self):
@@ -379,7 +437,9 @@ class SignalMathTests(unittest.TestCase):
         short_context = local_reversion_context(closes, 105.0, "short")
 
         self.assertAlmostEqual(long_context["local_reversion"], (110.0 - 105.0) / 110.0)
-        self.assertAlmostEqual(short_context["local_reversion"], (105.0 - 100.0) / 100.0)
+        self.assertAlmostEqual(
+            short_context["local_reversion"], (105.0 - 100.0) / 100.0
+        )
 
     def test_volume_confirmation_context_requires_recent_volume_expansion(self):
         quiet = [[index, 100.0, 101.0, 99.0, 101.0, 1.0] for index in range(20)]
@@ -435,7 +495,9 @@ class SignalMathTests(unittest.TestCase):
     def test_volume_profile_blocks_adverse_spike_breaks_symmetrically(self):
         long_candles = [[index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)]
         long_candles.append([59, 100.0, 101.0, 89.0, 90.0, 30.0])
-        short_candles = [[index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)]
+        short_candles = [
+            [index, 100.0, 101.0, 99.0, 100.0, 10.0] for index in range(59)
+        ]
         short_candles.append([59, 100.0, 111.0, 99.0, 110.0, 30.0])
 
         long_context = volume_confirmation_context(
@@ -480,10 +542,16 @@ class SignalMathTests(unittest.TestCase):
 
     def test_market_structure_math_is_direction_symmetric(self):
         long_candles = [[index, 100.0, 101.0, 99.0, 101.0, 2.0] for index in range(20)]
-        short_candles = [[index, 101.0, 102.0, 100.0, 100.0, 2.0] for index in range(20)]
+        short_candles = [
+            [index, 101.0, 102.0, 100.0, 100.0, 2.0] for index in range(20)
+        ]
 
-        long_volume = volume_confirmation_context(long_candles, 5, 20, 1.0, 0.60, "long")
-        short_volume = volume_confirmation_context(short_candles, 5, 20, 1.0, 0.60, "short")
+        long_volume = volume_confirmation_context(
+            long_candles, 5, 20, 1.0, 0.60, "long"
+        )
+        short_volume = volume_confirmation_context(
+            short_candles, 5, 20, 1.0, 0.60, "short"
+        )
         long_chop = choppiness_context(long_candles, 14, 61.8)
         short_chop = choppiness_context(short_candles, 14, 61.8)
 
@@ -496,3 +564,18 @@ class SignalMathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize(
+    ("price_now", "price_then"),
+    [
+        (-5.0, 100.0),
+        (0.0, 100.0),
+        (100.0, -5.0),
+        (100.0, 0.0),
+        (-5.0, -5.0),
+        (0.0, 0.0),
+    ],
+)
+def test_log_return_rejects_non_positive_prices(price_now, price_then):
+    assert compute_log_return(price_now, price_then) == 0.0

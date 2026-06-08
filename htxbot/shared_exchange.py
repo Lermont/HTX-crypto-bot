@@ -26,7 +26,9 @@ def _cache_key(value: Any):
     if value in (None, {}, [], ()):
         return ()
     if isinstance(value, dict):
-        return tuple(sorted((str(key), _cache_key(item)) for key, item in value.items()))
+        return tuple(
+            sorted((str(key), _cache_key(item)) for key, item in value.items())
+        )
     if isinstance(value, (list, tuple)):
         return tuple(_cache_key(item) for item in value)
     if isinstance(value, set):
@@ -57,7 +59,9 @@ class ThreadSafeExchange:
 
     def __init__(self, exchange, lock=None):
         object.__setattr__(self, "_exchange", exchange)
-        object.__setattr__(self, "_thread_safe_exchange_lock", lock or _thread_safe_lock(exchange))
+        object.__setattr__(
+            self, "_thread_safe_exchange_lock", lock or _thread_safe_lock(exchange)
+        )
 
     def thread_safe_lock(self):
         return self._thread_safe_exchange_lock
@@ -119,7 +123,10 @@ class MultiAccountExchange:
     ):
         if not accounts:
             raise ValueError("at least one exchange account is required")
-        safe_accounts = {str(name): ensure_thread_safe_exchange(exchange) for name, exchange in accounts.items()}
+        safe_accounts = {
+            str(name): ensure_thread_safe_exchange(exchange)
+            for name, exchange in accounts.items()
+        }
         if default_account not in safe_accounts:
             default_account = next(iter(safe_accounts))
         object.__setattr__(self, "_accounts", safe_accounts)
@@ -127,7 +134,10 @@ class MultiAccountExchange:
         object.__setattr__(
             self,
             "_coin_accounts",
-            {str(coin).strip().lower(): str(account) for coin, account in (coin_accounts or {}).items()},
+            {
+                str(coin).strip().lower(): str(account)
+                for coin, account in (coin_accounts or {}).items()
+            },
         )
         object.__setattr__(self, "_thread_safe_exchange_lock", threading.RLock())
 
@@ -195,7 +205,9 @@ class MultiAccountExchange:
     def _account_for_symbol(self, symbol: str):
         return self._account(self.account_id_for_symbol(symbol))
 
-    def _call_optional_params(self, exchange, method_name: str, *args, params=None, **kwargs):
+    def _call_optional_params(
+        self, exchange, method_name: str, *args, params=None, **kwargs
+    ):
         method = getattr(exchange, method_name)
         if params is not None:
             try:
@@ -240,7 +252,9 @@ class MultiAccountExchange:
     def amount_to_precision(self, symbol: str, amount):
         return self._account(self._default_account).amount_to_precision(symbol, amount)
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None):
+    def fetch_ohlcv(
+        self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None
+    ):
         return self._account(self._default_account).fetch_ohlcv(
             symbol,
             timeframe=timeframe,
@@ -250,10 +264,17 @@ class MultiAccountExchange:
         )
 
     def fetch_ticker(self, symbol: str, params=None):
-        return self._call_optional_params(self._account(self._default_account), "fetch_ticker", symbol, params=params)
+        return self._call_optional_params(
+            self._account(self._default_account), "fetch_ticker", symbol, params=params
+        )
 
     def fetch_tickers(self, symbols=None, params=None):
-        return self._call_optional_params(self._account(self._default_account), "fetch_tickers", symbols, params=params)
+        return self._call_optional_params(
+            self._account(self._default_account),
+            "fetch_tickers",
+            symbols,
+            params=params,
+        )
 
     def fetch_order_book(self, symbol: str, limit=None, params=None):
         return self._call_optional_params(
@@ -284,8 +305,18 @@ class MultiAccountExchange:
         if not isinstance(payload, dict):
             return ("raw", repr(payload))
         info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
-        order_id = payload.get("id") or info.get("id") or info.get("order_id") or info.get("orderId")
-        symbol = payload.get("symbol") or info.get("symbol") or info.get("contract_code") or info.get("contractCode")
+        order_id = (
+            payload.get("id")
+            or info.get("id")
+            or info.get("order_id")
+            or info.get("orderId")
+        )
+        symbol = (
+            payload.get("symbol")
+            or info.get("symbol")
+            or info.get("contract_code")
+            or info.get("contractCode")
+        )
         side = payload.get("side") or info.get("side") or info.get("direction")
         if order_id:
             return ("id", str(order_id), str(symbol or ""), str(side or ""))
@@ -295,7 +326,12 @@ class MultiAccountExchange:
             str(side or ""),
             str(payload.get("type") or info.get("order_price_type") or ""),
             str(payload.get("price") or info.get("price") or ""),
-            str(payload.get("amount") or payload.get("contracts") or info.get("volume") or ""),
+            str(
+                payload.get("amount")
+                or payload.get("contracts")
+                or info.get("volume")
+                or ""
+            ),
         )
 
     @classmethod
@@ -313,8 +349,14 @@ class MultiAccountExchange:
     def fetch_positions(self, symbols=None, params=None):
         if symbols:
             positions = []
-            for account, account_symbols in self._group_symbols_by_account(symbols).items():
-                positions.extend(self._account(account).fetch_positions(account_symbols, params or {}))
+            for account, account_symbols in self._group_symbols_by_account(
+                symbols
+            ).items():
+                positions.extend(
+                    self._account(account).fetch_positions(
+                        account_symbols, params or {}
+                    )
+                )
             return positions
         positions = []
         for exchange in self._accounts.values():
@@ -331,15 +373,29 @@ class MultiAccountExchange:
             )
         orders = []
         for exchange in self._accounts.values():
-            orders.extend(self._call_optional_params(exchange, "fetch_open_orders", None, params=params or {}))
+            orders.extend(
+                self._call_optional_params(
+                    exchange, "fetch_open_orders", None, params=params or {}
+                )
+            )
         return self._dedupe_payloads(orders)
 
     def fetch_order(self, order_id, symbol=None, params=None):
-        exchange = self._account_for_symbol(symbol) if symbol else self._account(self._default_account)
-        return self._call_optional_params(exchange, "fetch_order", order_id, symbol, params=params or {})
+        exchange = (
+            self._account_for_symbol(symbol)
+            if symbol
+            else self._account(self._default_account)
+        )
+        return self._call_optional_params(
+            exchange, "fetch_order", order_id, symbol, params=params or {}
+        )
 
     def fetch_my_trades(self, symbol=None, since=None, limit=None, params=None):
-        exchange = self._account_for_symbol(symbol) if symbol else self._account(self._default_account)
+        exchange = (
+            self._account_for_symbol(symbol)
+            if symbol
+            else self._account(self._default_account)
+        )
         return self._call_optional_params(
             exchange,
             "fetch_my_trades",
@@ -350,14 +406,20 @@ class MultiAccountExchange:
         )
 
     def create_order(self, symbol, type, side, amount, price, params=None):
-        return self._account_for_symbol(symbol).create_order(symbol, type, side, amount, price, params=params or {})
+        return self._account_for_symbol(symbol).create_order(
+            symbol, type, side, amount, price, params=params or {}
+        )
 
     def cancel_order(self, order_id, symbol, params=None):
-        return self._account_for_symbol(symbol).cancel_order(order_id, symbol, params=params or {})
+        return self._account_for_symbol(symbol).cancel_order(
+            order_id, symbol, params=params or {}
+        )
 
     def set_leverage(self, leverage, symbol=None, params=None):
         if symbol:
-            return self._account_for_symbol(symbol).set_leverage(leverage, symbol, params=params or {})
+            return self._account_for_symbol(symbol).set_leverage(
+                leverage, symbol, params=params or {}
+            )
         result = None
         for exchange in self._accounts.values():
             result = exchange.set_leverage(leverage, symbol, params=params or {})
@@ -365,7 +427,9 @@ class MultiAccountExchange:
 
     def set_position_mode(self, hedged, symbol=None, params=None):
         if symbol:
-            return self._account_for_symbol(symbol).set_position_mode(hedged, symbol, params=params or {})
+            return self._account_for_symbol(symbol).set_position_mode(
+                hedged, symbol, params=params or {}
+            )
         result = None
         for exchange in self._accounts.values():
             result = exchange.set_position_mode(hedged, symbol, params=params or {})
@@ -391,14 +455,26 @@ class MultiAccountExchange:
     def _merge_private_responses(self, responses: List[Any]) -> dict:
         if len(responses) == 1 and isinstance(responses[0], dict):
             return responses[0]
-        return {"status": "ok", "data": [response.get("data", response) if isinstance(response, dict) else response for response in responses]}
+        return {
+            "status": "ok",
+            "data": [
+                response.get("data", response)
+                if isinstance(response, dict)
+                else response
+                for response in responses
+            ],
+        }
 
     def contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo(self, request):
         symbol = self._symbol_from_private_request(request)
         if symbol:
-            return self._account_for_symbol(symbol).contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo(request)
+            return self._account_for_symbol(
+                symbol
+            ).contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo(request)
         responses = [
-            exchange.contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo(request)
+            exchange.contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo(
+                request
+            )
             for exchange in self._accounts.values()
         ]
         return self._merge_private_responses(responses)
@@ -407,7 +483,9 @@ class MultiAccountExchange:
         responses = [
             exchange.contractPrivatePostLinearSwapApiV1SwapCrossAccountInfo(request)
             for exchange in self._accounts.values()
-            if hasattr(exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountInfo")
+            if hasattr(
+                exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountInfo"
+            )
         ]
         return self._merge_private_responses(responses) if responses else None
 
@@ -463,7 +541,9 @@ class CachedMarketDataExchange:
         with self._exchange_lock:
             return method(*args, **kwargs)
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None):
+    def fetch_ohlcv(
+        self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None
+    ):
         timeframe_sec = max(1, _timeframe_seconds(timeframe))
         bucket = int(time.time() // timeframe_sec)
         key = (symbol, timeframe, since, limit, _cache_key(params), bucket)
@@ -475,7 +555,11 @@ class CachedMarketDataExchange:
         with self._cache_lock:
             previous_bucket = bucket_by_timeframe.get(timeframe)
             if previous_bucket is not None and previous_bucket != bucket:
-                stale_keys = [item for item in cache if item[1] == timeframe and item[-1] != bucket]
+                stale_keys = [
+                    item
+                    for item in cache
+                    if item[1] == timeframe and item[-1] != bucket
+                ]
                 for item in stale_keys:
                     cache.pop(item, None)
                     inflight.pop(item, None)
@@ -583,7 +667,9 @@ class CachedMarketDataExchange:
                     missing_symbols.append(symbol)
 
             if missing_symbols:
-                fetched = self._call_exchange("fetch_tickers", missing_symbols, params=params or {})
+                fetched = self._call_exchange(
+                    "fetch_tickers", missing_symbols, params=params or {}
+                )
                 for symbol, value in fetched.items():
                     self._ticker_cache[(symbol, key_params)] = (now, value)
                     result[symbol] = value
@@ -592,7 +678,9 @@ class CachedMarketDataExchange:
 
     def _fetch_order_book_uncached(self, symbol: str, limit=None, params=None):
         try:
-            return self._call_exchange("fetch_order_book", symbol, limit=limit, params=params or {})
+            return self._call_exchange(
+                "fetch_order_book", symbol, limit=limit, params=params or {}
+            )
         except TypeError:
             return self._call_exchange("fetch_order_book", symbol, limit=limit)
 
@@ -600,7 +688,9 @@ class CachedMarketDataExchange:
     def _valid_order_book_payload(payload: Any) -> bool:
         if not isinstance(payload, dict):
             return False
-        return isinstance(payload.get("bids"), list) and isinstance(payload.get("asks"), list)
+        return isinstance(payload.get("bids"), list) and isinstance(
+            payload.get("asks"), list
+        )
 
     def fetch_order_book(self, symbol: str, limit=None, params=None):
         ttl = self._order_book_ttl_sec
@@ -663,17 +753,26 @@ class CachedMarketDataExchange:
     def fetch_funding_rate(self, symbol: str, params=None):
         ttl = self._funding_ttl_sec
         if ttl <= 0:
-            return self._call_exchange("fetch_funding_rate", symbol, params=params or {})
+            return self._call_exchange(
+                "fetch_funding_rate", symbol, params=params or {}
+            )
         now = time.time()
         key = (symbol, _cache_key(params))
         with self._cache_lock:
             cached = self._funding_cache.get(key)
             if cached and now - cached[0] <= ttl:
                 return cached[1]
-            value = self._call_exchange("fetch_funding_rate", symbol, params=params or {})
+            value = self._call_exchange(
+                "fetch_funding_rate", symbol, params=params or {}
+            )
             if self._funding_rate_value(value) is not None:
                 self._funding_cache[key] = (now, value)
             return value
 
 
-__all__ = ["CachedMarketDataExchange", "MultiAccountExchange", "ThreadSafeExchange", "ensure_thread_safe_exchange"]
+__all__ = [
+    "CachedMarketDataExchange",
+    "MultiAccountExchange",
+    "ThreadSafeExchange",
+    "ensure_thread_safe_exchange",
+]
