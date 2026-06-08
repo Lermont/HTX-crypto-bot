@@ -1,3 +1,4 @@
+from unittest import mock
 # -*- coding: utf-8 -*-
 
 import math
@@ -25,6 +26,7 @@ from htxbot.signal_math import (
     relative_strength_context,
     signal_budget_multiplier,
     signal_score,
+    ema_pair_side,
     volume_confirmation_context,
     volatility_multiplier,
 )
@@ -50,6 +52,12 @@ def _expected_realized_volatility(closes, window):
 
 
 class IndicatorMathTests(unittest.TestCase):
+
+    def test_ema_pair_side_determines_trend_direction(self):
+        self.assertEqual(ema_pair_side(10.0, 5.0), "long")
+        self.assertEqual(ema_pair_side(5.0, 10.0), "short")
+        self.assertEqual(ema_pair_side(10.0, 10.0), "neutral")
+
     def test_clamp_bounds_value_without_side_effects(self):
         self.assertEqual(clamp(5, 1, 10), 5)
         self.assertEqual(clamp(0, 1, 10), 1)
@@ -239,6 +247,94 @@ class SignalMathTests(unittest.TestCase):
         self.assertTrue(short_context["pullback_valid"])
         self.assertGreater(long_context["pullback_recovery_gap"], 0.0)
         self.assertGreater(short_context["pullback_recovery_gap"], 0.0)
+
+
+    def test_pullback_recovery_context_handles_gap_threshold_and_boundaries(self):
+        closes = [100.0, 99.0, 98.0, 97.0, 98.0, 100.0, 103.0, 106.0]
+
+        # Valid recovery
+        valid_ctx = ema_pullback_recovery_context(
+            closes=closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=3,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        self.assertTrue(valid_ctx["pullback_valid"])
+        self.assertTrue(valid_ctx["pullback_recovered"])
+        self.assertTrue(valid_ctx["pullback_had_pullback"])
+
+        # Invalid due to gap_threshold
+        high_threshold_ctx = ema_pullback_recovery_context(
+            closes=closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=3,
+            gap_threshold=0.05,
+            position_side="long",
+        )
+        self.assertFalse(high_threshold_ctx["pullback_valid"])
+        self.assertFalse(high_threshold_ctx["pullback_recovered"])
+
+        # Invalid due to max_cross_age
+        strict_age_ctx = ema_pullback_recovery_context(
+            closes=closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=1,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        self.assertFalse(strict_age_ctx["pullback_valid"])
+        self.assertEqual(strict_age_ctx["pullback_cross_age_candles"], 2)
+
+        # Invalid due to lookback
+        short_lookback_ctx = ema_pullback_recovery_context(
+            closes=closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=1,
+            max_cross_age=3,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        self.assertFalse(short_lookback_ctx["pullback_valid"])
+        self.assertFalse(short_lookback_ctx["pullback_had_pullback"])
+
+    def test_pullback_recovery_context_empty_or_invalid_data(self):
+        # Empty closes
+        empty_ctx = ema_pullback_recovery_context(
+            closes=[],
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=3,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        self.assertFalse(empty_ctx["pullback_valid"])
+        self.assertFalse(empty_ctx["pullback_recovered"])
+        self.assertFalse(empty_ctx["pullback_had_pullback"])
+        self.assertEqual(empty_ctx["pullback_cross_age_candles"], -1)
+
+        # Flat zeros
+        zeros_ctx = ema_pullback_recovery_context(
+            closes=[0.0, 0.0, 0.0, 0.0],
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=3,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        self.assertFalse(zeros_ctx["pullback_valid"])
+        self.assertTrue(zeros_ctx["pullback_had_pullback"])
+        self.assertEqual(zeros_ctx["pullback_recovery_gap"], 0.0)
+
 
     def test_ema_signal_direction_metrics_preserve_long_short_invariants(self):
         long_metrics = ema_signal_direction_metrics(

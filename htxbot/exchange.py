@@ -1930,7 +1930,17 @@ class ExchangeMixin:
         )
         return True
 
-    def _set_leverage_safe(self, symbol: str, leverage: int) -> bool:
+
+    def _get_max_leverage(self, symbol: str) -> float:
+        try:
+            tiers = self.exchange.fetch_leverage_tiers([symbol])
+            if symbol in tiers and tiers[symbol]:
+                return max(tier.get("maxLeverage", 0.0) for tier in tiers[symbol])
+        except Exception:
+            pass
+        return 0.0
+
+    def _set_leverage_safe(self, symbol: str, leverage: int, _is_fallback: bool = False) -> bool:
         try:
             self.exchange.set_leverage(
                 int(leverage), symbol, params=self._position_params()
@@ -1940,6 +1950,18 @@ class ExchangeMixin:
             self.order_leverage_cache[symbol] = float(leverage)
             return True
         except Exception as exc:
+            if not _is_fallback and self._is_high_leverage_risk_error(exc):
+                max_leverage = self._get_max_leverage(symbol)
+                if max_leverage > 0 and max_leverage < leverage:
+                    self._log_event(
+                        "INFO",
+                        f"Requested leverage {leverage} exceeds maximum allowed for {symbol}. Falling back to max leverage {max_leverage}.",
+                        event="futures_setup",
+                        symbol=symbol,
+                        reason="leverage_fallback",
+                    )
+                    return self._set_leverage_safe(symbol, int(max_leverage), _is_fallback=True)
+
             self._log_event(
                 "WARNING",
                 f"Could not set leverage {leverage} for {symbol}: {exc}",
