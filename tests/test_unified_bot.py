@@ -9897,6 +9897,42 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertEqual(exchange.calls.count("fetch_positions"), 3)
         self.assertEqual(exchange.calls.count("create_order"), 3)
 
+    def test_thread_safe_exchange_returns_thread_safe_lock(self):
+        exchange = FakeExchange()
+        lock = threading.RLock()
+        safe_exchange = ThreadSafeExchange(exchange, lock)
+        self.assertIs(safe_exchange.thread_safe_lock(), lock)
+
+        # Test default lock creation
+        safe_exchange_default = ThreadSafeExchange(exchange)
+        self.assertTrue(hasattr(safe_exchange_default.thread_safe_lock(), "acquire"))
+
+    def test_thread_safe_exchange_returns_unsafe_exchange(self):
+        exchange = FakeExchange()
+        safe_exchange = ThreadSafeExchange(exchange)
+        self.assertIs(safe_exchange.unsafe_exchange(), exchange)
+
+    def test_multi_account_exchange_returns_thread_safe_lock(self):
+        primary = FakeExchange("primary")
+        secondary = FakeExchange("secondary")
+        exchange = MultiAccountExchange(
+            {"primary": primary, "secondary": secondary}, {}
+        )
+        self.assertTrue(hasattr(exchange.thread_safe_lock(), "acquire"))
+
+    def test_multi_account_exchange_returns_unsafe_exchange(self):
+        primary = FakeExchange("primary")
+        secondary = FakeExchange("secondary")
+        exchange = MultiAccountExchange(
+            {"primary": primary, "secondary": secondary}, {}
+        )
+        self.assertIs(exchange.unsafe_exchange().unsafe_exchange(), primary)
+
+    def test_cached_market_data_exchange_returns_thread_safe_lock(self):
+        exchange = FakeExchange()
+        cached = CachedMarketDataExchange(exchange)
+        self.assertTrue(hasattr(cached.thread_safe_lock(), "acquire"))
+
     def test_multi_account_exchange_routes_symbol_private_calls(self):
         primary = FakeExchange("primary")
         secondary = FakeExchange("secondary")
