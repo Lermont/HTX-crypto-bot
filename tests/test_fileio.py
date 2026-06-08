@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
-
+import errno
 import unittest
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
-from htxbot.fileio import replace_path_with_retry
+from htxbot.fileio import replace_path_with_retry, is_transient_file_replace_error
+import os
 
 
 class TestFileIO(unittest.TestCase):
@@ -22,6 +22,7 @@ class TestFileIO(unittest.TestCase):
         replace_mock = MagicMock()
 
         call_count = [0]
+
         def side_effect(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] < 3:
@@ -31,11 +32,12 @@ class TestFileIO(unittest.TestCase):
         sleep_mock = MagicMock()
 
         replace_path_with_retry(
-            "src", "dst",
+            "src",
+            "dst",
             attempts=5,
             initial_delay_sec=0.1,
             replace_func=replace_mock,
-            sleep_func=sleep_mock
+            sleep_func=sleep_mock,
         )
 
         self.assertEqual(call_count[0], 3)
@@ -50,11 +52,12 @@ class TestFileIO(unittest.TestCase):
 
         with self.assertRaises(PermissionError):
             replace_path_with_retry(
-                "src", "dst",
+                "src",
+                "dst",
                 attempts=3,
                 initial_delay_sec=0.1,
                 replace_func=replace_mock,
-                sleep_func=sleep_mock
+                sleep_func=sleep_mock,
             )
 
         self.assertEqual(replace_mock.call_count, 3)
@@ -67,35 +70,55 @@ class TestFileIO(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             replace_path_with_retry(
-                "src", "dst",
-                replace_func=replace_mock,
-                sleep_func=sleep_mock
+                "src", "dst", replace_func=replace_mock, sleep_func=sleep_mock
             )
 
         replace_mock.assert_called_once()
         sleep_mock.assert_not_called()
 
+    def test_is_transient_file_replace_error(self):
+        self.assertTrue(
+            is_transient_file_replace_error(PermissionError("Access denied"))
+        )
+        self.assertFalse(is_transient_file_replace_error(ValueError("Not an OSError")))
 
-    def test_is_transient_file_replace_error_permission_error(self):
-        from htxbot.fileio import is_transient_file_replace_error
-        exc = PermissionError("Access denied")
-        self.assertTrue(is_transient_file_replace_error(exc))
+        # Test winerror 5 and 32
+        exc5 = OSError()
+        exc5.winerror = 5
+        self.assertTrue(is_transient_file_replace_error(exc5))
 
-    def test_is_transient_file_replace_error_oserror_winerror(self):
-        from htxbot.fileio import is_transient_file_replace_error
-        exc = OSError("File lock")
-        exc.winerror = 32
-        self.assertTrue(is_transient_file_replace_error(exc))
+        exc32 = OSError()
+        exc32.winerror = 32
+        self.assertTrue(is_transient_file_replace_error(exc32))
 
-    def test_is_transient_file_replace_error_non_oserror(self):
-        from htxbot.fileio import is_transient_file_replace_error
-        exc = ValueError("Some value error")
-        self.assertFalse(is_transient_file_replace_error(exc))
+        # Test non-transient winerror
+        exc_other = OSError()
+        exc_other.winerror = 123
+        self.assertFalse(is_transient_file_replace_error(exc_other))
 
-    def test_is_transient_file_replace_error_oserror_no_winerror(self):
-        from htxbot.fileio import is_transient_file_replace_error
-        exc = OSError("Other OS error")
-        self.assertFalse(is_transient_file_replace_error(exc))
+        # Test windows errno (mocking os.name)
+        original_os_name = os.name
+        try:
+            os.name = "nt"
+            import errno
+
+            exc_eacces = OSError()
+            exc_eacces.errno = errno.EACCES
+            self.assertTrue(is_transient_file_replace_error(exc_eacces))
+
+            exc_eperm = OSError()
+            exc_eperm.errno = errno.EPERM
+            self.assertTrue(is_transient_file_replace_error(exc_eperm))
+
+            exc_other_errno = OSError()
+            exc_other_errno.errno = errno.ENOENT
+            self.assertFalse(is_transient_file_replace_error(exc_other_errno))
+
+            os.name = "posix"
+            self.assertFalse(is_transient_file_replace_error(exc_eacces))
+        finally:
+            os.name = original_os_name
+
 
 if __name__ == "__main__":
     unittest.main()
