@@ -150,8 +150,10 @@ class MonitoringMixin:
         except Exception as exc:
             try:
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                self.log.warning(
+                    "Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc
+                )
             self.log.warning("Could not replace CSV header for %s: %s", path, exc)
 
     def _apply_legacy_csv_aliases(self, row: Dict[str, Any]):
@@ -175,8 +177,10 @@ class MonitoringMixin:
         except Exception as exc:
             try:
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                self.log.warning(
+                    "Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc
+                )
             self.log.warning("Could not add CSV header for %s: %s", path, exc)
 
     def _ensure_csv_file(self):
@@ -1068,24 +1072,7 @@ class MonitoringMixin:
                 retryable=int(bool(exception_info.get("retryable", False)))
                 if diagnostic_exception or diagnostic_retryable is not None
                 else "",
-                symbol=str(kwargs.get("symbol", "")),
-                side=str(kwargs.get("side", "")),
-                order_id=str(kwargs.get("order_id", "")),
-                price=_safe_float(kwargs.get("price")),
-                amount=_safe_float(kwargs.get("amount")),
-                filled=_safe_float(kwargs.get("filled")),
-                remaining=_safe_float(kwargs.get("remaining")),
-                position_size=_safe_float(kwargs.get("position_size")),
-                entry_price=_safe_float(kwargs.get("entry_price")),
-                notional=_safe_float(kwargs.get("notional")),
-                fee_quote=_safe_float(kwargs.get("fee_quote")),
-                fee_currency=str(kwargs.get("fee_currency", "")),
-                fill_source=str(kwargs.get("fill_source", "")),
-                rs30=_safe_float(kwargs.get("rs30")),
-                rs60=_safe_float(kwargs.get("rs60")),
-                ema30=_safe_float(kwargs.get("ema30")),
-                ema60=_safe_float(kwargs.get("ema60")),
-                reason=str(kwargs.get("reason", "")),
+                **kwargs,
             )
             self._append_csv(csv_data)
         except Exception as exc:

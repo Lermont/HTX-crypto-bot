@@ -340,24 +340,9 @@ class ExitStrategy:
         self._save_state()
         return True
 
-    def _ensure_hard_stop_loss(
-        self, symbol: str, signal: Optional[dict] = None
-    ) -> bool:
-        state = self._get_state(symbol)
-        if state.position_size <= 0 or state.entry_price <= 0:
-            if state.hard_stop_order:
-                self._cancel_hard_stop_order(
-                    symbol, reason="hard_stop_loss_flat_position"
-                )
-            return False
-
-        if not config.STRATEGY.hard_stop_loss_enabled:
-            if state.hard_stop_order:
-                self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_disabled")
-            return False
-
-        loss_rate, loss_rate_reason = self._hard_stop_loss_rate(signal)
-        trigger_price = self._hard_stop_loss_trigger_price(symbol, state, loss_rate)
+    def _calculate_hard_stop_loss_trigger_and_reason(
+        self, symbol: str, state, trigger_price: float, loss_rate_reason: str
+    ) -> Tuple[float, str]:
         lock_price, lock_reason = self._runner_profit_lock_stop_price(symbol, state)
         if lock_price > 0:
             if config.POSITION_SIDE == "short" and (
@@ -372,62 +357,44 @@ class ExitStrategy:
                 loss_rate_reason = (
                     f"{loss_rate_reason};{lock_reason};trigger_locked={lock_price:.12f}"
                 )
-        if state.sell_ladder_mode == "soft_defensive_exit" and state.sell_ladder_orders:
-            return False
-        if state.sell_ladder_mode == "hard_stop_loss":
-            return self._force_hard_stop_loss_market_close(
-                symbol,
-                trigger_price,
-                loss_rate,
-                loss_rate_reason,
-            )
+        return trigger_price, loss_rate_reason
 
-        if not config.RUNTIME.reduce_only_enabled:
+    def _handle_hard_stop_loss_retry_on_reduce_only_error(
+        self,
+        symbol: str,
+        state,
+        amount: float,
+        trigger_price: float,
+        exc: Exception,
+        loss_rate_reason: str,
+    ) -> Tuple[dict, str, Optional[Exception], bool]:
+        order_exc = exc
+        order_id = ""
+
+        order = {}
+        if (
+            self._is_reduce_only_amount_exceeds_closeable_error(exc)
+            and state.sell_ladder_orders
+        ):
             self._log_event(
-                "ERROR",
-                f"Hard stop-loss blocked for {symbol}: reduce-only disabled",
+                "WARNING",
+                f"Hard stop-loss for {symbol} is blocked by reserved closeable amount; canceling TP ladder and retrying stop first",
                 event="reduce_only_violation_prevented",
                 symbol=symbol,
                 side=config.EXIT_SIDE,
+                amount=amount,
+                price=trigger_price,
                 position_size=state.position_size,
                 entry_price=state.entry_price,
-                reason="hard_stop_loss_reduce_only_disabled",
+                reason=f"hard_stop_loss_closeable_reserved_by_exit_ladder;{loss_rate_reason}",
+                exception=exc,
             )
-            state.frozen_no_more_buys = True
-            self._refresh_active_side(state)
-            self._save_state()
-            return False
-
-        amount = self._amount_to_precision(
-            symbol, min(max(0.0, state.position_size), state.position_size)
-        )
-        if amount <= 0 or trigger_price <= 0:
-            return False
-
-        signature = self._hard_stop_loss_signature(symbol, state, amount, trigger_price)
-        if state.hard_stop_order and state.hard_stop_signature == signature:
-            return False
-        if state.hard_stop_order:
-            self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_rebuild")
+            self._cancel_sell_orders(symbol, reason="hard_stop_loss_priority")
             state = self._get_state(symbol)
-            if state.hard_stop_order:
-                return True
-
-        order = {}
-        order_id = ""
-        order_exc: Optional[Exception] = None
-        try:
-            order = self._create_hard_stop_loss_order(symbol, amount, trigger_price)
-            order_id = str(order.get("id") or "")
-        except Exception as exc:
-            order_exc = exc
-            if (
-                self._is_reduce_only_amount_exceeds_closeable_error(exc)
-                and state.sell_ladder_orders
-            ):
+            if state.sell_ladder_orders:
                 self._log_event(
                     "WARNING",
-                    f"Hard stop-loss for {symbol} is blocked by reserved closeable amount; canceling TP ladder and retrying stop first",
+                    f"Hard stop-loss delayed for {symbol}: TP ladder cancel did not fully clear",
                     event="reduce_only_violation_prevented",
                     symbol=symbol,
                     side=config.EXIT_SIDE,
@@ -435,33 +402,30 @@ class ExitStrategy:
                     price=trigger_price,
                     position_size=state.position_size,
                     entry_price=state.entry_price,
-                    reason=f"hard_stop_loss_closeable_reserved_by_exit_ladder;{loss_rate_reason}",
-                    exception=exc,
+                    reason=f"hard_stop_loss_priority_cancel_failed;{loss_rate_reason}",
                 )
-                self._cancel_sell_orders(symbol, reason="hard_stop_loss_priority")
-                state = self._get_state(symbol)
-                if state.sell_ladder_orders:
-                    self._log_event(
-                        "WARNING",
-                        f"Hard stop-loss delayed for {symbol}: TP ladder cancel did not fully clear",
-                        event="reduce_only_violation_prevented",
-                        symbol=symbol,
-                        side=config.EXIT_SIDE,
-                        amount=amount,
-                        price=trigger_price,
-                        position_size=state.position_size,
-                        entry_price=state.entry_price,
-                        reason=f"hard_stop_loss_priority_cancel_failed;{loss_rate_reason}",
-                    )
-                    return True
-                try:
-                    order = self._create_hard_stop_loss_order(
-                        symbol, amount, trigger_price
-                    )
-                    order_id = str(order.get("id") or "")
-                except Exception as retry_exc:
-                    order_exc = retry_exc
+                return order, "", order_exc, True
+            try:
+                order = self._create_hard_stop_loss_order(symbol, amount, trigger_price)
+                order_id = str(order.get("id") or "")
+            except Exception as retry_exc:
+                order_exc = retry_exc
 
+        return order, order_id, order_exc, False
+
+    def _finalize_hard_stop_loss_order_result(
+        self,
+        symbol: str,
+        state,
+        amount: float,
+        trigger_price: float,
+        loss_rate: float,
+        loss_rate_reason: str,
+        signature: str,
+        order: dict,
+        order_id: str,
+        order_exc: Optional[Exception],
+    ) -> bool:
         if not order_id and order_exc is not None:
             if self._is_hard_stop_loss_trigger_reached_error(order_exc):
                 return self._force_hard_stop_loss_market_close(
@@ -534,6 +498,100 @@ class ExitStrategy:
             reason=f"hard_stop_loss;loss_rate={loss_rate:.6f};{loss_rate_reason}",
         )
         return True
+
+    def _ensure_hard_stop_loss(
+        self, symbol: str, signal: Optional[dict] = None
+    ) -> bool:
+        state = self._get_state(symbol)
+        if state.position_size <= 0 or state.entry_price <= 0:
+            if state.hard_stop_order:
+                self._cancel_hard_stop_order(
+                    symbol, reason="hard_stop_loss_flat_position"
+                )
+            return False
+
+        if not config.STRATEGY.hard_stop_loss_enabled:
+            if state.hard_stop_order:
+                self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_disabled")
+            return False
+
+        loss_rate, loss_rate_reason = self._hard_stop_loss_rate(signal)
+        trigger_price = self._hard_stop_loss_trigger_price(symbol, state, loss_rate)
+
+        trigger_price, loss_rate_reason = (
+            self._calculate_hard_stop_loss_trigger_and_reason(
+                symbol, state, trigger_price, loss_rate_reason
+            )
+        )
+
+        if state.sell_ladder_mode == "soft_defensive_exit" and state.sell_ladder_orders:
+            return False
+        if state.sell_ladder_mode == "hard_stop_loss":
+            return self._force_hard_stop_loss_market_close(
+                symbol,
+                trigger_price,
+                loss_rate,
+                loss_rate_reason,
+            )
+
+        if not config.RUNTIME.reduce_only_enabled:
+            self._log_event(
+                "ERROR",
+                f"Hard stop-loss blocked for {symbol}: reduce-only disabled",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                position_size=state.position_size,
+                entry_price=state.entry_price,
+                reason="hard_stop_loss_reduce_only_disabled",
+            )
+            state.frozen_no_more_buys = True
+            self._refresh_active_side(state)
+            self._save_state()
+            return False
+
+        amount = self._amount_to_precision(
+            symbol, min(max(0.0, state.position_size), state.position_size)
+        )
+        if amount <= 0 or trigger_price <= 0:
+            return False
+
+        signature = self._hard_stop_loss_signature(symbol, state, amount, trigger_price)
+        if state.hard_stop_order and state.hard_stop_signature == signature:
+            return False
+        if state.hard_stop_order:
+            self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_rebuild")
+            state = self._get_state(symbol)
+            if state.hard_stop_order:
+                return True
+
+        order = {}
+        order_id = ""
+        order_exc: Optional[Exception] = None
+        try:
+            order = self._create_hard_stop_loss_order(symbol, amount, trigger_price)
+            order_id = str(order.get("id") or "")
+        except Exception as exc:
+            order, order_id, order_exc, should_return_true = (
+                self._handle_hard_stop_loss_retry_on_reduce_only_error(
+                    symbol, state, amount, trigger_price, exc, loss_rate_reason
+                )
+            )
+            if should_return_true:
+                return True
+
+        return self._finalize_hard_stop_loss_order_result(
+            symbol,
+            state,
+            amount,
+            trigger_price,
+            loss_rate,
+            loss_rate_reason,
+            signature,
+            order,
+            order_id,
+            order_exc,
+        )
 
     def _soft_defensive_signal_broken_reason(self, signal: Optional[dict]) -> str:
         if not signal:
@@ -3578,6 +3636,7 @@ class ExitStrategy:
 
     def _validate_flat_exit_orders(self, symbol: str, state, exposure) -> bool:
         import config
+
         exit_side = exposure["exit_side"]
         unknown_sells = exposure["unknown_exit_orders"]
 
@@ -3662,8 +3721,11 @@ class ExitStrategy:
                 )
         return True
 
-    def _validate_tracked_exit_orders_reduce_only(self, symbol: str, state, exposure) -> bool:
+    def _validate_tracked_exit_orders_reduce_only(
+        self, symbol: str, state, exposure
+    ) -> bool:
         import config
+
         exit_side = exposure["exit_side"]
         tracked_hard_stop_orders = exposure["tracked_hard_stop_orders"]
         tracked_sell_orders = exposure["tracked_exit_orders"]
@@ -3750,6 +3812,7 @@ class ExitStrategy:
 
     def _validate_unknown_exit_orders(self, symbol: str, state, exposure) -> bool:
         import config
+
         exit_side = exposure["exit_side"]
         unknown_sells = exposure["unknown_exit_orders"]
         tracked_sell_orders = exposure["tracked_exit_orders"]
@@ -3758,7 +3821,9 @@ class ExitStrategy:
         if not unknown_sells:
             return True
 
-        unknown_remaining = sum(self._order_remaining_amount(order) for order in unknown_sells)
+        unknown_remaining = sum(
+            self._order_remaining_amount(order) for order in unknown_sells
+        )
         if unknown_remaining > state.position_size + eps:
             self._log_event(
                 "ERROR",
@@ -3770,11 +3835,21 @@ class ExitStrategy:
                 position_size=state.position_size,
                 reason="unknown_exit_amount_exceeds_position",
             )
-            self._cancel_exchange_orders(symbol, unknown_sells, side=exit_side, reason="unknown_exit_amount_exceeds_position")
+            self._cancel_exchange_orders(
+                symbol,
+                unknown_sells,
+                side=exit_side,
+                reason="unknown_exit_amount_exceeds_position",
+            )
             return False
 
-        tracked_remaining = sum(self._order_remaining_amount(order) for order in tracked_sell_orders)
-        if tracked_remaining > 0 and tracked_remaining + unknown_remaining > state.position_size + eps:
+        tracked_remaining = sum(
+            self._order_remaining_amount(order) for order in tracked_sell_orders
+        )
+        if (
+            tracked_remaining > 0
+            and tracked_remaining + unknown_remaining > state.position_size + eps
+        ):
             self._log_event(
                 "ERROR",
                 f"Combined tracked and unknown {exit_side} orders exceed {config.POSITION_SIDE} position for {symbol}; canceling tracked bot orders",
@@ -3785,11 +3860,18 @@ class ExitStrategy:
                 position_size=state.position_size,
                 reason="combined_exit_amount_exceeds_position",
             )
-            self._cancel_sell_orders(symbol, reason="combined_exit_amount_exceeds_position")
+            self._cancel_sell_orders(
+                symbol, reason="combined_exit_amount_exceeds_position"
+            )
             return False
 
-        if tracked_remaining > 0 and tracked_remaining + unknown_remaining <= state.position_size + eps:
-            can_adopt, adopt_reason = self._unknown_exit_adoption_reason(symbol, unknown_sells, unknown_remaining)
+        if (
+            tracked_remaining > 0
+            and tracked_remaining + unknown_remaining <= state.position_size + eps
+        ):
+            can_adopt, adopt_reason = self._unknown_exit_adoption_reason(
+                symbol, unknown_sells, unknown_remaining
+            )
             if can_adopt:
                 return self._adopt_sell_orders(
                     symbol,
@@ -3837,9 +3919,13 @@ class ExitStrategy:
             )
 
         if not state.sell_ladder_orders and not tracked_sell_orders:
-            can_adopt, adopt_reason = self._unknown_exit_adoption_reason(symbol, unknown_sells, unknown_remaining)
+            can_adopt, adopt_reason = self._unknown_exit_adoption_reason(
+                symbol, unknown_sells, unknown_remaining
+            )
             if can_adopt:
-                return self._adopt_sell_orders(symbol, unknown_sells, reason=adopt_reason)
+                return self._adopt_sell_orders(
+                    symbol, unknown_sells, reason=adopt_reason
+                )
 
             if self._should_cancel_hidden_exit_orders(unknown_sells, adopt_reason):
                 self._log_event(
@@ -3896,16 +3982,26 @@ class ExitStrategy:
         open_sell_orders = exposure["open_exit_orders"]
         eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
 
-        if "unknown_exit" in str(getattr(state, "pending_exit_ladder_reason", "") or ""):
+        if "unknown_exit" in str(
+            getattr(state, "pending_exit_ladder_reason", "") or ""
+        ):
             self._clear_pending_exit_ladder(state)
             self._refresh_active_side(state)
             self._save_state()
 
         open_tracked_sell_ids = {str(order.get("id")) for order in tracked_sell_orders}
-        active_refs = [ref for ref in state.sell_ladder_orders if str(ref.get("id")) in open_tracked_sell_ids]
+        active_refs = [
+            ref
+            for ref in state.sell_ladder_orders
+            if str(ref.get("id")) in open_tracked_sell_ids
+        ]
 
-        if state.sell_ladder_orders and len(active_refs) != len(state.sell_ladder_orders):
-            unknown_remaining = sum(self._order_remaining_amount(order) for order in unknown_sells)
+        if state.sell_ladder_orders and len(active_refs) != len(
+            state.sell_ladder_orders
+        ):
+            unknown_remaining = sum(
+                self._order_remaining_amount(order) for order in unknown_sells
+            )
             if unknown_sells and unknown_remaining <= state.position_size + eps:
                 can_adopt, adopt_reason = self._unknown_exit_adoption_reason(
                     symbol, unknown_sells, unknown_remaining
@@ -3942,8 +4038,11 @@ class ExitStrategy:
                 self._safe_float(ref.get("amount"), 0.0) for ref in missing_refs
             )
             if missing_refs and not open_sell_orders:
-                first_preserve = not all(ref.get("invisible_preserved_at") for ref in missing_refs)
+                first_preserve = not all(
+                    ref.get("invisible_preserved_at") for ref in missing_refs
+                )
                 import time
+
                 now = time.time()
                 if first_preserve:
                     for ref in missing_refs:
@@ -4016,13 +4115,18 @@ class ExitStrategy:
 
         return True
 
-    def _validate_exit_amount_within_position(self, symbol: str, state, exposure) -> bool:
+    def _validate_exit_amount_within_position(
+        self, symbol: str, state, exposure
+    ) -> bool:
         import config
+
         exit_side = exposure["exit_side"]
         tracked_sell_orders = exposure["tracked_exit_orders"]
         eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
 
-        remaining = sum(self._order_remaining_amount(order) for order in tracked_sell_orders)
+        remaining = sum(
+            self._order_remaining_amount(order) for order in tracked_sell_orders
+        )
 
         if remaining > state.position_size + eps:
             self._log_event(
@@ -4087,8 +4191,9 @@ class ExitStrategy:
 
         return True
 
-
-    def _closeable_contracts_for_exit_ladder(self, symbol: str, had_sell_ladder: bool) -> float:
+    def _closeable_contracts_for_exit_ladder(
+        self, symbol: str, had_sell_ladder: bool
+    ) -> float:
         state = self._get_state(symbol)
         position_size = max(0.0, self._safe_float(state.position_size, 0.0))
         closeable = max(

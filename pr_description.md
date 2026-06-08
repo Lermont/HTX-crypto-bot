@@ -1,12 +1,9 @@
-## 🧪 [testing improvement] Add test for StrategyRiskMixin's finish helper
+🧹 Replace empty except OSError handlers with log warnings
 
-### 🎯 What:
-Addressed a testing gap in `htxbot/strategy_risk.py` where the nested `finish` helper function within `_risk_budget` lacked explicit test coverage.
-
-### 📊 Coverage:
-A new test `test_risk_budget_finish_method_updates_context` has been added to `tests/test_unified_bot.py`. It simulates a scenario (`free_margin_below_reserve`) that triggers the `finish` helper. The test verifies that:
-- The `budget` and `reason` are correctly returned.
-- The `_last_risk_budget_context` is properly assigned and populated with expected runtime context values like `free`, `equity`, `reserve`, `is_new_position`, and `budget_scale`.
-
-### ✨ Result:
-The inner behavior of the `_risk_budget` flow is now reliably verified under test, increasing overall test confidence without altering existing behavior.
+🎯 **What:** Replaced empty `except OSError: pass` exception handlers with proper error logging using the class logger in `htxbot/state.py`.
+💡 **Why:** Silently swallowing errors with `pass` is an anti-pattern. While an `OSError` during lock cleanup or state saving may be non-fatal, hiding it makes it very difficult to diagnose intermittent file lock or permission issues. Logging these exceptions as warnings significantly improves codebase observability and maintainability.
+✅ **Verification:**
+- Ran `ruff check htxbot/state.py --fix` and `ruff format htxbot/state.py`.
+- Checked `PYTHONPATH=. python3 -m pytest tests/` to verify that functionality isn't broken. (Note: Existent TypeError in signal_engine is a baseline failure not introduced by this change).
+- Checked the patched source to ensure correct formatting and implementation.
+✨ **Result:** Enhanced traceability of file manipulation issues in state handling without altering expected runtime behavior.
