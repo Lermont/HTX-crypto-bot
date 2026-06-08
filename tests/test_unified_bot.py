@@ -9096,6 +9096,20 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertIn("fetch_positions returned dict", position_rows[-1]["message"])
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
 
+    def test_per_symbol_open_orders_success(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.has["fetchOpenOrders"] = False
+            mock_order = {"id": "123", "symbol": SYMBOL, "side": "buy"}
+            bot.exchange.open_orders = [mock_order]
+
+            orders = bot._fetch_open_orders(SYMBOL)
+
+            self.assertIsNotNone(orders)
+            self.assertEqual(len(orders), 1)
+            self.assertEqual(orders[0]["id"], "123")
+            self.assertEqual(bot.exchange.fetch_open_orders_calls, 1)
+
     def test_open_orders_dict_response_is_logged_without_step_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
