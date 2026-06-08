@@ -121,7 +121,12 @@ class SignalFilters:
                         if opened_at >= cutoff:
                             count += 1
             except FileNotFoundError:
-                pass
+                self._log_event(
+                    "DEBUG",
+                    f"Cycle stats file not found for entry rate limit at {path}",
+                    event="cycle_stats_missing",
+                    reason="entry_rate_limit_file_not_found",
+                )
             except Exception as exc:
                 self._log_event(
                     "WARNING",

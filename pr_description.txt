@@ -1,7 +1,6 @@
-🎯 **What:** The testing gap addressed is the lack of unit tests for the `replace_path_with_retry` function in `htxbot/fileio.py`.
-📊 **Coverage:** Tests now cover:
-- Successful first execution
-- Retries on transient errors (like `PermissionError`) with correct exponential backoff times
-- Immediate failure on non-transient errors (like `FileNotFoundError`)
-- Correct behavior when retry limit is exhausted
-✨ **Result:** The test suite now safely confirms the retry behavior and allows confident refactoring.
+🎯 **What:** Replaced empty `except FileNotFoundError: pass` handlers in `htxbot/strategy_filters.py` and `htxbot/strategy_risk.py` with appropriate `DEBUG`-level log events using `self._log_event`.
+💡 **Why:** Empty exception handlers (often called "swallowed exceptions") reduce the system's observability. By logging these cases at the debug level, we preserve the original safe-failure logic (where a missing CSV file isn't an error because it just hasn't been generated yet) while making it possible to trace this path during active debugging or issue diagnosis.
+✅ **Verification:** Verified that `self._log_event` is the standard bot logging mechanism. Test execution was performed, revealing a baseline `TypeError` present on the `main` branch, but validating that the new logic did not introduce any syntax errors or new breakages. Code review confirmed the safety and correctness of the change.
+✨ **Result:** Enhanced maintainability and debugging capability without altering the production behavior.
+
+*Note: The test suite currently fails locally due to an unrelated baseline issue in `htxbot/signal_engine.py` (`_calculate_signal_indicators` returns None and throws a TypeError when unpacked), which is outside the scope of this code health fix.*

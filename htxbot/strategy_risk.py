@@ -848,6 +848,12 @@ class RiskManager:
                         continue
                     total += self._safe_float(row.get("realized_pnl_quote"), 0.0)
         except FileNotFoundError:
+            self._log_event(
+                "DEBUG",
+                f"Cycle stats file not found for controlled loss budget at {path}",
+                event="cycle_stats_missing",
+                reason="controlled_loss_budget_file_not_found",
+            )
             return 0.0
         except Exception as exc:
             self._log_event(
