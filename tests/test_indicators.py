@@ -26,6 +26,7 @@ from htxbot.signal_math import (
     relative_strength_context,
     signal_budget_multiplier,
     signal_score,
+    ema_pair_side,
     volume_confirmation_context,
     volatility_multiplier,
 )
@@ -51,6 +52,12 @@ def _expected_realized_volatility(closes, window):
 
 
 class IndicatorMathTests(unittest.TestCase):
+
+    def test_ema_pair_side_determines_trend_direction(self):
+        self.assertEqual(ema_pair_side(10.0, 5.0), "long")
+        self.assertEqual(ema_pair_side(5.0, 10.0), "short")
+        self.assertEqual(ema_pair_side(10.0, 10.0), "neutral")
+
     def test_clamp_bounds_value_without_side_effects(self):
         self.assertEqual(clamp(5, 1, 10), 5)
         self.assertEqual(clamp(0, 1, 10), 1)
