@@ -1,7 +1,6 @@
-# -*- coding: utf-8 -*-
-
+import errno
 import unittest
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 from htxbot.fileio import replace_path_with_retry, is_transient_file_replace_error
 import os
