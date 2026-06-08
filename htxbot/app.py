@@ -9,7 +9,6 @@ import config
 from .concurrency import ensure_runtime_locks
 from .exchange import ExchangeMixin
 from .external_price import ExternalPriceFeed
-from .models import TradeState
 from .monitoring import MonitoringMixin
 from .runner import RunnerMixin
 from .signal_engine import SignalMixin
@@ -173,4 +172,4 @@ class HtxFuturesBot(
             return RunnerMixin.run(self)
 
 
-__all__ = ["HtxFuturesBot", "TradeState"]
+__all__ = ["HtxFuturesBot"]

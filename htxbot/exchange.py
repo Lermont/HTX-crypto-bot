@@ -102,14 +102,18 @@ class ExchangeMixin:
         for account in api_accounts:
             credentials = account.api_credentials
             if not credentials.api_key or not credentials.api_secret:
-                raise ValueError(f"HTX API credentials are required for account {account.name}")
+                raise ValueError(
+                    f"HTX API credentials are required for account {account.name}"
+                )
             exchanges[account.name] = self._create_account_exchange(credentials)
             for coin in account.coins:
                 coin_accounts[str(coin).strip().lower()] = account.name
 
         if len(exchanges) == 1:
             return next(iter(exchanges.values()))
-        return MultiAccountExchange(exchanges, coin_accounts, default_account=api_accounts[0].name)
+        return MultiAccountExchange(
+            exchanges, coin_accounts, default_account=api_accounts[0].name
+        )
 
     def _timeframe_to_seconds(self, timeframe: str) -> int:
         try:
@@ -118,7 +122,9 @@ class ExchangeMixin:
             return 60
 
     def _contract_hostnames(self) -> Tuple[str, ...]:
-        return tuple(config.EXCHANGE.contract_hostnames or ("api.hbdm.com", "api.hbdm.vn"))
+        return tuple(
+            config.EXCHANGE.contract_hostnames or ("api.hbdm.com", "api.hbdm.vn")
+        )
 
     def _set_contract_hostname(self, exchange, hostname: str):
         if not hostname:
@@ -136,11 +142,15 @@ class ExchangeMixin:
         try:
             payload = {
                 "saved_at": time.time(),
-                "contract_hostname": (self.exchange.urls.get("hostnames") or {}).get("contract", ""),
+                "contract_hostname": (self.exchange.urls.get("hostnames") or {}).get(
+                    "contract", ""
+                ),
                 "markets": markets,
             }
             self.markets_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.markets_cache_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            self.markets_cache_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
         except Exception as exc:
             self._log_event(
                 "DEBUG",
@@ -183,26 +193,38 @@ class ExchangeMixin:
         if not reload and self._markets_loaded():
             return getattr(self.exchange, "markets", {}) or {}
 
+        hostnames = list(self._contract_hostnames())
+        current = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
+        ordered_hostnames = []
+        if current:
+            ordered_hostnames.append(current)
+        ordered_hostnames.extend(
+            hostname for hostname in hostnames if hostname and hostname != current
+        )
+        if not ordered_hostnames:
+            ordered_hostnames = [""]
+
+        attempts = max(1, config.EXCHANGE.market_load_retries)
         last_exc = None
-        retries = max(1, config.EXCHANGE.market_load_retries)
-        hostnames = self._contract_hostnames()
-        for attempt in range(1, retries + 1):
-            for hostname in hostnames:
-                try:
-                    with self._exchange_runtime_lock():
+        for attempt in range(1, attempts + 1):
+            hostname = ordered_hostnames[(attempt - 1) % len(ordered_hostnames)]
+            try:
+                with self._exchange_runtime_lock():
+                    if hostname:
                         self._set_contract_hostname(self.exchange, hostname)
-                        markets = self.exchange.load_markets(reload=reload)
-                    self._save_markets_cache(markets)
-                    return markets
-                except (ccxt.RequestTimeout, ccxt.NetworkError) as exc:
-                    last_exc = exc
-                    self._log_event(
-                        "WARNING",
-                        f"HTX futures markets load attempt {attempt}/{retries} failed via {hostname}: {exc}",
-                        event="futures_setup",
-                        reason="load_markets_network_retry",
-                    )
-            time.sleep(min(2 * attempt, 8))
+                    markets = self.exchange.load_markets(reload=reload)
+                self._save_markets_cache(markets)
+                return markets
+            except (ccxt.RequestTimeout, ccxt.NetworkError) as exc:
+                last_exc = exc
+                self._log_event(
+                    "WARNING",
+                    f"HTX futures markets load attempt {attempt}/{attempts} failed via {hostname or 'default'}: {exc}",
+                    event="futures_setup",
+                    reason="load_markets_network_retry",
+                )
+                if attempt < attempts:
+                    time.sleep(min(2 * attempt, 8))
 
         cached = self._load_markets_from_cache()
         if cached:
@@ -278,13 +300,17 @@ class ExchangeMixin:
             market_by_symbol[symbol] = market
         return market
 
-    def _fetch_ohlcv_with_retry(self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None):
+    def _fetch_ohlcv_with_retry(
+        self, symbol: str, timeframe: str = "1m", since=None, limit=None, params=None
+    ):
         hostnames = list(self._contract_hostnames())
         current = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
         ordered_hostnames = []
         if current:
             ordered_hostnames.append(current)
-        ordered_hostnames.extend(hostname for hostname in hostnames if hostname and hostname != current)
+        ordered_hostnames.extend(
+            hostname for hostname in hostnames if hostname and hostname != current
+        )
         if not ordered_hostnames:
             ordered_hostnames = [""]
 
@@ -330,13 +356,17 @@ class ExchangeMixin:
                 time.sleep(min(0.5 * attempt, 2.0))
         raise last_exc
 
-    def _private_fetch_with_retry(self, symbol: str, reason: str, description: str, fetch):
+    def _private_fetch_with_retry(
+        self, symbol: str, reason: str, description: str, fetch
+    ):
         hostnames = list(self._contract_hostnames())
         current = str((self.exchange.urls.get("hostnames") or {}).get("contract") or "")
         ordered_hostnames = []
         if current:
             ordered_hostnames.append(current)
-        ordered_hostnames.extend(hostname for hostname in hostnames if hostname and hostname != current)
+        ordered_hostnames.extend(
+            hostname for hostname in hostnames if hostname and hostname != current
+        )
         if not ordered_hostnames:
             ordered_hostnames = [""]
 
@@ -394,13 +424,18 @@ class ExchangeMixin:
         if not isinstance(payload, dict):
             return False
 
-        normalized = {str(key).lower().replace("-", "_"): value for key, value in payload.items()}
+        normalized = {
+            str(key).lower().replace("-", "_"): value for key, value in payload.items()
+        }
         status = str(normalized.get("status") or "").strip().lower()
         if status in {"error", "err", "failed", "fail"}:
             return True
         if normalized.get("success") is False:
             return True
-        if any(key in normalized for key in ("err_code", "err_msg", "error_code", "error_msg")):
+        if any(
+            key in normalized
+            for key in ("err_code", "err_msg", "error_code", "error_msg")
+        ):
             return True
 
         error = normalized.get("error")
@@ -448,10 +483,16 @@ class ExchangeMixin:
         raw_precision = (market.get("precision") or {}).get("price")
         precision = self._safe_float(raw_precision, -1.0)
         precision_mode = getattr(self.exchange, "precisionMode", None)
-        fallback_tick = max(abs(self._safe_float(market.get("last"), 1.0)) * 1e-10, 1e-12)
+        fallback_tick = max(
+            abs(self._safe_float(market.get("last"), 1.0)) * 1e-10, 1e-12
+        )
         if precision_mode == ccxt.TICK_SIZE:
             return precision if precision > 0 else fallback_tick
-        if precision_mode == ccxt.DECIMAL_PLACES and precision >= 0 and float(precision).is_integer():
+        if (
+            precision_mode == ccxt.DECIMAL_PLACES
+            and precision >= 0
+            and float(precision).is_integer()
+        ):
             return 10 ** (-int(precision))
         if precision <= 0:
             return fallback_tick
@@ -488,14 +529,20 @@ class ExchangeMixin:
     def _price_band_limit_from_error(self, exc: Exception, side: str) -> float:
         text = str(exc)
         if side == "sell":
-            match = re.search(r"Sell price must be higher than\s*([0-9.]+)", text, re.IGNORECASE)
+            match = re.search(
+                r"Sell price must be higher than\s*([0-9.]+)", text, re.IGNORECASE
+            )
         else:
-            match = re.search(r"Buy price must be lower than\s*([0-9.]+)", text, re.IGNORECASE)
+            match = re.search(
+                r"Buy price must be lower than\s*([0-9.]+)", text, re.IGNORECASE
+            )
         if not match:
             return 0.0
         return self._safe_float(match.group(1), 0.0)
 
-    def _price_inside_htx_band(self, symbol: str, price: float, side: str, limit: float) -> float:
+    def _price_inside_htx_band(
+        self, symbol: str, price: float, side: str, limit: float
+    ) -> float:
         if limit <= 0:
             return price
         tick = self._price_tick(symbol)
@@ -533,7 +580,10 @@ class ExchangeMixin:
                 ):
                     min_contracts = min_amount / contract_size
             candidates.append(min_contracts)
-        if precision_amount > 0 and getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE:
+        if (
+            precision_amount > 0
+            and getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE
+        ):
             candidates.append(precision_amount)
         if (
             precision is not None
@@ -548,16 +598,22 @@ class ExchangeMixin:
         market = self._market(symbol)
         return self._safe_float(market.get("contractSize"), 1.0) or 1.0
 
-    def _contracts_to_notional(self, symbol: str, contracts: float, price: float) -> float:
+    def _contracts_to_notional(
+        self, symbol: str, contracts: float, price: float
+    ) -> float:
         return max(0.0, contracts) * self._contract_size(symbol) * max(0.0, price)
 
-    def _contracts_for_notional(self, symbol: str, notional: float, price: float) -> float:
+    def _contracts_for_notional(
+        self, symbol: str, notional: float, price: float
+    ) -> float:
         if price <= 0:
             return 0.0
         raw_contracts = notional / (price * self._contract_size(symbol))
         return self._amount_to_precision(symbol, raw_contracts)
 
-    def _average_price_from_notional(self, symbol: str, contracts: float, notional: float) -> float:
+    def _average_price_from_notional(
+        self, symbol: str, contracts: float, notional: float
+    ) -> float:
         if contracts <= 0:
             return 0.0
         return notional / (contracts * self._contract_size(symbol))
@@ -566,7 +622,9 @@ class ExchangeMixin:
         tickers = self._bulk_tickers_by_symbol()
         ticker = tickers.get(symbol) if tickers else None
         if not ticker:
-            ticker = self._ticker_from_market_data_cache(symbol) or self._fetch_ticker_uncached(symbol)
+            ticker = self._ticker_from_market_data_cache(
+                symbol
+            ) or self._fetch_ticker_uncached(symbol)
         bid = self._safe_float(ticker.get("bid"))
         last = self._safe_float(ticker.get("last"))
         ask = self._safe_float(ticker.get("ask"))
@@ -581,7 +639,9 @@ class ExchangeMixin:
             tickers = self._bulk_tickers_by_symbol()
             ticker = tickers.get(symbol) if tickers else None
             if not ticker:
-                ticker = self._ticker_from_market_data_cache(symbol) or self._fetch_ticker_uncached(symbol)
+                ticker = self._ticker_from_market_data_cache(
+                    symbol
+                ) or self._fetch_ticker_uncached(symbol)
         except Exception as exc:
             self._log_event(
                 "DEBUG",
@@ -608,13 +668,18 @@ class ExchangeMixin:
         with self._funding_cache_runtime_lock():
             now = time.time()
             cached = self.funding_cache.get(symbol)
-            cached_until = self._safe_float((cached or {}).get("expires_at"), 0.0) if isinstance(cached, dict) else 0.0
+            cached_until = (
+                self._safe_float((cached or {}).get("expires_at"), 0.0)
+                if isinstance(cached, dict)
+                else 0.0
+            )
             if cached and cached_until > now:
                 return dict(cached)
             if (
                 cached
                 and cached_until <= 0
-                and now - self._safe_float(cached.get("ts"), 0.0) < strategy.funding_cache_ttl_sec
+                and now - self._safe_float(cached.get("ts"), 0.0)
+                < strategy.funding_cache_ttl_sec
             ):
                 return dict(cached)
 
@@ -627,7 +692,11 @@ class ExchangeMixin:
                     "reason": "funding_rate_unavailable",
                     "valid": False,
                     "ts": now,
-                    "expires_at": now + min(max(1.0, self._safe_float(strategy.funding_cache_ttl_sec, 1.0)), 30.0),
+                    "expires_at": now
+                    + min(
+                        max(1.0, self._safe_float(strategy.funding_cache_ttl_sec, 1.0)),
+                        30.0,
+                    ),
                 }
                 self.funding_cache[symbol] = payload
                 return dict(payload)
@@ -653,7 +722,11 @@ class ExchangeMixin:
                     "reason": "funding_rate_unavailable",
                     "valid": False,
                     "ts": now,
-                    "expires_at": now + min(max(1.0, self._safe_float(strategy.funding_cache_ttl_sec, 1.0)), 30.0),
+                    "expires_at": now
+                    + min(
+                        max(1.0, self._safe_float(strategy.funding_cache_ttl_sec, 1.0)),
+                        30.0,
+                    ),
                 }
                 self.funding_cache[symbol] = payload
                 return dict(payload)
@@ -680,7 +753,8 @@ class ExchangeMixin:
                 "reason": reason,
                 "valid": True,
                 "ts": now,
-                "expires_at": now + max(0.0, self._safe_float(strategy.funding_cache_ttl_sec, 0.0)),
+                "expires_at": now
+                + max(0.0, self._safe_float(strategy.funding_cache_ttl_sec, 0.0)),
             }
             self.funding_cache[symbol] = payload
             return dict(payload)
@@ -733,7 +807,9 @@ class ExchangeMixin:
             if entry.get("exception") is not None:
                 raise entry["exception"]
             value = entry.get("value") or {"free": 0.0, "total": 0.0}
-            return dict(value) if isinstance(value, dict) else {"free": 0.0, "total": 0.0}
+            return (
+                dict(value) if isinstance(value, dict) else {"free": 0.0, "total": 0.0}
+            )
 
         value = None
         try:
@@ -750,10 +826,18 @@ class ExchangeMixin:
             if entry.get("exception") is None:
                 entry["value"] = dict(value) if isinstance(value, dict) else value
             with self._private_cache_runtime_lock():
-                inflight_by_key = getattr(self, "_account_snapshot_inflight_by_key", None)
-                if isinstance(inflight_by_key, dict) and inflight_by_key.get(cache_key) is entry:
+                inflight_by_key = getattr(
+                    self, "_account_snapshot_inflight_by_key", None
+                )
+                if (
+                    isinstance(inflight_by_key, dict)
+                    and inflight_by_key.get(cache_key) is entry
+                ):
                     inflight_by_key.pop(cache_key, None)
-                if cache_key == "__all__" and getattr(self, "_account_snapshot_inflight", None) is entry:
+                if (
+                    cache_key == "__all__"
+                    and getattr(self, "_account_snapshot_inflight", None) is entry
+                ):
                     self._account_snapshot_inflight = None
                 entry["event"].set()
 
@@ -787,7 +871,9 @@ class ExchangeMixin:
             )
             return {"free": 0.0, "total": 0.0}
 
-        if not self._ensure_cross_margin_response(balance, context="futures_balance", symbol=symbol):
+        if not self._ensure_cross_margin_response(
+            balance, context="futures_balance", symbol=symbol
+        ):
             return {"free": 0.0, "total": 0.0}
 
         quote = config.EXCHANGE.quote_currency
@@ -808,15 +894,24 @@ class ExchangeMixin:
                     item_margin_mode = self._extract_margin_mode(item)
                     if item_margin_mode and item_margin_mode != config.RISK.margin_mode:
                         continue
-                    margin_asset = str(item.get("margin_asset") or item.get("symbol") or "").upper()
+                    margin_asset = str(
+                        item.get("margin_asset") or item.get("symbol") or ""
+                    ).upper()
                     if margin_asset and margin_asset != quote:
                         continue
                     available = self._safe_float(
-                        item.get("margin_available", item.get("withdraw_available", item.get("margin_balance", 0.0))),
+                        item.get(
+                            "margin_available",
+                            item.get(
+                                "withdraw_available", item.get("margin_balance", 0.0)
+                            ),
+                        ),
                         0.0,
                     )
                     equity = self._safe_float(
-                        item.get("margin_balance", item.get("margin_static", available)),
+                        item.get(
+                            "margin_balance", item.get("margin_static", available)
+                        ),
                         available,
                     )
                     raw_free += max(0.0, available)
@@ -868,7 +963,9 @@ class ExchangeMixin:
 
     def _market_data_cache_ttl_sec(self) -> float:
         try:
-            poll_interval = self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 1.0), 1.0)
+            poll_interval = self._safe_float(
+                getattr(config.RUNTIME, "poll_interval_sec", 1.0), 1.0
+            )
         except Exception:
             poll_interval = 1.0
         return max(1.0, min(10.0, poll_interval))
@@ -953,11 +1050,15 @@ class ExchangeMixin:
             symbols.append(symbol)
         return symbols
 
-    def _prefetch_ticker_snapshots(self, symbols: Optional[List[str]] = None) -> Dict[str, dict]:
+    def _prefetch_ticker_snapshots(
+        self, symbols: Optional[List[str]] = None
+    ) -> Dict[str, dict]:
         if not hasattr(self.exchange, "fetch_ticker"):
             return {}
 
-        prefetch_symbols = list(symbols) if symbols is not None else self._ticker_prefetch_symbols()
+        prefetch_symbols = (
+            list(symbols) if symbols is not None else self._ticker_prefetch_symbols()
+        )
         if not prefetch_symbols:
             return {}
 
@@ -966,7 +1067,9 @@ class ExchangeMixin:
             max_workers = max_workers_resolver()
         else:
             try:
-                max_workers = int(getattr(config.RUNTIME, "market_data_max_workers", 1) or 1)
+                max_workers = int(
+                    getattr(config.RUNTIME, "market_data_max_workers", 1) or 1
+                )
             except (TypeError, ValueError):
                 max_workers = 1
             max_workers = max(1, max_workers)
@@ -983,7 +1086,9 @@ class ExchangeMixin:
         if max_workers <= 1 or len(prefetch_symbols) <= 1:
             results = [fetch_ticker_safe(symbol) for symbol in prefetch_symbols]
         else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
                 results = list(executor.map(fetch_ticker_safe, prefetch_symbols))
 
         tickers: Dict[str, dict] = {}
@@ -996,7 +1101,9 @@ class ExchangeMixin:
                     symbol=symbol,
                     reason="ticker_prefetch_failed",
                     exception=exc,
-                    retryable=getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc),
+                    retryable=getattr(
+                        self, "_is_transient_exchange_error", lambda _exc: False
+                    )(exc),
                 )
                 continue
             if isinstance(ticker, dict) and ticker:
@@ -1053,7 +1160,11 @@ class ExchangeMixin:
         value = None
         try:
             value = self._fetch_order_book_uncached(symbol, limit=limit)
-            if isinstance(value, dict) and isinstance(value.get("bids"), list) and isinstance(value.get("asks"), list):
+            if (
+                isinstance(value, dict)
+                and isinstance(value.get("bids"), list)
+                and isinstance(value.get("asks"), list)
+            ):
                 with self._market_data_cache_runtime_lock():
                     self._order_book_cache[key] = (time.time(), value)
             return value
@@ -1091,7 +1202,12 @@ class ExchangeMixin:
         strategy = config.STRATEGY
         if not getattr(strategy, "entry_spread_filter_enabled", False):
             return
-        max_spread = max(0.0, self._safe_float(getattr(strategy, "entry_spread_filter_max_bps", 0.0), 0.0))
+        max_spread = max(
+            0.0,
+            self._safe_float(
+                getattr(strategy, "entry_spread_filter_max_bps", 0.0), 0.0
+            ),
+        )
         if max_spread <= 0 or not hasattr(self.exchange, "fetch_order_book"):
             return
 
@@ -1100,7 +1216,9 @@ class ExchangeMixin:
             max_workers = max_workers_resolver()
         else:
             try:
-                max_workers = int(getattr(config.RUNTIME, "market_data_max_workers", 1) or 1)
+                max_workers = int(
+                    getattr(config.RUNTIME, "market_data_max_workers", 1) or 1
+                )
             except (TypeError, ValueError):
                 max_workers = 1
             max_workers = max(1, max_workers)
@@ -1118,7 +1236,9 @@ class ExchangeMixin:
         if max_workers <= 1 or len(symbols) <= 1:
             results = [fetch_order_book_safe(symbol) for symbol in symbols]
         else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
                 results = list(executor.map(fetch_order_book_safe, symbols))
 
         for symbol, exc in results:
@@ -1131,14 +1251,19 @@ class ExchangeMixin:
                 symbol=symbol,
                 reason="order_book_prefetch_failed",
                 exception=exc,
-                retryable=getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc),
+                retryable=getattr(
+                    self, "_is_transient_exchange_error", lambda _exc: False
+                )(exc),
             )
 
     def _payload_symbol(self, payload: dict) -> str:
         if not isinstance(payload, dict):
             return ""
 
-        for source in (payload, payload.get("info") if isinstance(payload.get("info"), dict) else {}):
+        for source in (
+            payload,
+            payload.get("info") if isinstance(payload.get("info"), dict) else {},
+        ):
             for key in ("symbol", "market", "contract_code", "contractCode"):
                 value = source.get(key)
                 if value:
@@ -1155,7 +1280,9 @@ class ExchangeMixin:
                         return raw_symbol
         return ""
 
-    def _group_payloads_by_symbol(self, payloads: List[dict]) -> Tuple[Dict[str, List[dict]], bool]:
+    def _group_payloads_by_symbol(
+        self, payloads: List[dict]
+    ) -> Tuple[Dict[str, List[dict]], bool]:
         grouped: Dict[str, List[dict]] = {}
         missing_symbol = False
         for payload in payloads or []:
@@ -1165,7 +1292,6 @@ class ExchangeMixin:
                 continue
             grouped.setdefault(symbol, []).append(payload)
         return grouped, missing_symbol
-
 
     def _bulk_tickers_by_symbol(self) -> Optional[Dict[str, dict]]:
         with self._private_cache_runtime_lock():
@@ -1221,7 +1347,9 @@ class ExchangeMixin:
                     "",
                     "bulk_positions_fetch_failed",
                     "bulk positions",
-                    lambda: self.exchange.fetch_positions(list(self.symbols), self._position_params()),
+                    lambda: self.exchange.fetch_positions(
+                        list(self.symbols), self._position_params()
+                    ),
                 )
                 positions = self._expect_ccxt_list_response(
                     positions,
@@ -1277,7 +1405,9 @@ class ExchangeMixin:
                 return None
 
             def fetch_bulk_open_orders():
-                return self.exchange.fetch_open_orders(None, params=self._position_params())
+                return self.exchange.fetch_open_orders(
+                    None, params=self._position_params()
+                )
 
             try:
                 orders = self._private_fetch_with_retry(
@@ -1391,7 +1521,9 @@ class ExchangeMixin:
         return fallback
 
     def _fetch_account_order_leverage(self, symbol: str) -> float:
-        configured = self._safe_float(getattr(config.RISK, "account_leverage", 0.0), 0.0)
+        configured = self._safe_float(
+            getattr(config.RISK, "account_leverage", 0.0), 0.0
+        )
         if configured > 0:
             return configured
 
@@ -1408,7 +1540,11 @@ class ExchangeMixin:
             self.order_leverage_cache[symbol] = state_leverage
             return state_leverage
 
-        method = getattr(self.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo", None)
+        method = getattr(
+            self.exchange,
+            "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo",
+            None,
+        )
         if not method:
             self._log_event(
                 "ERROR",
@@ -1451,7 +1587,12 @@ class ExchangeMixin:
         self.order_leverage_cache[symbol] = leverage
         return leverage
 
-    def _order_params(self, reduce_only: bool = False, post_only: bool = False, leverage: Optional[float] = None) -> dict:
+    def _order_params(
+        self,
+        reduce_only: bool = False,
+        post_only: bool = False,
+        leverage: Optional[float] = None,
+    ) -> dict:
         lever_rate = self._safe_float(leverage, 0.0)
         if lever_rate <= 0:
             raise RuntimeError("manual_account_leverage_unavailable")
@@ -1461,7 +1602,9 @@ class ExchangeMixin:
             "hedged": False,
         }
         if lever_rate > 0:
-            params["leverRate"] = int(lever_rate) if lever_rate.is_integer() else lever_rate
+            params["leverRate"] = (
+                int(lever_rate) if lever_rate.is_integer() else lever_rate
+            )
         if post_only:
             params["postOnly"] = True
         if reduce_only:
@@ -1483,7 +1626,9 @@ class ExchangeMixin:
                     return str(val).lower()
         return ""
 
-    def _ensure_cross_margin_response(self, payload: dict, context: str, symbol: str = "") -> bool:
+    def _ensure_cross_margin_response(
+        self, payload: dict, context: str, symbol: str = ""
+    ) -> bool:
         if config.RISK.margin_mode != "cross":
             self._log_event(
                 "ERROR",
@@ -1494,7 +1639,11 @@ class ExchangeMixin:
             )
             return False
 
-        raw_data = (payload.get("info") or {}).get("data") if isinstance(payload, dict) else None
+        raw_data = (
+            (payload.get("info") or {}).get("data")
+            if isinstance(payload, dict)
+            else None
+        )
         modes = []
         if isinstance(raw_data, list):
             for item in raw_data:
@@ -1519,7 +1668,11 @@ class ExchangeMixin:
 
     def _is_hedge_mode_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
-        return "hedge mode currently" in text or "one-way mode" in text or '"err_code":1499' in text
+        return (
+            "hedge mode currently" in text
+            or "one-way mode" in text
+            or '"err_code":1499' in text
+        )
 
     def _is_high_leverage_risk_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
@@ -1599,11 +1752,19 @@ class ExchangeMixin:
         endpoints = [
             (
                 "cross_account_position_info",
-                getattr(self.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo", None),
+                getattr(
+                    self.exchange,
+                    "contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo",
+                    None,
+                ),
             ),
             (
                 "cross_account_info",
-                getattr(self.exchange, "contractPrivatePostLinearSwapApiV1SwapCrossAccountInfo", None),
+                getattr(
+                    self.exchange,
+                    "contractPrivatePostLinearSwapApiV1SwapCrossAccountInfo",
+                    None,
+                ),
             ),
         ]
         last_reason = "position_mode_query_unavailable"
@@ -1651,19 +1812,30 @@ class ExchangeMixin:
 
         try:
             if config.RISK.margin_mode == "cross":
-                self.exchange.set_position_mode(False, None, params=self._position_params())
+                self.exchange.set_position_mode(
+                    False, None, params=self._position_params()
+                )
             else:
+
                 def update_mode(symbol):
-                    self.exchange.set_position_mode(False, symbol, params=self._position_params())
+                    self.exchange.set_position_mode(
+                        False, symbol, params=self._position_params()
+                    )
 
                 max_workers = min(10, max(1, len(self.symbols)))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(update_mode, symbol) for symbol in self.symbols]
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers
+                ) as executor:
+                    futures = [
+                        executor.submit(update_mode, symbol) for symbol in self.symbols
+                    ]
                     for future in concurrent.futures.as_completed(futures):
                         future.result()
         except Exception as exc:
             if self._is_position_mode_locked_error(exc):
-                mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()
+                mode_is_one_way, mode_reason = (
+                    self._fetch_current_position_mode_is_one_way()
+                )
                 if mode_is_one_way is not True:
                     self._log_event(
                         "ERROR",
@@ -1688,8 +1860,12 @@ class ExchangeMixin:
                 )
                 return True
 
-            if self._is_position_mode_access_limit_error(exc) or self._is_transient_exchange_error(exc):
-                mode_is_one_way, mode_reason = self._fetch_current_position_mode_is_one_way()
+            if self._is_position_mode_access_limit_error(
+                exc
+            ) or self._is_transient_exchange_error(exc):
+                mode_is_one_way, mode_reason = (
+                    self._fetch_current_position_mode_is_one_way()
+                )
                 if mode_is_one_way is True:
                     self.one_way_mode_checked = True
                     self._log_event(
@@ -1736,7 +1912,9 @@ class ExchangeMixin:
 
     def _set_leverage_safe(self, symbol: str, leverage: int) -> bool:
         try:
-            self.exchange.set_leverage(int(leverage), symbol, params=self._position_params())
+            self.exchange.set_leverage(
+                int(leverage), symbol, params=self._position_params()
+            )
             if not hasattr(self, "order_leverage_cache"):
                 self.order_leverage_cache = {}
             self.order_leverage_cache[symbol] = float(leverage)
@@ -1760,13 +1938,19 @@ class ExchangeMixin:
         if req is None:
             req = OrderRequest(**kwargs)
         elif kwargs:
-            raise TypeError("_create_one_way_order accepts either OrderRequest or keyword arguments, not both")
+            raise TypeError(
+                "_create_one_way_order accepts either OrderRequest or keyword arguments, not both"
+            )
         elif not isinstance(req, OrderRequest):
-            raise TypeError(f"_create_one_way_order expected OrderRequest, got {type(req).__name__}")
+            raise TypeError(
+                f"_create_one_way_order expected OrderRequest, got {type(req).__name__}"
+            )
 
         if req.leverage is None:
             req.leverage = self._fetch_account_order_leverage(req.symbol)
-        params = self._order_params(reduce_only=req.reduce_only, post_only=req.post_only, leverage=req.leverage)
+        params = self._order_params(
+            reduce_only=req.reduce_only, post_only=req.post_only, leverage=req.leverage
+        )
         if req.extra_params:
             params.update(dict(req.extra_params))
         try:
@@ -1833,7 +2017,9 @@ class ExchangeMixin:
                     symbol,
                     "position_fetch_failed",
                     f"position for {symbol}",
-                    lambda: self.exchange.fetch_positions([symbol], self._position_params()),
+                    lambda: self.exchange.fetch_positions(
+                        [symbol], self._position_params()
+                    ),
                 )
                 positions = self._expect_ccxt_list_response(
                     positions,
@@ -1857,8 +2043,12 @@ class ExchangeMixin:
                 snapshot["ok"] = False
                 return snapshot
 
-        def available_and_frozen(position: dict, contracts: float) -> Tuple[float, float]:
-            info = position.get("info") if isinstance(position.get("info"), dict) else {}
+        def available_and_frozen(
+            position: dict, contracts: float
+        ) -> Tuple[float, float]:
+            info = (
+                position.get("info") if isinstance(position.get("info"), dict) else {}
+            )
             available = None
             for source in (position, info):
                 if not isinstance(source, dict):
@@ -1885,7 +2075,12 @@ class ExchangeMixin:
             for source in (position, info):
                 if not isinstance(source, dict):
                     continue
-                for key in ("frozen", "frozenPosition", "frozen_position", "frozen_volume"):
+                for key in (
+                    "frozen",
+                    "frozenPosition",
+                    "frozen_position",
+                    "frozen_volume",
+                ):
                     if key in source and source.get(key) is not None:
                         frozen = self._safe_float(source.get(key), 0.0)
                         break
@@ -1915,7 +2110,9 @@ class ExchangeMixin:
                 continue
 
             old_size = snapshot[f"{side}_size"]
-            old_entry_notional = self._contracts_to_notional(symbol, old_size, snapshot[f"{side}_entry_price"])
+            old_entry_notional = self._contracts_to_notional(
+                symbol, old_size, snapshot[f"{side}_entry_price"]
+            )
             add_entry = self._safe_float(position.get("entryPrice"), 0.0)
             add_notional = self._contracts_to_notional(symbol, contracts, add_entry)
             available, frozen = available_and_frozen(position, contracts)
@@ -1927,7 +2124,9 @@ class ExchangeMixin:
                 snapshot[f"{side}_size"],
                 old_entry_notional + add_notional,
             )
-            snapshot[f"{side}_unrealized_pnl"] += self._safe_float(position.get("unrealizedPnl"), 0.0)
+            snapshot[f"{side}_unrealized_pnl"] += self._safe_float(
+                position.get("unrealizedPnl"), 0.0
+            )
 
             if side == config.POSITION_SIDE:
                 snapshot["entry_price"] = snapshot[f"{side}_entry_price"]
@@ -1944,8 +2143,11 @@ class ExchangeMixin:
         elif getattr(self, "_private_api_network_failed", False):
             return None
         else:
+
             def fetch_symbol_open_orders():
-                return self.exchange.fetch_open_orders(symbol, params=self._position_params())
+                return self.exchange.fetch_open_orders(
+                    symbol, params=self._position_params()
+                )
 
             try:
                 orders = self._private_fetch_with_retry(
@@ -1992,7 +2194,9 @@ class ExchangeMixin:
 
         return orders
 
-    def _cancel_order_ref(self, symbol: str, ref: dict, event: str, reason: str) -> bool:
+    def _cancel_order_ref(
+        self, symbol: str, ref: dict, event: str, reason: str
+    ) -> bool:
         order_id = str(ref.get("id", ""))
         if not order_id:
             return False
@@ -2022,9 +2226,14 @@ class ExchangeMixin:
             symbol=symbol,
             signal={"ts": ref.get("signal_ts"), "strategy_name": "ema_pullback"},
             block_reason=reason,
-            operation_id=str(ref.get("operation_id") or self._operation_id("order_cancel", symbol=symbol, order_id=order_id)),
+            operation_id=str(
+                ref.get("operation_id")
+                or self._operation_id("order_cancel", symbol=symbol, order_id=order_id)
+            ),
             order_id=order_id,
-            cycle_id=str(ref.get("cycle_id") or getattr(self._get_state(symbol), "cycle_id", "")),
+            cycle_id=str(
+                ref.get("cycle_id") or getattr(self._get_state(symbol), "cycle_id", "")
+            ),
             context={
                 "side": ref.get("side", ""),
                 "price": self._safe_float(ref.get("price"), 0.0),
@@ -2048,7 +2257,9 @@ class ExchangeMixin:
         state = self._get_state(symbol)
         remaining = []
         for ref in list(state.entry_orders):
-            if not self._cancel_order_ref(symbol, ref, event="entry_order_canceled", reason=reason):
+            if not self._cancel_order_ref(
+                symbol, ref, event="entry_order_canceled", reason=reason
+            ):
                 remaining.append(ref)
         state.entry_orders = remaining
         self._refresh_active_side(state)
@@ -2059,7 +2270,9 @@ class ExchangeMixin:
         remaining = []
         for ref in list(state.sell_ladder_orders):
             side = str(ref.get("side") or config.EXIT_SIDE).lower()
-            if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+            if not self._cancel_order_ref(
+                symbol, ref, event=f"{side}_order_canceled", reason=reason
+            ):
                 remaining.append(ref)
         state.sell_ladder_orders = remaining
         state.sell_ladder_signature = ""
@@ -2079,7 +2292,9 @@ class ExchangeMixin:
             self._save_state()
             return
         side = str(ref.get("side") or config.EXIT_SIDE).lower()
-        if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+        if not self._cancel_order_ref(
+            symbol, ref, event=f"{side}_order_canceled", reason=reason
+        ):
             return
         state.hard_stop_order = {}
         state.hard_stop_signature = ""
@@ -2108,7 +2323,9 @@ class ExchangeMixin:
             cancel_params = order.get("bot_cancel_params") or order.get("cancel_params")
             if isinstance(cancel_params, dict):
                 ref["cancel_params"] = dict(cancel_params)
-            log_event = event or ("buy_order_canceled" if order_side == "buy" else "sell_order_canceled")
+            log_event = event or (
+                "buy_order_canceled" if order_side == "buy" else "sell_order_canceled"
+            )
             if not self._cancel_order_ref(symbol, ref, event=log_event, reason=reason):
                 all_canceled = False
         return all_canceled
@@ -2120,15 +2337,21 @@ class ExchangeMixin:
         hard_stop_ref = dict(state.hard_stop_order or {})
         canceled_all = True
         for ref in entry_refs:
-            if not self._cancel_order_ref(symbol, ref, event="entry_order_canceled", reason=reason):
+            if not self._cancel_order_ref(
+                symbol, ref, event="entry_order_canceled", reason=reason
+            ):
                 canceled_all = False
         for ref in sell_refs:
             side = str(ref.get("side") or config.EXIT_SIDE).lower()
-            if not self._cancel_order_ref(symbol, ref, event=f"{side}_order_canceled", reason=reason):
+            if not self._cancel_order_ref(
+                symbol, ref, event=f"{side}_order_canceled", reason=reason
+            ):
                 canceled_all = False
         if hard_stop_ref:
             side = str(hard_stop_ref.get("side") or config.EXIT_SIDE).lower()
-            if not self._cancel_order_ref(symbol, hard_stop_ref, event=f"{side}_order_canceled", reason=reason):
+            if not self._cancel_order_ref(
+                symbol, hard_stop_ref, event=f"{side}_order_canceled", reason=reason
+            ):
                 canceled_all = False
         if not canceled_all:
             return
@@ -2145,7 +2368,11 @@ class ExchangeMixin:
         base = coin.upper()
         exact = f"{base}/{config.EXCHANGE.quote_currency}:USDT"
         market = self.exchange.markets.get(exact)
-        if market and market.get("linear") and (market.get("swap") or market.get("future")):
+        if (
+            market
+            and market.get("linear")
+            and (market.get("swap") or market.get("future"))
+        ):
             return exact
 
         candidates = []
@@ -2177,7 +2404,9 @@ class ExchangeMixin:
         for symbol in exact_candidates:
             market = self.exchange.markets.get(symbol)
             if market and market.get("base") == base and market.get("quote") == quote:
-                if market.get("linear") and (market.get("swap") or market.get("future")):
+                if market.get("linear") and (
+                    market.get("swap") or market.get("future")
+                ):
                     return symbol
 
         candidates = []
@@ -2186,7 +2415,13 @@ class ExchangeMixin:
                 continue
             if not (market.get("swap") or market.get("future")):
                 continue
-            candidates.append((0 if market.get("linear") else 1, 0 if market.get("swap") else 1, symbol))
+            candidates.append(
+                (
+                    0 if market.get("linear") else 1,
+                    0 if market.get("swap") else 1,
+                    symbol,
+                )
+            )
         candidates.sort()
         return candidates[0][2] if candidates else None
 
@@ -2268,12 +2503,16 @@ class ExchangeMixin:
     def _find_macro_gold_symbol(self) -> Optional[str]:
         self.macro_gold_is_spot = False
         for coin in self._macro_gold_coin_candidates():
-            futures_symbol = self._find_futures_base_quote_symbol(coin, config.EXCHANGE.quote_currency)
+            futures_symbol = self._find_futures_base_quote_symbol(
+                coin, config.EXCHANGE.quote_currency
+            )
             if futures_symbol:
                 return futures_symbol
 
         for coin in self._macro_gold_coin_candidates():
-            spot_symbol = self._find_spot_base_quote_symbol(coin, config.EXCHANGE.quote_currency)
+            spot_symbol = self._find_spot_base_quote_symbol(
+                coin, config.EXCHANGE.quote_currency
+            )
             if spot_symbol:
                 self.macro_gold_is_spot = True
                 return spot_symbol
@@ -2338,14 +2577,41 @@ class ExchangeMixin:
     def _apply_configured_leverage_on_start(self) -> bool:
         leverage = int(config.RISK.leverage)
         failed_symbols = []
-        for symbol in self.symbols:
-            if self._set_leverage_safe(symbol, leverage):
-                continue
-            failed_symbols.append(symbol)
+
+        max_workers = min(
+            len(self.symbols),
+            max(1, int(getattr(config.RUNTIME, "market_data_max_workers", 1) or 1)),
+            5,
+        )
+
+        if max_workers <= 1 or len(self.symbols) <= 1:
+            for symbol in self.symbols:
+                if not self._set_leverage_safe(symbol, leverage):
+                    failed_symbols.append(symbol)
+        else:
+
+            def _set_leverage_wrapper(item):
+                idx, symbol = item
+                return idx, symbol, self._set_leverage_safe(symbol, leverage)
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as executor:
+                items = list(enumerate(self.symbols))
+                results = list(executor.map(_set_leverage_wrapper, items))
+
+            results.sort(key=lambda x: x[0])
+            for _, symbol, success in results:
+                if not success:
+                    failed_symbols.append(symbol)
 
         if failed_symbols:
             preview = ", ".join(failed_symbols[:10])
-            suffix = "" if len(failed_symbols) <= 10 else f", +{len(failed_symbols) - 10} more"
+            suffix = (
+                ""
+                if len(failed_symbols) <= 10
+                else f", +{len(failed_symbols) - 10} more"
+            )
             self._log_event(
                 "WARNING",
                 (
