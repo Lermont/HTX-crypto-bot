@@ -1,107 +1,79 @@
 # -*- coding: utf-8 -*-
 
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
-from htxbot.fileio import write_text_path_with_retry
+from htxbot.fileio import replace_path_with_retry
 
 
-class TestWriteTextPathWithRetry(unittest.TestCase):
-    def test_happy_path(self):
-        mock_write = MagicMock(return_value=42)
-        mock_sleep = MagicMock()
-        path = Path("test.txt")
+class TestFileIO(unittest.TestCase):
+    def test_replace_path_with_retry_success(self):
+        replace_mock = MagicMock()
+        sleep_mock = MagicMock()
 
-        result = write_text_path_with_retry(
-            path, "test data", write_func=mock_write, sleep_func=mock_sleep
+        replace_path_with_retry(
+            "src", "dst", replace_func=replace_mock, sleep_func=sleep_mock
         )
 
-        self.assertEqual(result, 42)
-        mock_write.assert_called_once_with(path, "test data", encoding="utf-8")
-        mock_sleep.assert_not_called()
+        replace_mock.assert_called_once_with("src", "dst")
+        sleep_mock.assert_not_called()
 
-    def test_transient_failure_recovery(self):
-        mock_write = MagicMock()
+    def test_replace_path_with_retry_transient_error_then_success(self):
+        replace_mock = MagicMock()
 
-        err = PermissionError("Access denied")
-        mock_write.side_effect = [err, err, 42]
+        call_count = [0]
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise PermissionError("Access denied")
 
-        mock_sleep = MagicMock()
-        path = Path("test.txt")
+        replace_mock.side_effect = side_effect
+        sleep_mock = MagicMock()
 
-        result = write_text_path_with_retry(
-            path,
-            "test data",
+        replace_path_with_retry(
+            "src", "dst",
             attempts=5,
             initial_delay_sec=0.1,
-            max_delay_sec=0.5,
-            write_func=mock_write,
-            sleep_func=mock_sleep,
+            replace_func=replace_mock,
+            sleep_func=sleep_mock
         )
 
-        self.assertEqual(result, 42)
-        self.assertEqual(mock_write.call_count, 3)
-        self.assertEqual(mock_sleep.call_count, 2)
+        self.assertEqual(call_count[0], 3)
+        self.assertEqual(replace_mock.call_count, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
+        sleep_mock.assert_has_calls([call(0.1), call(0.2)])
 
-        mock_sleep.assert_any_call(0.1)
-        mock_sleep.assert_any_call(0.2)
-
-    def test_transient_failure_exhausted(self):
-        mock_write = MagicMock()
-
-        err = PermissionError("Access denied")
-        mock_write.side_effect = err
-
-        mock_sleep = MagicMock()
-        path = Path("test.txt")
+    def test_replace_path_with_retry_exceeds_attempts(self):
+        replace_mock = MagicMock()
+        replace_mock.side_effect = PermissionError("Access denied")
+        sleep_mock = MagicMock()
 
         with self.assertRaises(PermissionError):
-            write_text_path_with_retry(
-                path,
-                "test data",
+            replace_path_with_retry(
+                "src", "dst",
                 attempts=3,
                 initial_delay_sec=0.1,
-                max_delay_sec=0.5,
-                write_func=mock_write,
-                sleep_func=mock_sleep,
+                replace_func=replace_mock,
+                sleep_func=sleep_mock
             )
 
-        self.assertEqual(mock_write.call_count, 3)
-        self.assertEqual(mock_sleep.call_count, 2)
+        self.assertEqual(replace_mock.call_count, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
 
-    def test_non_transient_failure(self):
-        mock_write = MagicMock()
+    def test_replace_path_with_retry_non_transient_error(self):
+        replace_mock = MagicMock()
+        replace_mock.side_effect = ValueError("Some other error")
+        sleep_mock = MagicMock()
 
-        err = FileNotFoundError("No such file or directory")
-        mock_write.side_effect = err
-
-        mock_sleep = MagicMock()
-        path = Path("test.txt")
-
-        with self.assertRaises(FileNotFoundError):
-            write_text_path_with_retry(
-                path,
-                "test data",
-                attempts=3,
-                write_func=mock_write,
-                sleep_func=mock_sleep,
+        with self.assertRaises(ValueError):
+            replace_path_with_retry(
+                "src", "dst",
+                replace_func=replace_mock,
+                sleep_func=sleep_mock
             )
 
-        self.assertEqual(mock_write.call_count, 1)
-        mock_sleep.assert_not_called()
-
-    def test_real_file_creation(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "test_real.txt"
-
-            result = write_text_path_with_retry(path, "hello world", encoding="utf-8")
-
-            self.assertEqual(result, len("hello world"))
-            self.assertTrue(path.exists())
-            self.assertEqual(path.read_text(encoding="utf-8"), "hello world")
-
+        replace_mock.assert_called_once()
+        sleep_mock.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
