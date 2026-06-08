@@ -55,6 +55,38 @@ class IndicatorMathTests(unittest.TestCase):
         self.assertEqual(clamp(0, 1, 10), 1)
         self.assertEqual(clamp(15, 1, 10), 10)
 
+    def test_calculate_ema(self):
+        # empty prices -> 0.0
+        self.assertEqual(calculate_ema([], 5), 0.0)
+
+        # period <= 0 -> 0.0
+        self.assertEqual(calculate_ema([10.0, 20.0], 0), 0.0)
+        self.assertEqual(calculate_ema([10.0, 20.0], -1), 0.0)
+
+        # one price -> that price
+        self.assertEqual(calculate_ema([15.0], 5), 15.0)
+
+        # period == 1 -> last price
+        self.assertEqual(calculate_ema([10.0, 20.0, 30.0], 1), 30.0)
+
+        # constant prices -> same constant
+        self.assertEqual(calculate_ema([10.0, 10.0, 10.0], 2), 10.0)
+
+        # normal EMA calculation with a known expected value
+        prices = [10.0, 20.0, 30.0]
+        # alpha = 2 / (2 + 1) = 2/3
+        # ema1 = 10.0
+        # ema2 = 20 * 2/3 + 10 * 1/3 = 13.3333333333 + 3.3333333333 = 16.6666666667
+        # ema3 = 30 * 2/3 + 16.6666666667 * 1/3 = 20 + 5.5555555556 = 25.5555555556
+        self.assertAlmostEqual(calculate_ema(prices, 2), 25.5555555556)
+
+        # period > len(prices) -> same result as period == len(prices)
+        prices = [10.0, 20.0, 30.0]
+        self.assertEqual(calculate_ema(prices, 10), calculate_ema(prices, 3))
+
+        # zero prices can be included as numeric input
+        self.assertAlmostEqual(calculate_ema([0.0, 0.0], 2), 0.0)
+
     def test_ema_and_series_share_final_value(self):
         prices = [10.0, 20.0, 30.0]
         series = calculate_ema_series(prices, 2)
