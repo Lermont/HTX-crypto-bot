@@ -9231,6 +9231,24 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertIn("fetch_positions returned dict", position_rows[-1]["message"])
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
 
+    def test_bulk_open_orders_success(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.has["fetchOpenOrders"] = True
+            mock_order_1 = {"id": "123", "symbol": SYMBOL, "side": "buy"}
+            mock_order_2 = {"id": "124", "symbol": SECOND_SYMBOL, "side": "sell"}
+            bot.exchange.open_orders = [mock_order_1, mock_order_2]
+
+            orders = bot._bulk_open_orders_by_symbol()
+
+            self.assertIsNotNone(orders)
+            self.assertEqual(len(orders), 2)
+            self.assertEqual(len(orders[SYMBOL]), 1)
+            self.assertEqual(orders[SYMBOL][0]["id"], "123")
+            self.assertEqual(len(orders[SECOND_SYMBOL]), 1)
+            self.assertEqual(orders[SECOND_SYMBOL][0]["id"], "124")
+            self.assertEqual(bot.exchange.fetch_open_orders_calls, 1)
+
     def test_bulk_open_orders_dict_response_falls_back_without_step_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
