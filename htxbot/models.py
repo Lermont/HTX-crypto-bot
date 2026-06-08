@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import config
 
@@ -182,7 +182,36 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
+@dataclass
+class CsvEventData:
+    level: str
+    event: str
+    message: str = ""
+    symbol: str = ""
+    side: str = ""
+    order_id: str = ""
+    price: float = 0.0
+    amount: float = 0.0
+    filled: float = 0.0
+    remaining: float = 0.0
+    position_size: float = 0.0
+    entry_price: float = 0.0
+    notional: float = 0.0
+    fee_quote: float = 0.0
+    fee_currency: str = ""
+    fill_source: str = ""
+    rs30: float = 0.0
+    rs60: float = 0.0
+    ema30: float = 0.0
+    ema60: float = 0.0
+    reason: str = ""
+    exception_type: str = ""
+    error_code: str = ""
+    retryable: Any = ""
+
+
 __all__ = [
+    "CsvEventData",
     "OrderRequest",
     "ExitLadderConfig",
     "ExitLadderPreflight",
