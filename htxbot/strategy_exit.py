@@ -3576,15 +3576,10 @@ class ExitStrategy:
             "unknown_remaining": unknown_remaining,
         }
 
-    def _validate_sell_orders(self, symbol: str, open_orders: List[dict]) -> bool:
-        state = self._get_state(symbol)
-        exposure = self._exit_order_exposure(symbol, open_orders)
+    def _validate_flat_exit_orders(self, symbol: str, state, exposure) -> bool:
+        import config
         exit_side = exposure["exit_side"]
-        open_sell_orders = exposure["open_exit_orders"]
-        tracked_sell_orders = exposure["tracked_exit_orders"]
-        tracked_hard_stop_orders = exposure["tracked_hard_stop_orders"]
         unknown_sells = exposure["unknown_exit_orders"]
-        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
 
         if state.position_size <= 0:
             if state.hard_stop_order:
@@ -3665,7 +3660,14 @@ class ExitStrategy:
                     ),
                     reason="untracked_exit_side_orders_preserved",
                 )
-            return True
+        return True
+
+    def _validate_tracked_exit_orders_reduce_only(self, symbol: str, state, exposure) -> bool:
+        import config
+        exit_side = exposure["exit_side"]
+        tracked_hard_stop_orders = exposure["tracked_hard_stop_orders"]
+        tracked_sell_orders = exposure["tracked_exit_orders"]
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
 
         if tracked_hard_stop_orders:
             unsafe_stop_orders = [
@@ -3744,178 +3746,166 @@ class ExitStrategy:
                 self._save_state()
             return False
 
-        if unknown_sells:
-            unknown_remaining = sum(
-                self._order_remaining_amount(order) for order in unknown_sells
+        return True
+
+    def _validate_unknown_exit_orders(self, symbol: str, state, exposure) -> bool:
+        import config
+        exit_side = exposure["exit_side"]
+        unknown_sells = exposure["unknown_exit_orders"]
+        tracked_sell_orders = exposure["tracked_exit_orders"]
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+
+        if not unknown_sells:
+            return True
+
+        unknown_remaining = sum(self._order_remaining_amount(order) for order in unknown_sells)
+        if unknown_remaining > state.position_size + eps:
+            self._log_event(
+                "ERROR",
+                f"Unknown {exit_side} exit orders exceed {config.POSITION_SIDE} position for {symbol}; canceling",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=exit_side,
+                amount=unknown_remaining,
+                position_size=state.position_size,
+                reason="unknown_exit_amount_exceeds_position",
             )
-            if unknown_remaining > state.position_size + eps:
+            self._cancel_exchange_orders(symbol, unknown_sells, side=exit_side, reason="unknown_exit_amount_exceeds_position")
+            return False
+
+        tracked_remaining = sum(self._order_remaining_amount(order) for order in tracked_sell_orders)
+        if tracked_remaining > 0 and tracked_remaining + unknown_remaining > state.position_size + eps:
+            self._log_event(
+                "ERROR",
+                f"Combined tracked and unknown {exit_side} orders exceed {config.POSITION_SIDE} position for {symbol}; canceling tracked bot orders",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=exit_side,
+                amount=tracked_remaining + unknown_remaining,
+                position_size=state.position_size,
+                reason="combined_exit_amount_exceeds_position",
+            )
+            self._cancel_sell_orders(symbol, reason="combined_exit_amount_exceeds_position")
+            return False
+
+        if tracked_remaining > 0 and tracked_remaining + unknown_remaining <= state.position_size + eps:
+            can_adopt, adopt_reason = self._unknown_exit_adoption_reason(symbol, unknown_sells, unknown_remaining)
+            if can_adopt:
+                return self._adopt_sell_orders(
+                    symbol,
+                    tracked_sell_orders + unknown_sells,
+                    reason=f"{adopt_reason};tracked_unknown_exit_orders_merged",
+                )
+            if self._should_cancel_hidden_exit_orders(unknown_sells, adopt_reason):
                 self._log_event(
-                    "ERROR",
-                    f"Unknown {exit_side} exit orders exceed {config.POSITION_SIDE} position for {symbol}; canceling",
+                    "WARNING",
+                    f"Unsafe hidden {exit_side} close orders found next to tracked exits for {symbol}; canceling before continuing",
                     event="reduce_only_violation_prevented",
                     symbol=symbol,
                     side=exit_side,
                     amount=unknown_remaining,
                     position_size=state.position_size,
-                    reason="unknown_exit_amount_exceeds_position",
+                    reason=f"{adopt_reason};tracked_hidden_close_order_cancel",
                 )
+                state.frozen_no_more_buys = True
                 self._cancel_exchange_orders(
                     symbol,
                     unknown_sells,
                     side=exit_side,
-                    reason="unknown_exit_amount_exceeds_position",
+                    reason=f"{adopt_reason};tracked_hidden_close_order_cancel",
                 )
+                self._save_state()
                 return False
-
-            tracked_remaining = sum(
-                self._order_remaining_amount(order) for order in tracked_sell_orders
-            )
-            if (
-                tracked_remaining > 0
-                and tracked_remaining + unknown_remaining > state.position_size + eps
-            ):
-                self._log_event(
-                    "ERROR",
-                    f"Combined tracked and unknown {exit_side} orders exceed {config.POSITION_SIDE} position for {symbol}; canceling tracked bot orders",
-                    event="reduce_only_violation_prevented",
-                    symbol=symbol,
-                    side=exit_side,
-                    amount=tracked_remaining + unknown_remaining,
-                    position_size=state.position_size,
-                    reason="combined_exit_amount_exceeds_position",
-                )
-                self._cancel_sell_orders(
-                    symbol, reason="combined_exit_amount_exceeds_position"
-                )
-                return False
-
-            if (
-                tracked_remaining > 0
-                and tracked_remaining + unknown_remaining <= state.position_size + eps
-            ):
-                can_adopt, adopt_reason = self._unknown_exit_adoption_reason(
-                    symbol, unknown_sells, unknown_remaining
-                )
-                if can_adopt:
-                    return self._adopt_sell_orders(
-                        symbol,
-                        tracked_sell_orders + unknown_sells,
-                        reason=f"{adopt_reason};tracked_unknown_exit_orders_merged",
-                    )
-                if self._should_cancel_hidden_exit_orders(unknown_sells, adopt_reason):
-                    self._log_event(
-                        "WARNING",
-                        f"Unsafe hidden {exit_side} close orders found next to tracked exits for {symbol}; canceling before continuing",
-                        event="reduce_only_violation_prevented",
-                        symbol=symbol,
-                        side=exit_side,
-                        amount=unknown_remaining,
-                        position_size=state.position_size,
-                        reason=f"{adopt_reason};tracked_hidden_close_order_cancel",
-                    )
-                    state.frozen_no_more_buys = True
-                    self._cancel_exchange_orders(
-                        symbol,
-                        unknown_sells,
-                        side=exit_side,
-                        reason=f"{adopt_reason};tracked_hidden_close_order_cancel",
-                    )
-                    self._save_state()
-                    return False
-                self._log_event(
-                    "WARNING",
-                    f"Untracked {exit_side} orders next to tracked exits for {symbol} cannot be proven safe; waiting",
-                    event="reduce_only_violation_prevented",
-                    symbol=symbol,
-                    side=exit_side,
-                    amount=unknown_remaining,
-                    position_size=state.position_size,
-                    reason=f"tracked_unknown_exit_orders_unadoptable;{adopt_reason}",
-                )
-                self._freeze_no_more_buys(
-                    symbol,
-                    reason=f"tracked_unknown_exit_orders_unadoptable;{adopt_reason}",
-                )
-                return self._wait_or_cancel_stale_unknown_exit_orders(
-                    symbol,
-                    unknown_sells,
-                    reason=f"tracked_unknown_exit_orders_unadoptable;{adopt_reason}",
-                )
-
-            if not state.sell_ladder_orders and not tracked_sell_orders:
-                can_adopt, adopt_reason = self._unknown_exit_adoption_reason(
-                    symbol, unknown_sells, unknown_remaining
-                )
-                if can_adopt:
-                    return self._adopt_sell_orders(
-                        symbol, unknown_sells, reason=adopt_reason
-                    )
-
-                if self._should_cancel_hidden_exit_orders(unknown_sells, adopt_reason):
-                    self._log_event(
-                        "WARNING",
-                        f"Unsafe hidden {exit_side} close orders found for {symbol}; canceling before rebuilding exits",
-                        event="reduce_only_violation_prevented",
-                        symbol=symbol,
-                        side=exit_side,
-                        amount=unknown_remaining,
-                        position_size=state.position_size,
-                        reason=f"{adopt_reason};hidden_close_order_cancel",
-                    )
-                    state.frozen_no_more_buys = True
-                    self._cancel_exchange_orders(
-                        symbol,
-                        unknown_sells,
-                        side=exit_side,
-                        reason=f"{adopt_reason};hidden_close_order_cancel",
-                    )
-                    self._save_state()
-                    return False
-
-                self._log_event(
-                    "WARNING",
-                    f"Untracked {exit_side} orders found for {symbol}; waiting instead of placing another exit ladder",
-                    event="reduce_only_violation_prevented",
-                    symbol=symbol,
-                    side=exit_side,
-                    amount=unknown_remaining,
-                    position_size=state.position_size,
-                    reason=adopt_reason,
-                )
-                return self._wait_or_cancel_stale_unknown_exit_orders(
-                    symbol,
-                    unknown_sells,
-                    reason=adopt_reason,
-                )
-
             self._log_event(
-                "DEBUG",
-                f"Untracked {exit_side} orders found for {symbol}; leaving them untouched",
-                event="state_exchange_mismatch",
+                "WARNING",
+                f"Untracked {exit_side} orders next to tracked exits for {symbol} cannot be proven safe; waiting",
+                event="reduce_only_violation_prevented",
                 symbol=symbol,
                 side=exit_side,
                 amount=unknown_remaining,
-                reason="untracked_exit_side_orders_preserved",
+                position_size=state.position_size,
+                reason=f"tracked_unknown_exit_orders_unadoptable;{adopt_reason}",
             )
-        elif "unknown_exit" in str(
-            getattr(state, "pending_exit_ladder_reason", "") or ""
-        ):
+            self._freeze_no_more_buys(
+                symbol,
+                reason=f"tracked_unknown_exit_orders_unadoptable;{adopt_reason}",
+            )
+            return self._wait_or_cancel_stale_unknown_exit_orders(
+                symbol,
+                unknown_sells,
+                reason=f"tracked_unknown_exit_orders_unadoptable;{adopt_reason}",
+            )
+
+        if not state.sell_ladder_orders and not tracked_sell_orders:
+            can_adopt, adopt_reason = self._unknown_exit_adoption_reason(symbol, unknown_sells, unknown_remaining)
+            if can_adopt:
+                return self._adopt_sell_orders(symbol, unknown_sells, reason=adopt_reason)
+
+            if self._should_cancel_hidden_exit_orders(unknown_sells, adopt_reason):
+                self._log_event(
+                    "WARNING",
+                    f"Unsafe hidden {exit_side} close orders found for {symbol}; canceling before rebuilding exits",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=exit_side,
+                    amount=unknown_remaining,
+                    position_size=state.position_size,
+                    reason=f"{adopt_reason};hidden_close_order_cancel",
+                )
+                state.frozen_no_more_buys = True
+                self._cancel_exchange_orders(
+                    symbol,
+                    unknown_sells,
+                    side=exit_side,
+                    reason=f"{adopt_reason};hidden_close_order_cancel",
+                )
+                self._save_state()
+                return False
+
+            self._log_event(
+                "WARNING",
+                f"Untracked {exit_side} orders found for {symbol}; waiting instead of placing another exit ladder",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=exit_side,
+                amount=unknown_remaining,
+                position_size=state.position_size,
+                reason=adopt_reason,
+            )
+            return self._wait_or_cancel_stale_unknown_exit_orders(
+                symbol,
+                unknown_sells,
+                reason=adopt_reason,
+            )
+
+        self._log_event(
+            "DEBUG",
+            f"Untracked {exit_side} orders found for {symbol}; leaving them untouched",
+            event="state_exchange_mismatch",
+            symbol=symbol,
+            side=exit_side,
+            amount=unknown_remaining,
+            reason="untracked_exit_side_orders_preserved",
+        )
+        return True
+
+    def _validate_exit_ladder_order_set(self, symbol: str, state, exposure) -> bool:
+        exit_side = exposure["exit_side"]
+        unknown_sells = exposure["unknown_exit_orders"]
+        tracked_sell_orders = exposure["tracked_exit_orders"]
+        open_sell_orders = exposure["open_exit_orders"]
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+
+        if "unknown_exit" in str(getattr(state, "pending_exit_ladder_reason", "") or ""):
             self._clear_pending_exit_ladder(state)
             self._refresh_active_side(state)
             self._save_state()
 
         open_tracked_sell_ids = {str(order.get("id")) for order in tracked_sell_orders}
-        active_refs = [
-            ref
-            for ref in state.sell_ladder_orders
-            if str(ref.get("id")) in open_tracked_sell_ids
-        ]
-        if state.sell_ladder_orders and len(active_refs) != len(
-            state.sell_ladder_orders
-        ):
-            unknown_remaining = sum(
-                self._order_remaining_amount(order) for order in unknown_sells
-            )
+        active_refs = [ref for ref in state.sell_ladder_orders if str(ref.get("id")) in open_tracked_sell_ids]
+
+        if state.sell_ladder_orders and len(active_refs) != len(state.sell_ladder_orders):
+            unknown_remaining = sum(self._order_remaining_amount(order) for order in unknown_sells)
             if unknown_sells and unknown_remaining <= state.position_size + eps:
                 can_adopt, adopt_reason = self._unknown_exit_adoption_reason(
                     symbol, unknown_sells, unknown_remaining
@@ -3952,9 +3942,8 @@ class ExitStrategy:
                 self._safe_float(ref.get("amount"), 0.0) for ref in missing_refs
             )
             if missing_refs and not open_sell_orders:
-                first_preserve = not all(
-                    ref.get("invisible_preserved_at") for ref in missing_refs
-                )
+                first_preserve = not all(ref.get("invisible_preserved_at") for ref in missing_refs)
+                import time
                 now = time.time()
                 if first_preserve:
                     for ref in missing_refs:
@@ -4025,9 +4014,15 @@ class ExitStrategy:
             self._save_state()
             return False
 
-        remaining = 0.0
-        for order in tracked_sell_orders:
-            remaining += self._order_remaining_amount(order)
+        return True
+
+    def _validate_exit_amount_within_position(self, symbol: str, state, exposure) -> bool:
+        import config
+        exit_side = exposure["exit_side"]
+        tracked_sell_orders = exposure["tracked_exit_orders"]
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+
+        remaining = sum(self._order_remaining_amount(order) for order in tracked_sell_orders)
 
         if remaining > state.position_size + eps:
             self._log_event(
@@ -4051,9 +4046,49 @@ class ExitStrategy:
 
         return True
 
-    def _closeable_contracts_for_exit_ladder(
-        self, symbol: str, had_sell_ladder: bool
-    ) -> float:
+    def _validate_sell_orders(self, symbol: str, open_orders: List[dict]) -> bool:
+        state = self._get_state(symbol)
+        exposure = self._exit_order_exposure(symbol, open_orders)
+
+        if state.position_size <= 0:
+            if not self._validate_flat_exit_orders(symbol, state, exposure):
+                return False
+            return True
+
+        if not self._validate_tracked_exit_orders_reduce_only(symbol, state, exposure):
+            return False
+
+        orig_sig = getattr(state, "sell_ladder_signature", None)
+        orig_len = len(state.sell_ladder_orders) if state.sell_ladder_orders else 0
+
+        if not self._validate_unknown_exit_orders(symbol, state, exposure):
+            return False
+
+        new_len = len(state.sell_ladder_orders) if state.sell_ladder_orders else 0
+        new_sig = getattr(state, "sell_ladder_signature", None)
+
+        if orig_len != new_len or orig_sig != new_sig:
+            return True
+
+        orig_sig = getattr(state, "sell_ladder_signature", None)
+        orig_len = len(state.sell_ladder_orders) if state.sell_ladder_orders else 0
+
+        if not self._validate_exit_ladder_order_set(symbol, state, exposure):
+            return False
+
+        new_len = len(state.sell_ladder_orders) if state.sell_ladder_orders else 0
+        new_sig = getattr(state, "sell_ladder_signature", None)
+
+        if orig_len != new_len or orig_sig != new_sig:
+            return True
+
+        if not self._validate_exit_amount_within_position(symbol, state, exposure):
+            return False
+
+        return True
+
+
+    def _closeable_contracts_for_exit_ladder(self, symbol: str, had_sell_ladder: bool) -> float:
         state = self._get_state(symbol)
         position_size = max(0.0, self._safe_float(state.position_size, 0.0))
         closeable = max(

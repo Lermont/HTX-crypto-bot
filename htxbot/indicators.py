@@ -16,7 +16,13 @@ def calculate_ema(prices: Sequence[float], period: int) -> float:
     if len(prices) == 0:
         return 0.0
 
+    period = int(period)
+    if period <= 0:
+        return 0.0
+
+    period = min(period, len(prices))
     alpha = 2 / (period + 1)
+
     ema = float(prices[0])
     for price in prices[1:]:
         ema = float(price) * alpha + ema * (1 - alpha)
