@@ -75,5 +75,27 @@ class TestFileIO(unittest.TestCase):
         replace_mock.assert_called_once()
         sleep_mock.assert_not_called()
 
+
+    def test_is_transient_file_replace_error_permission_error(self):
+        from htxbot.fileio import is_transient_file_replace_error
+        exc = PermissionError("Access denied")
+        self.assertTrue(is_transient_file_replace_error(exc))
+
+    def test_is_transient_file_replace_error_oserror_winerror(self):
+        from htxbot.fileio import is_transient_file_replace_error
+        exc = OSError("File lock")
+        exc.winerror = 32
+        self.assertTrue(is_transient_file_replace_error(exc))
+
+    def test_is_transient_file_replace_error_non_oserror(self):
+        from htxbot.fileio import is_transient_file_replace_error
+        exc = ValueError("Some value error")
+        self.assertFalse(is_transient_file_replace_error(exc))
+
+    def test_is_transient_file_replace_error_oserror_no_winerror(self):
+        from htxbot.fileio import is_transient_file_replace_error
+        exc = OSError("Other OS error")
+        self.assertFalse(is_transient_file_replace_error(exc))
+
 if __name__ == "__main__":
     unittest.main()
