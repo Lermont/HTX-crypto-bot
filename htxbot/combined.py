@@ -845,6 +845,13 @@ class CombinedHtxFuturesBot:
         target_side, target_contracts, target_notional, reference_price = (
             self._btc_hedge_target(bot, hedge_symbol, net_notional)
         )
+
+        return self._execute_btc_hedge_rebalance(
+            bot, hedge_symbol, settings, exposure,
+            target_side, target_contracts, target_notional, reference_price, net_notional
+        )
+
+    def _get_btc_hedge_current_state(self, bot, hedge_symbol, settings, exposure, reference_price):
         current_long = exposure["hedge_long_contracts"]
         current_short = exposure["hedge_short_contracts"]
         hedge_price = (
@@ -862,7 +869,7 @@ class CombinedHtxFuturesBot:
                 amount=current_long + current_short,
                 throttle_sec=60.0,
             )
-            return
+            return None
 
         current_side = (
             "long"
@@ -903,6 +910,32 @@ class CombinedHtxFuturesBot:
             ),
             min_contract_notional,
         )
+
+        return {
+            "current_side": current_side,
+            "current_contracts": current_contracts,
+            "current_available": current_available,
+            "current_notional": current_notional,
+            "hedge_price": hedge_price,
+            "min_rebalance": min_rebalance,
+            "epsilon": epsilon
+        }
+
+    def _execute_btc_hedge_rebalance(
+        self, bot, hedge_symbol, settings, exposure,
+        target_side, target_contracts, target_notional, reference_price, net_notional
+    ):
+        state = self._get_btc_hedge_current_state(bot, hedge_symbol, settings, exposure, reference_price)
+        if not state:
+            return
+
+        current_side = state["current_side"]
+        current_contracts = state["current_contracts"]
+        current_available = state["current_available"]
+        current_notional = state["current_notional"]
+        hedge_price = state["hedge_price"]
+        min_rebalance = state["min_rebalance"]
+        epsilon = state["epsilon"]
 
         if not self._btc_hedge_profiles_ready():
             if current_contracts <= epsilon:
@@ -960,6 +993,15 @@ class CombinedHtxFuturesBot:
             )
             return
 
+        return self._dispatch_btc_hedge_order(
+            bot, hedge_symbol, current_side, current_contracts, current_available,
+            target_side, target_contracts, hedge_price, reference_price, net_notional, min_rebalance
+        )
+
+    def _dispatch_btc_hedge_order(
+        self, bot, hedge_symbol, current_side, current_contracts, current_available,
+        target_side, target_contracts, hedge_price, reference_price, net_notional, min_rebalance
+    ):
         if not target_side:
             close_side = "sell" if current_side == "long" else "buy"
             close_amount = min(current_contracts, current_available)
