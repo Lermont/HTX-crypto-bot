@@ -22,15 +22,26 @@ class ExitStrategy:
     def _hard_stop_loss_rate(self, signal: Optional[dict] = None) -> Tuple[float, str]:
         strategy = config.STRATEGY
         configured_pct = max(0.0, self._safe_float(strategy.hard_stop_loss_pct, 0.0))
-        emergency_floor = max(0.0, self._safe_float(getattr(strategy, "hard_stop_loss_min_emergency_pct", 0.0), 0.0))
+        emergency_floor = max(
+            0.0,
+            self._safe_float(
+                getattr(strategy, "hard_stop_loss_min_emergency_pct", 0.0), 0.0
+            ),
+        )
         fixed_pct = max(configured_pct, emergency_floor)
         effective_pct = fixed_pct
-        parts = [f"fixed_pct={fixed_pct:.6f};configured_pct={configured_pct:.6f};emergency_floor={emergency_floor:.6f}"]
+        parts = [
+            f"fixed_pct={fixed_pct:.6f};configured_pct={configured_pct:.6f};emergency_floor={emergency_floor:.6f}"
+        ]
         if strategy.hard_stop_loss_atr_enabled:
             atr_rate = max(0.0, self._safe_float((signal or {}).get("atr_rate"), 0.0))
-            atr_multiplier = max(0.0, self._safe_float(strategy.hard_stop_loss_atr_multiplier, 0.0))
+            atr_multiplier = max(
+                0.0, self._safe_float(strategy.hard_stop_loss_atr_multiplier, 0.0)
+            )
             atr_pct = atr_rate * atr_multiplier
-            atr_max_pct = max(0.0, self._safe_float(strategy.hard_stop_loss_atr_max_pct, 0.0))
+            atr_max_pct = max(
+                0.0, self._safe_float(strategy.hard_stop_loss_atr_max_pct, 0.0)
+            )
             if atr_max_pct > 0:
                 atr_pct = min(atr_pct, atr_max_pct)
             effective_pct = max(effective_pct, atr_pct)
@@ -43,7 +54,9 @@ class ExitStrategy:
             parts.append("atr_enabled=0")
         return effective_pct, ";".join(parts)
 
-    def _hard_stop_loss_trigger_price(self, symbol: str, state: TradeState, loss_rate: float) -> float:
+    def _hard_stop_loss_trigger_price(
+        self, symbol: str, state: TradeState, loss_rate: float
+    ) -> float:
         pct = max(0.0, self._safe_float(loss_rate, 0.0))
         if pct <= 0 or state.entry_price <= 0:
             return 0.0
@@ -51,7 +64,9 @@ class ExitStrategy:
             return self._price_at_or_above(symbol, state.entry_price * (1.0 + pct))
         return self._price_at_or_below(symbol, state.entry_price * (1.0 - pct))
 
-    def _runner_profit_lock_stop_price(self, symbol: str, state: TradeState) -> Tuple[float, str]:
+    def _runner_profit_lock_stop_price(
+        self, symbol: str, state: TradeState
+    ) -> Tuple[float, str]:
         strategy = config.STRATEGY
         if not getattr(strategy, "ema_exit_runner_profit_lock_enabled", False):
             return 0.0, "runner_profit_lock_disabled"
@@ -64,10 +79,16 @@ class ExitStrategy:
         if breakeven <= 0:
             return 0.0, "runner_profit_lock_price_unavailable"
         if config.POSITION_SIDE == "short":
-            return self._price_at_or_below(symbol, breakeven), "runner_profit_lock_breakeven"
-        return self._price_at_or_above(symbol, breakeven), "runner_profit_lock_breakeven"
+            return self._price_at_or_below(
+                symbol, breakeven
+            ), "runner_profit_lock_breakeven"
+        return self._price_at_or_above(
+            symbol, breakeven
+        ), "runner_profit_lock_breakeven"
 
-    def _hard_stop_loss_signature(self, symbol: str, state: TradeState, amount: float, trigger_price: float) -> str:
+    def _hard_stop_loss_signature(
+        self, symbol: str, state: TradeState, amount: float, trigger_price: float
+    ) -> str:
         return (
             f"hard_stop_loss|direction={config.POSITION_SIDE}|side={config.EXIT_SIDE}|"
             f"amount={amount:.12f}|entry={state.entry_price:.12f}|"
@@ -77,21 +98,30 @@ class ExitStrategy:
     def _hard_stop_market_close_wait_sec(self) -> float:
         return max(
             10.0,
-            self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 0.0), 0.0) * 2.0,
+            self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 0.0), 0.0)
+            * 2.0,
         )
 
     def _hard_stop_market_close_pending(self, state: TradeState) -> bool:
         ref = state.hard_stop_order if isinstance(state.hard_stop_order, dict) else {}
-        return bool(ref and ref.get("market_close") and ref.get("reason") == "hard_stop_loss_market_close")
+        return bool(
+            ref
+            and ref.get("market_close")
+            and ref.get("reason") == "hard_stop_loss_market_close"
+        )
 
-    def _hard_stop_market_close_signature(self, symbol: str, state: TradeState, amount: float, trigger_price: float) -> str:
+    def _hard_stop_market_close_signature(
+        self, symbol: str, state: TradeState, amount: float, trigger_price: float
+    ) -> str:
         return (
             f"hard_stop_market_close|direction={config.POSITION_SIDE}|side={config.EXIT_SIDE}|"
             f"amount={amount:.12f}|entry={state.entry_price:.12f}|"
             f"trigger={trigger_price:.12f}"
         )
 
-    def _create_hard_stop_loss_order(self, symbol: str, amount: float, trigger_price: float) -> dict:
+    def _create_hard_stop_loss_order(
+        self, symbol: str, amount: float, trigger_price: float
+    ) -> dict:
         return self._create_one_way_order(
             symbol=symbol,
             order_type="market",
@@ -120,8 +150,12 @@ class ExitStrategy:
         self._save_state()
 
         if self._hard_stop_market_close_pending(state):
-            pending_since = self._safe_float(state.hard_stop_order.get("created_at"), 0.0)
-            pending_age = max(0.0, time.time() - pending_since) if pending_since > 0 else 0.0
+            pending_since = self._safe_float(
+                state.hard_stop_order.get("created_at"), 0.0
+            )
+            pending_age = (
+                max(0.0, time.time() - pending_since) if pending_since > 0 else 0.0
+            )
             wait_sec = self._hard_stop_market_close_wait_sec()
             if pending_age < wait_sec:
                 self._log_event(
@@ -141,7 +175,9 @@ class ExitStrategy:
                     ),
                 )
                 return True
-            self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_market_close_retry")
+            self._cancel_hard_stop_order(
+                symbol, reason="hard_stop_loss_market_close_retry"
+            )
             state = self._get_state(symbol)
             state.frozen_no_more_buys = True
             state.sell_ladder_mode = "hard_stop_loss"
@@ -169,7 +205,9 @@ class ExitStrategy:
         if state.sell_ladder_orders:
             self._cancel_sell_orders(symbol, reason="hard_stop_loss_trigger_crossed")
         if state.hard_stop_order:
-            self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_trigger_crossed")
+            self._cancel_hard_stop_order(
+                symbol, reason="hard_stop_loss_trigger_crossed"
+            )
         state = self._get_state(symbol)
         state.frozen_no_more_buys = True
         state.sell_ladder_mode = "hard_stop_loss"
@@ -207,7 +245,9 @@ class ExitStrategy:
             return True
 
         raw_amount = max(0.0, state.position_size)
-        amount = min(raw_amount, max(0.0, self._amount_to_precision(symbol, raw_amount)))
+        amount = min(
+            raw_amount, max(0.0, self._amount_to_precision(symbol, raw_amount))
+        )
         if amount <= 0:
             self._log_event(
                 "WARNING",
@@ -233,7 +273,9 @@ class ExitStrategy:
             )
             order_id = str(order.get("id") or "")
         except Exception as exc:
-            closeable_rejected = self._is_reduce_only_amount_exceeds_closeable_error(exc)
+            closeable_rejected = self._is_reduce_only_amount_exceeds_closeable_error(
+                exc
+            )
             if closeable_rejected:
                 state.position_available = 0.0
                 state.position_frozen = max(state.position_frozen, state.position_size)
@@ -289,18 +331,24 @@ class ExitStrategy:
             "loss_rate": loss_rate,
             "reason": "hard_stop_loss_market_close",
         }
-        state.hard_stop_signature = self._hard_stop_market_close_signature(symbol, state, amount, trigger_price)
+        state.hard_stop_signature = self._hard_stop_market_close_signature(
+            symbol, state, amount, trigger_price
+        )
         state.frozen_no_more_buys = True
         state.sell_ladder_mode = "hard_stop_loss"
         self._refresh_active_side(state)
         self._save_state()
         return True
 
-    def _ensure_hard_stop_loss(self, symbol: str, signal: Optional[dict] = None) -> bool:
+    def _ensure_hard_stop_loss(
+        self, symbol: str, signal: Optional[dict] = None
+    ) -> bool:
         state = self._get_state(symbol)
         if state.position_size <= 0 or state.entry_price <= 0:
             if state.hard_stop_order:
-                self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_flat_position")
+                self._cancel_hard_stop_order(
+                    symbol, reason="hard_stop_loss_flat_position"
+                )
             return False
 
         if not config.STRATEGY.hard_stop_loss_enabled:
@@ -312,12 +360,18 @@ class ExitStrategy:
         trigger_price = self._hard_stop_loss_trigger_price(symbol, state, loss_rate)
         lock_price, lock_reason = self._runner_profit_lock_stop_price(symbol, state)
         if lock_price > 0:
-            if config.POSITION_SIDE == "short" and (trigger_price <= 0 or lock_price < trigger_price):
+            if config.POSITION_SIDE == "short" and (
+                trigger_price <= 0 or lock_price < trigger_price
+            ):
                 trigger_price = lock_price
-                loss_rate_reason = f"{loss_rate_reason};{lock_reason};trigger_locked={lock_price:.12f}"
+                loss_rate_reason = (
+                    f"{loss_rate_reason};{lock_reason};trigger_locked={lock_price:.12f}"
+                )
             elif config.POSITION_SIDE != "short" and lock_price > trigger_price:
                 trigger_price = lock_price
-                loss_rate_reason = f"{loss_rate_reason};{lock_reason};trigger_locked={lock_price:.12f}"
+                loss_rate_reason = (
+                    f"{loss_rate_reason};{lock_reason};trigger_locked={lock_price:.12f}"
+                )
         if state.sell_ladder_mode == "soft_defensive_exit" and state.sell_ladder_orders:
             return False
         if state.sell_ladder_mode == "hard_stop_loss":
@@ -344,7 +398,9 @@ class ExitStrategy:
             self._save_state()
             return False
 
-        amount = self._amount_to_precision(symbol, min(max(0.0, state.position_size), state.position_size))
+        amount = self._amount_to_precision(
+            symbol, min(max(0.0, state.position_size), state.position_size)
+        )
         if amount <= 0 or trigger_price <= 0:
             return False
 
@@ -365,7 +421,10 @@ class ExitStrategy:
             order_id = str(order.get("id") or "")
         except Exception as exc:
             order_exc = exc
-            if self._is_reduce_only_amount_exceeds_closeable_error(exc) and state.sell_ladder_orders:
+            if (
+                self._is_reduce_only_amount_exceeds_closeable_error(exc)
+                and state.sell_ladder_orders
+            ):
                 self._log_event(
                     "WARNING",
                     f"Hard stop-loss for {symbol} is blocked by reserved closeable amount; canceling TP ladder and retrying stop first",
@@ -396,7 +455,9 @@ class ExitStrategy:
                     )
                     return True
                 try:
-                    order = self._create_hard_stop_loss_order(symbol, amount, trigger_price)
+                    order = self._create_hard_stop_loss_order(
+                        symbol, amount, trigger_price
+                    )
                     order_id = str(order.get("id") or "")
                 except Exception as retry_exc:
                     order_exc = retry_exc
@@ -492,9 +553,19 @@ class ExitStrategy:
         return ""
 
     def _soft_defensive_btc_against_context(self, signal: Optional[dict]) -> dict:
-        threshold = max(0.0, self._safe_float(config.STRATEGY.soft_defensive_exit_btc_against_return, 0.0))
+        threshold = max(
+            0.0,
+            self._safe_float(
+                config.STRATEGY.soft_defensive_exit_btc_against_return, 0.0
+            ),
+        )
         if threshold <= 0:
-            return {"against": True, "btc_return": 0.0, "threshold": threshold, "reason": "threshold_disabled"}
+            return {
+                "against": True,
+                "btc_return": 0.0,
+                "threshold": threshold,
+                "reason": "threshold_disabled",
+            }
 
         btc_return = None
         source = "missing"
@@ -508,7 +579,12 @@ class ExitStrategy:
                 source = "macro_btc_return"
 
         if btc_return is None:
-            return {"against": False, "btc_return": 0.0, "threshold": threshold, "reason": "btc_return_unavailable"}
+            return {
+                "against": False,
+                "btc_return": 0.0,
+                "threshold": threshold,
+                "reason": "btc_return_unavailable",
+            }
 
         if config.POSITION_SIDE == "short":
             against = btc_return >= threshold
@@ -536,8 +612,16 @@ class ExitStrategy:
             return {"ok": False, "block_reason": "no_position"}
         if state.entry_orders:
             return {"ok": False, "block_reason": "entry_orders_active"}
-        if state.sell_ladder_mode in {"hard_stop_loss", "absolute_force_exit", "controlled_loss_exit", "urgent_time_exit"}:
-            return {"ok": False, "block_reason": f"managed_exit_active:{state.sell_ladder_mode}"}
+        if state.sell_ladder_mode in {
+            "hard_stop_loss",
+            "absolute_force_exit",
+            "controlled_loss_exit",
+            "urgent_time_exit",
+        }:
+            return {
+                "ok": False,
+                "block_reason": f"managed_exit_active:{state.sell_ladder_mode}",
+            }
 
         if reference_price <= 0:
             reference_price, _ = self._fetch_reference_price(symbol)
@@ -545,7 +629,9 @@ class ExitStrategy:
             return {"ok": False, "block_reason": "reference_price_unavailable"}
 
         drawdown = self._position_drawdown(state, reference_price)
-        min_drawdown = max(0.0, self._safe_float(strategy.soft_defensive_exit_min_drawdown, 0.0))
+        min_drawdown = max(
+            0.0, self._safe_float(strategy.soft_defensive_exit_min_drawdown, 0.0)
+        )
         if drawdown + 1e-12 < min_drawdown:
             return {
                 "ok": False,
@@ -569,7 +655,9 @@ class ExitStrategy:
         if not btc_context.get("against"):
             return {
                 "ok": False,
-                "block_reason": str(btc_context.get("reason") or "btc_not_against_position"),
+                "block_reason": str(
+                    btc_context.get("reason") or "btc_not_against_position"
+                ),
                 "drawdown": drawdown,
                 "min_drawdown": min_drawdown,
                 "reference_price": reference_price,
@@ -595,7 +683,9 @@ class ExitStrategy:
         state.soft_defensive_exit_last_rebuild_at = None
         state.soft_defensive_exit_fraction = 0.0
 
-    def _update_soft_defensive_confirmation(self, state: TradeState, signal: Optional[dict], active: bool) -> int:
+    def _update_soft_defensive_confirmation(
+        self, state: TradeState, signal: Optional[dict], active: bool
+    ) -> int:
         if not active:
             state.soft_defensive_last_signal_timestamp = None
             state.soft_defensive_consecutive_signals = 0
@@ -604,7 +694,9 @@ class ExitStrategy:
         signal_ts = self._safe_float((signal or {}).get("ts"), 0.0)
         if signal_ts <= 0:
             required = max(1, int(config.STRATEGY.soft_defensive_exit_confirmations))
-            state.soft_defensive_consecutive_signals = max(state.soft_defensive_consecutive_signals, required)
+            state.soft_defensive_consecutive_signals = max(
+                state.soft_defensive_consecutive_signals, required
+            )
             return state.soft_defensive_consecutive_signals
 
         previous_ts = self._safe_float(state.soft_defensive_last_signal_timestamp, 0.0)
@@ -618,27 +710,47 @@ class ExitStrategy:
     def _soft_defensive_target_fraction(self, state: TradeState) -> float:
         strategy = config.STRATEGY
         max_fraction = self._clamp(strategy.soft_defensive_exit_max_fraction, 0.0, 1.0)
-        initial = self._clamp(strategy.soft_defensive_exit_initial_fraction, 0.0, max_fraction)
-        step = self._clamp(strategy.soft_defensive_exit_step_fraction, 0.0, max_fraction)
+        initial = self._clamp(
+            strategy.soft_defensive_exit_initial_fraction, 0.0, max_fraction
+        )
+        step = self._clamp(
+            strategy.soft_defensive_exit_step_fraction, 0.0, max_fraction
+        )
         current = self._safe_float(state.soft_defensive_exit_fraction, 0.0)
         if current <= 0:
             return initial
 
-        reprice_minutes = max(0.0, self._safe_float(strategy.soft_defensive_exit_reprice_minutes, 0.0))
+        reprice_minutes = max(
+            0.0, self._safe_float(strategy.soft_defensive_exit_reprice_minutes, 0.0)
+        )
         last_rebuild = self._safe_float(state.soft_defensive_exit_last_rebuild_at, 0.0)
-        if reprice_minutes > 0 and last_rebuild > 0 and time.time() - last_rebuild < reprice_minutes * 60.0:
+        if (
+            reprice_minutes > 0
+            and last_rebuild > 0
+            and time.time() - last_rebuild < reprice_minutes * 60.0
+        ):
             return current
         return min(max_fraction, current + step)
 
-    def _soft_defensive_close_contracts(self, symbol: str, state: TradeState, target_fraction: float, had_sell_ladder: bool) -> float:
-        closeable = self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder)
+    def _soft_defensive_close_contracts(
+        self,
+        symbol: str,
+        state: TradeState,
+        target_fraction: float,
+        had_sell_ladder: bool,
+    ) -> float:
+        closeable = self._closeable_contracts_for_exit_ladder(
+            symbol, had_sell_ladder=had_sell_ladder
+        )
         closeable = min(max(0.0, closeable), max(0.0, state.position_size))
         if closeable <= 0:
             return 0.0
         target = max(0.0, state.position_size * self._clamp(target_fraction, 0.0, 1.0))
         return self._amount_to_precision(symbol, min(closeable, target))
 
-    def _place_soft_defensive_exit_order(self, symbol: str, context: dict, target_fraction: float, rebuild: bool) -> bool:
+    def _place_soft_defensive_exit_order(
+        self, symbol: str, context: dict, target_fraction: float, rebuild: bool
+    ) -> bool:
         state = self._get_state(symbol)
         if not config.RUNTIME.reduce_only_enabled:
             self._log_event(
@@ -661,7 +773,12 @@ class ExitStrategy:
 
         had_sell_ladder = bool(state.sell_ladder_orders)
         if state.sell_ladder_orders:
-            self._cancel_sell_orders(symbol, reason="soft_defensive_exit_rebuild" if rebuild else "soft_defensive_exit")
+            self._cancel_sell_orders(
+                symbol,
+                reason="soft_defensive_exit_rebuild"
+                if rebuild
+                else "soft_defensive_exit",
+            )
             state = self._get_state(symbol)
             if state.sell_ladder_orders:
                 return True
@@ -671,7 +788,9 @@ class ExitStrategy:
             if state.hard_stop_order:
                 return True
 
-        contracts = self._soft_defensive_close_contracts(symbol, state, target_fraction, had_sell_ladder=had_sell_ladder)
+        contracts = self._soft_defensive_close_contracts(
+            symbol, state, target_fraction, had_sell_ladder=had_sell_ladder
+        )
         if contracts <= 0:
             self._mark_exit_ladder_waiting_for_closeable(
                 symbol,
@@ -743,8 +862,12 @@ class ExitStrategy:
                 "exit_scope": "position",
                 "reason": "soft_defensive_exit_partial",
                 "soft_defensive_fraction": target_fraction,
-                "soft_defensive_drawdown": self._safe_float(context.get("drawdown"), 0.0),
-                "soft_defensive_btc_return": self._safe_float(context.get("btc_return"), 0.0),
+                "soft_defensive_drawdown": self._safe_float(
+                    context.get("drawdown"), 0.0
+                ),
+                "soft_defensive_btc_return": self._safe_float(
+                    context.get("btc_return"), 0.0
+                ),
             }
         ]
         state.sell_ladder_mode = "soft_defensive_exit"
@@ -754,7 +877,9 @@ class ExitStrategy:
             f"signal={context.get('signal_reason', '')}|btc={context.get('btc_reason', '')}"
         )
         state.soft_defensive_exit_fraction = target_fraction
-        state.soft_defensive_exit_activated_at = state.soft_defensive_exit_activated_at or now
+        state.soft_defensive_exit_activated_at = (
+            state.soft_defensive_exit_activated_at or now
+        )
         state.soft_defensive_exit_last_rebuild_at = now
         state.frozen_no_more_buys = True
         self._refresh_active_side(state)
@@ -762,7 +887,9 @@ class ExitStrategy:
         self._log_event(
             "WARNING",
             f"Soft defensive partial exit placed for {symbol}: contracts={contracts} price={price}",
-            event="soft_defensive_exit_placed" if not rebuild else "soft_defensive_exit_rebuilt",
+            event="soft_defensive_exit_placed"
+            if not rebuild
+            else "soft_defensive_exit_rebuilt",
             symbol=symbol,
             side=config.EXIT_SIDE,
             order_id=order_id,
@@ -784,7 +911,9 @@ class ExitStrategy:
         )
         return True
 
-    def _maybe_apply_soft_defensive_exit(self, symbol: str, signal: Optional[dict] = None) -> bool:
+    def _maybe_apply_soft_defensive_exit(
+        self, symbol: str, signal: Optional[dict] = None
+    ) -> bool:
         state = self._get_state(symbol)
         if state.position_size <= 0 or state.entry_price <= 0:
             return False
@@ -795,7 +924,9 @@ class ExitStrategy:
             or state.soft_defensive_exit_fraction > 0
         )
         reference_price, _ = self._fetch_reference_price(symbol)
-        context = self._soft_defensive_exit_context(symbol, signal, reference_price=reference_price)
+        context = self._soft_defensive_exit_context(
+            symbol, signal, reference_price=reference_price
+        )
         active = bool(context.get("ok"))
         confirmations = self._update_soft_defensive_confirmation(state, signal, active)
         required = max(1, int(config.STRATEGY.soft_defensive_exit_confirmations))
@@ -803,7 +934,9 @@ class ExitStrategy:
         if not active:
             if state.sell_ladder_mode == "soft_defensive_exit":
                 if state.sell_ladder_orders:
-                    self._cancel_sell_orders(symbol, reason="soft_defensive_exit_recovered")
+                    self._cancel_sell_orders(
+                        symbol, reason="soft_defensive_exit_recovered"
+                    )
                     state = self._get_state(symbol)
                     if state.sell_ladder_orders:
                         return True
@@ -821,12 +954,22 @@ class ExitStrategy:
                     side=config.EXIT_SIDE,
                     position_size=state.position_size,
                     entry_price=state.entry_price,
-                    reason=str(context.get("block_reason") or "soft_defensive_exit_recovered"),
+                    reason=str(
+                        context.get("block_reason") or "soft_defensive_exit_recovered"
+                    ),
                 )
                 return True
             if had_soft_defensive_wait:
-                signal_valid = bool(signal and signal.get("valid") and self.signal_cache.get("benchmark_ok"))
-                if signal_valid and not self._is_managed_exit_mode(state.sell_ladder_mode) and not state.hard_stop_order:
+                signal_valid = bool(
+                    signal
+                    and signal.get("valid")
+                    and self.signal_cache.get("benchmark_ok")
+                )
+                if (
+                    signal_valid
+                    and not self._is_managed_exit_mode(state.sell_ladder_mode)
+                    and not state.hard_stop_order
+                ):
                     state.frozen_no_more_buys = False
                 self._reset_soft_defensive_state(state)
                 self._refresh_active_side(state)
@@ -862,17 +1005,24 @@ class ExitStrategy:
             if desired_fraction <= current_fraction + 1e-12:
                 self._save_state()
                 return True
-            return self._place_soft_defensive_exit_order(symbol, context, desired_fraction, rebuild=True)
+            return self._place_soft_defensive_exit_order(
+                symbol, context, desired_fraction, rebuild=True
+            )
 
         target_fraction = self._soft_defensive_target_fraction(state)
         if target_fraction <= 0:
             return False
-        return self._place_soft_defensive_exit_order(symbol, context, target_fraction, rebuild=False)
+        return self._place_soft_defensive_exit_order(
+            symbol, context, target_fraction, rebuild=False
+        )
 
     def _sell_ladder_markups(self, mode: str = "normal") -> Tuple[float, ...]:
         if mode == "breakeven":
             return tuple(0.0 for _ in config.STRATEGY.ema_breakeven_exit_fractions)
-        return tuple(config.STRATEGY.ema_take_profit_markup for _ in config.STRATEGY.ema_exit_ladder_fractions)
+        return tuple(
+            config.STRATEGY.ema_take_profit_markup
+            for _ in config.STRATEGY.ema_exit_ladder_fractions
+        )
 
     def _reset_exit_runner_state(self, state: TradeState):
         state.exit_runner_active = False
@@ -885,22 +1035,48 @@ class ExitStrategy:
         return mode == "breakeven"
 
     def _is_managed_exit_mode(self, mode: str) -> bool:
-        return self._is_time_exit_mode(mode) or mode in {"account_unload", "controlled_loss_exit", "urgent_time_exit", "soft_defensive_exit"}
+        return self._is_time_exit_mode(mode) or mode in {
+            "account_unload",
+            "controlled_loss_exit",
+            "urgent_time_exit",
+            "soft_defensive_exit",
+        }
 
-    def _position_initial_notional(self, symbol: str, state: Optional[TradeState], fallback_contracts: float, fallback_price: float) -> float:
+    def _position_initial_notional(
+        self,
+        symbol: str,
+        state: Optional[TradeState],
+        fallback_contracts: float,
+        fallback_price: float,
+    ) -> float:
         if not state:
-            return self._contracts_to_notional(symbol, fallback_contracts, fallback_price) if symbol else 0.0
+            return (
+                self._contracts_to_notional(symbol, fallback_contracts, fallback_price)
+                if symbol
+                else 0.0
+            )
 
         initial = self._safe_float(getattr(state, "initial_entry_notional", 0.0), 0.0)
         if initial > 0:
             return initial
 
-        leverage = max(self._safe_float(getattr(state, "leverage", 0.0), 0.0), self._safe_float(config.RISK.leverage, 1.0), 1.0)
-        planned = self._safe_float(getattr(state, "planned_quote_budget", 0.0), 0.0) * leverage
+        leverage = max(
+            self._safe_float(getattr(state, "leverage", 0.0), 0.0),
+            self._safe_float(config.RISK.leverage, 1.0),
+            1.0,
+        )
+        planned = (
+            self._safe_float(getattr(state, "planned_quote_budget", 0.0), 0.0)
+            * leverage
+        )
         if planned > 0:
             return planned
 
-        current = self._contracts_to_notional(symbol, fallback_contracts, fallback_price) if symbol else 0.0
+        current = (
+            self._contracts_to_notional(symbol, fallback_contracts, fallback_price)
+            if symbol
+            else 0.0
+        )
         return current
 
     def _position_ratio_for_exit_ladder(
@@ -910,8 +1086,14 @@ class ExitStrategy:
         total_contracts: float,
         avg_entry_price: float,
     ) -> float:
-        current = self._contracts_to_notional(symbol, total_contracts, avg_entry_price) if symbol else 0.0
-        initial = self._position_initial_notional(symbol, state, total_contracts, avg_entry_price)
+        current = (
+            self._contracts_to_notional(symbol, total_contracts, avg_entry_price)
+            if symbol
+            else 0.0
+        )
+        initial = self._position_initial_notional(
+            symbol, state, total_contracts, avg_entry_price
+        )
         if current <= 0 or initial <= 0:
             return 1.0
         return max(0.0, current / initial)
@@ -931,13 +1113,21 @@ class ExitStrategy:
             return "medium"
         return "heavy"
 
-    def _base_adaptive_exit_ladder(self, ladder_name: str) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
+    def _base_adaptive_exit_ladder(
+        self, ladder_name: str
+    ) -> Tuple[Tuple[float, ...], Tuple[float, ...]]:
         strategy = config.STRATEGY
         if ladder_name == "heavy":
-            return tuple(strategy.ema_exit_heavy_ladder_fractions), tuple(strategy.ema_exit_heavy_ladder_markups)
+            return tuple(strategy.ema_exit_heavy_ladder_fractions), tuple(
+                strategy.ema_exit_heavy_ladder_markups
+            )
         if ladder_name == "medium":
-            return tuple(strategy.ema_exit_medium_ladder_fractions), tuple(strategy.ema_exit_medium_ladder_markups)
-        return tuple(strategy.ema_exit_normal_ladder_fractions), tuple(strategy.ema_exit_normal_ladder_markups)
+            return tuple(strategy.ema_exit_medium_ladder_fractions), tuple(
+                strategy.ema_exit_medium_ladder_markups
+            )
+        return tuple(strategy.ema_exit_normal_ladder_fractions), tuple(
+            strategy.ema_exit_normal_ladder_markups
+        )
 
     def _merge_exit_ladder_steps(self, steps: List[dict]) -> List[dict]:
         merged: List[dict] = []
@@ -946,13 +1136,22 @@ class ExitStrategy:
                 merged.append(dict(step))
                 continue
             markup = self._safe_float(step.get("markup"), 0.0)
-            if merged and not merged[-1].get("runner") and abs(self._safe_float(merged[-1].get("markup"), 0.0) - markup) <= 1e-12:
-                merged[-1]["fraction"] = self._safe_float(merged[-1].get("fraction"), 0.0) + self._safe_float(step.get("fraction"), 0.0)
+            if (
+                merged
+                and not merged[-1].get("runner")
+                and abs(self._safe_float(merged[-1].get("markup"), 0.0) - markup)
+                <= 1e-12
+            ):
+                merged[-1]["fraction"] = self._safe_float(
+                    merged[-1].get("fraction"), 0.0
+                ) + self._safe_float(step.get("fraction"), 0.0)
             else:
                 merged.append(dict(step))
         return merged
 
-    def _controlled_loss_cached_signal(self, symbol: str, signal: Optional[dict] = None) -> dict:
+    def _controlled_loss_cached_signal(
+        self, symbol: str, signal: Optional[dict] = None
+    ) -> dict:
         if isinstance(signal, dict):
             return signal
         cache = getattr(self, "signal_cache", {}) or {}
@@ -960,7 +1159,9 @@ class ExitStrategy:
         cached = symbols.get(symbol) if isinstance(symbols, dict) and symbol else None
         return cached if isinstance(cached, dict) else {}
 
-    def _controlled_loss_signal_pressure_context(self, symbol: str = "", signal: Optional[dict] = None) -> dict:
+    def _controlled_loss_signal_pressure_context(
+        self, symbol: str = "", signal: Optional[dict] = None
+    ) -> dict:
         strategy = config.STRATEGY
         signal = self._controlled_loss_cached_signal(symbol, signal)
         directional_gap = 0.0
@@ -975,7 +1176,9 @@ class ExitStrategy:
                     break
 
         adverse_gap = max(0.0, -directional_gap)
-        reference = max(1e-12, self._safe_float(strategy.controlled_loss_macro_gap_reference, 0.0))
+        reference = max(
+            1e-12, self._safe_float(strategy.controlled_loss_macro_gap_reference, 0.0)
+        )
         adverse_intensity = self._clamp(adverse_gap / reference, 0.0, 1.0)
         return {
             "data_valid": data_valid,
@@ -985,25 +1188,44 @@ class ExitStrategy:
             "signal_reason": signal_reason,
         }
 
-    def _controlled_loss_macro_pressure_context(self, symbol: str = "", signal: Optional[dict] = None) -> dict:
+    def _controlled_loss_macro_pressure_context(
+        self, symbol: str = "", signal: Optional[dict] = None
+    ) -> dict:
         strategy = config.STRATEGY
         signal_pressure = self._controlled_loss_signal_pressure_context(symbol, signal)
-        signal_intensity = self._safe_float(signal_pressure.get("adverse_intensity"), 0.0)
+        signal_intensity = self._safe_float(
+            signal_pressure.get("adverse_intensity"), 0.0
+        )
         directional_gap = self._safe_float(signal_pressure.get("directional_gap"), 0.0)
-        signal_reason = str(signal_pressure.get("signal_reason") or "signal_unavailable")
+        signal_reason = str(
+            signal_pressure.get("signal_reason") or "signal_unavailable"
+        )
 
         macro_context = self._macro_guard_context()
         overlay_intensity = 0.0
-        time_exit_multiplier = self._safe_float(macro_context.get("time_exit_multiplier"), 1.0)
+        time_exit_multiplier = self._safe_float(
+            macro_context.get("time_exit_multiplier"), 1.0
+        )
         if time_exit_multiplier < 1.0:
-            overlay_intensity = max(overlay_intensity, self._clamp(1.0 - time_exit_multiplier, 0.0, 1.0))
-        budget_key = "short_budget_multiplier" if config.POSITION_SIDE == "short" else "long_budget_multiplier"
+            overlay_intensity = max(
+                overlay_intensity, self._clamp(1.0 - time_exit_multiplier, 0.0, 1.0)
+            )
+        budget_key = (
+            "short_budget_multiplier"
+            if config.POSITION_SIDE == "short"
+            else "long_budget_multiplier"
+        )
         budget_multiplier = self._safe_float(macro_context.get(budget_key), 1.0)
         if budget_multiplier < 1.0:
-            overlay_intensity = max(overlay_intensity, self._clamp(1.0 - budget_multiplier, 0.0, 1.0))
+            overlay_intensity = max(
+                overlay_intensity, self._clamp(1.0 - budget_multiplier, 0.0, 1.0)
+            )
 
         intensity = max(signal_intensity, overlay_intensity)
-        max_speed = max(1.0, self._safe_float(strategy.controlled_loss_macro_max_speed_multiplier, 1.0))
+        max_speed = max(
+            1.0,
+            self._safe_float(strategy.controlled_loss_macro_max_speed_multiplier, 1.0),
+        )
         speed_multiplier = 1.0 + intensity * (max_speed - 1.0)
         return {
             "macro_intensity": intensity,
@@ -1018,14 +1240,22 @@ class ExitStrategy:
             "budget_multiplier": budget_multiplier,
         }
 
-    def _controlled_loss_volatility_pressure_context(self, symbol: str = "", signal: Optional[dict] = None) -> dict:
+    def _controlled_loss_volatility_pressure_context(
+        self, symbol: str = "", signal: Optional[dict] = None
+    ) -> dict:
         strategy = config.STRATEGY
         signal = self._controlled_loss_cached_signal(symbol, signal)
         signal_pressure = self._controlled_loss_signal_pressure_context(symbol, signal)
-        adverse_intensity = self._safe_float(signal_pressure.get("adverse_intensity"), 0.0)
-        reference = self._safe_float(getattr(strategy, "controlled_loss_volatility_reference", 0.0), 0.0)
+        adverse_intensity = self._safe_float(
+            signal_pressure.get("adverse_intensity"), 0.0
+        )
+        reference = self._safe_float(
+            getattr(strategy, "controlled_loss_volatility_reference", 0.0), 0.0
+        )
         if reference <= 0:
-            reference = self._safe_float(getattr(strategy, "volatility_reference", 0.0), 0.0)
+            reference = self._safe_float(
+                getattr(strategy, "volatility_reference", 0.0), 0.0
+            )
         reference = max(reference, 1e-12)
 
         if not getattr(strategy, "controlled_loss_volatility_speed_enabled", True):
@@ -1048,24 +1278,49 @@ class ExitStrategy:
         local_volatility = max(volatility, atr_rate)
         volatility_ratio = local_volatility / reference if local_volatility > 0 else 0.0
 
-        daily_volatility_multiplier = max(0.0, self._safe_float(signal.get("daily_volatility_multiplier"), 1.0))
+        daily_volatility_multiplier = max(
+            0.0, self._safe_float(signal.get("daily_volatility_multiplier"), 1.0)
+        )
         if daily_volatility_multiplier > 1.0:
             volatility_ratio = max(volatility_ratio, daily_volatility_multiplier)
 
-        signal_volatility_multiplier = max(0.0, self._safe_float(signal.get("volatility_multiplier"), 1.0))
+        signal_volatility_multiplier = max(
+            0.0, self._safe_float(signal.get("volatility_multiplier"), 1.0)
+        )
         if signal_volatility_multiplier > 1.0:
             volatility_ratio = max(volatility_ratio, signal_volatility_multiplier)
 
-        trigger = max(0.0, self._safe_float(getattr(strategy, "controlled_loss_volatility_trigger_multiplier", 1.5), 1.5))
+        trigger = max(
+            0.0,
+            self._safe_float(
+                getattr(strategy, "controlled_loss_volatility_trigger_multiplier", 1.5),
+                1.5,
+            ),
+        )
         if trigger <= 0:
             raw_intensity = volatility_ratio
         else:
             raw_intensity = max(0.0, (volatility_ratio / trigger) - 1.0)
-        volatility_intensity = self._clamp(raw_intensity, 0.0, 1.0) * self._clamp(adverse_intensity, 0.0, 1.0)
+        volatility_intensity = self._clamp(raw_intensity, 0.0, 1.0) * self._clamp(
+            adverse_intensity, 0.0, 1.0
+        )
 
-        max_speed = max(1.0, self._safe_float(getattr(strategy, "controlled_loss_volatility_max_speed_multiplier", 1.0), 1.0))
-        speed_multiplier = max_speed ** volatility_intensity
-        max_curve = max(1.0, self._safe_float(getattr(strategy, "controlled_loss_volatility_exponent", 1.0), 1.0))
+        max_speed = max(
+            1.0,
+            self._safe_float(
+                getattr(
+                    strategy, "controlled_loss_volatility_max_speed_multiplier", 1.0
+                ),
+                1.0,
+            ),
+        )
+        speed_multiplier = max_speed**volatility_intensity
+        max_curve = max(
+            1.0,
+            self._safe_float(
+                getattr(strategy, "controlled_loss_volatility_exponent", 1.0), 1.0
+            ),
+        )
         exponential_curve = 1.0 + volatility_intensity * (max_curve - 1.0)
         if volatility_intensity <= 0:
             reason = (
@@ -1129,15 +1384,31 @@ class ExitStrategy:
 
         strategy = config.STRATEGY
         min_move = self._clamp(
-            self._safe_float(getattr(strategy, "controlled_loss_min_move_fraction", 0.1), 0.1),
+            self._safe_float(
+                getattr(strategy, "controlled_loss_min_move_fraction", 0.1), 0.1
+            ),
             0.0,
             1.0,
         )
-        ramp_minutes = max(0.0, self._safe_float(getattr(strategy, "controlled_loss_ramp_minutes", 24.0 * 60.0), 0.0))
+        ramp_minutes = max(
+            0.0,
+            self._safe_float(
+                getattr(strategy, "controlled_loss_ramp_minutes", 24.0 * 60.0), 0.0
+            ),
+        )
         pressure = self._controlled_loss_macro_pressure_context(symbol, signal)
-        volatility_pressure = self._controlled_loss_volatility_pressure_context(symbol, signal)
-        macro_speed_multiplier = max(1.0, self._safe_float(pressure.get("speed_multiplier"), 1.0))
-        volatility_speed_multiplier = max(1.0, self._safe_float(volatility_pressure.get("volatility_speed_multiplier"), 1.0))
+        volatility_pressure = self._controlled_loss_volatility_pressure_context(
+            symbol, signal
+        )
+        macro_speed_multiplier = max(
+            1.0, self._safe_float(pressure.get("speed_multiplier"), 1.0)
+        )
+        volatility_speed_multiplier = max(
+            1.0,
+            self._safe_float(
+                volatility_pressure.get("volatility_speed_multiplier"), 1.0
+            ),
+        )
         speed_multiplier = macro_speed_multiplier * volatility_speed_multiplier
         move_fraction = min_move
         elapsed_minutes = 0.0
@@ -1145,16 +1416,32 @@ class ExitStrategy:
         effective_progress = 0.0
         ramp_profile = "linear"
 
-        if state.sell_ladder_mode == "controlled_loss_exit" and state.time_exit_activated_at:
-            elapsed_minutes = max(0.0, (time.time() - state.time_exit_activated_at) / 60.0)
-            linear_progress = 1.0 if ramp_minutes <= 0 else (elapsed_minutes * speed_multiplier) / ramp_minutes
+        if (
+            state.sell_ladder_mode == "controlled_loss_exit"
+            and state.time_exit_activated_at
+        ):
+            elapsed_minutes = max(
+                0.0, (time.time() - state.time_exit_activated_at) / 60.0
+            )
+            linear_progress = (
+                1.0
+                if ramp_minutes <= 0
+                else (elapsed_minutes * speed_multiplier) / ramp_minutes
+            )
             effective_progress = linear_progress
-            volatility_intensity = self._safe_float(volatility_pressure.get("volatility_intensity"), 0.0)
+            volatility_intensity = self._safe_float(
+                volatility_pressure.get("volatility_intensity"), 0.0
+            )
             if volatility_intensity > 0.0 and linear_progress > 0.0:
                 if linear_progress >= 1.0:
                     effective_progress = 1.0
                 else:
-                    curve = max(1.0, self._safe_float(volatility_pressure.get("volatility_exponential_curve"), 1.0))
+                    curve = max(
+                        1.0,
+                        self._safe_float(
+                            volatility_pressure.get("volatility_exponential_curve"), 1.0
+                        ),
+                    )
                     exponential_progress = 1.0 - math.exp(-linear_progress * curve)
                     effective_progress = max(linear_progress, exponential_progress)
                 ramp_profile = "exponential_volatility"
@@ -1168,7 +1455,8 @@ class ExitStrategy:
             if step_minutes > 0 and step_increase > 0:
                 overdue_minutes = max(
                     0.0,
-                    self._position_held_minutes(state) - max(0.0, strategy.hard_time_exit_after_minutes),
+                    self._position_held_minutes(state)
+                    - max(0.0, strategy.hard_time_exit_after_minutes),
                 )
                 hard_move = min_move + (overdue_minutes // step_minutes) * step_increase
                 move_fraction = max(move_fraction, hard_move)
@@ -1198,7 +1486,9 @@ class ExitStrategy:
         signal: Optional[dict] = None,
     ) -> float:
         return self._safe_float(
-            self._controlled_loss_ramp_context(state, symbol=symbol, signal=signal).get("move_fraction"),
+            self._controlled_loss_ramp_context(state, symbol=symbol, signal=signal).get(
+                "move_fraction"
+            ),
             0.0,
         )
 
@@ -1217,7 +1507,9 @@ class ExitStrategy:
             state = self._get_state(symbol)
 
         age_hours = self._exit_ladder_age_hours(state)
-        position_ratio = self._position_ratio_for_exit_ladder(symbol, state, total_contracts, avg_entry_price)
+        position_ratio = self._position_ratio_for_exit_ladder(
+            symbol, state, total_contracts, avg_entry_price
+        )
         context = {
             "ladder_name": mode,
             "position_ratio": position_ratio,
@@ -1228,7 +1520,10 @@ class ExitStrategy:
 
         if mode == "breakeven":
             fractions = tuple(strategy.ema_breakeven_exit_fractions)
-            steps = [{"fraction": fraction, "markup": 0.0, "runner": False} for fraction in fractions]
+            steps = [
+                {"fraction": fraction, "markup": 0.0, "runner": False}
+                for fraction in fractions
+            ]
             context["ladder_name"] = "breakeven"
             return steps, context
 
@@ -1242,7 +1537,9 @@ class ExitStrategy:
 
         if mode == "controlled_loss_exit":
             fractions = tuple(strategy.ema_exit_ladder_fractions)
-            ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol, signal=signal)
+            ramp_context = self._controlled_loss_ramp_context(
+                state, symbol=symbol, signal=signal
+            )
             move_fraction = self._safe_float(ramp_context.get("move_fraction"), 0.0)
             steps = [
                 {"fraction": fraction, "markup": move_fraction, "runner": False}
@@ -1252,29 +1549,75 @@ class ExitStrategy:
             context.update(
                 {
                     "controlled_loss_move_fraction": move_fraction,
-                    "controlled_loss_macro_intensity": self._safe_float(ramp_context.get("macro_intensity"), 0.0),
-                    "controlled_loss_signal_intensity": self._safe_float(ramp_context.get("signal_intensity"), 0.0),
-                    "controlled_loss_overlay_intensity": self._safe_float(ramp_context.get("overlay_intensity"), 0.0),
-                    "controlled_loss_speed_multiplier": self._safe_float(ramp_context.get("speed_multiplier"), 1.0),
-                    "controlled_loss_macro_speed_multiplier": self._safe_float(ramp_context.get("macro_speed_multiplier"), 1.0),
-                    "controlled_loss_volatility_intensity": self._safe_float(ramp_context.get("volatility_intensity"), 0.0),
-                    "controlled_loss_volatility_speed_multiplier": self._safe_float(ramp_context.get("volatility_speed_multiplier"), 1.0),
-                    "controlled_loss_volatility_exponential_curve": self._safe_float(ramp_context.get("volatility_exponential_curve"), 1.0),
-                    "controlled_loss_volatility_ratio": self._safe_float(ramp_context.get("volatility_ratio"), 0.0),
-                    "controlled_loss_local_volatility": self._safe_float(ramp_context.get("local_volatility"), 0.0),
-                    "controlled_loss_atr_rate": self._safe_float(ramp_context.get("atr_rate"), 0.0),
-                    "controlled_loss_daily_volatility_multiplier": self._safe_float(ramp_context.get("daily_volatility_multiplier"), 1.0),
-                    "controlled_loss_volatility_reference": self._safe_float(ramp_context.get("volatility_reference"), 0.0),
-                    "controlled_loss_volatility_trigger_multiplier": self._safe_float(ramp_context.get("volatility_trigger_multiplier"), 0.0),
-                    "controlled_loss_linear_progress": self._safe_float(ramp_context.get("linear_progress"), 0.0),
-                    "controlled_loss_effective_progress": self._safe_float(ramp_context.get("effective_progress"), 0.0),
-                    "controlled_loss_directional_gap": self._safe_float(ramp_context.get("directional_gap"), 0.0),
-                    "controlled_loss_elapsed_minutes": self._safe_float(ramp_context.get("elapsed_minutes"), 0.0),
-                    "controlled_loss_ramp_minutes": self._safe_float(ramp_context.get("ramp_minutes"), 0.0),
-                    "controlled_loss_macro_regime": str(ramp_context.get("macro_regime") or "neutral"),
-                    "controlled_loss_macro_reason": str(ramp_context.get("macro_reason") or "neutral"),
-                    "controlled_loss_volatility_reason": str(ramp_context.get("volatility_reason") or "neutral"),
-                    "controlled_loss_ramp_profile": str(ramp_context.get("ramp_profile") or "linear"),
+                    "controlled_loss_macro_intensity": self._safe_float(
+                        ramp_context.get("macro_intensity"), 0.0
+                    ),
+                    "controlled_loss_signal_intensity": self._safe_float(
+                        ramp_context.get("signal_intensity"), 0.0
+                    ),
+                    "controlled_loss_overlay_intensity": self._safe_float(
+                        ramp_context.get("overlay_intensity"), 0.0
+                    ),
+                    "controlled_loss_speed_multiplier": self._safe_float(
+                        ramp_context.get("speed_multiplier"), 1.0
+                    ),
+                    "controlled_loss_macro_speed_multiplier": self._safe_float(
+                        ramp_context.get("macro_speed_multiplier"), 1.0
+                    ),
+                    "controlled_loss_volatility_intensity": self._safe_float(
+                        ramp_context.get("volatility_intensity"), 0.0
+                    ),
+                    "controlled_loss_volatility_speed_multiplier": self._safe_float(
+                        ramp_context.get("volatility_speed_multiplier"), 1.0
+                    ),
+                    "controlled_loss_volatility_exponential_curve": self._safe_float(
+                        ramp_context.get("volatility_exponential_curve"), 1.0
+                    ),
+                    "controlled_loss_volatility_ratio": self._safe_float(
+                        ramp_context.get("volatility_ratio"), 0.0
+                    ),
+                    "controlled_loss_local_volatility": self._safe_float(
+                        ramp_context.get("local_volatility"), 0.0
+                    ),
+                    "controlled_loss_atr_rate": self._safe_float(
+                        ramp_context.get("atr_rate"), 0.0
+                    ),
+                    "controlled_loss_daily_volatility_multiplier": self._safe_float(
+                        ramp_context.get("daily_volatility_multiplier"), 1.0
+                    ),
+                    "controlled_loss_volatility_reference": self._safe_float(
+                        ramp_context.get("volatility_reference"), 0.0
+                    ),
+                    "controlled_loss_volatility_trigger_multiplier": self._safe_float(
+                        ramp_context.get("volatility_trigger_multiplier"), 0.0
+                    ),
+                    "controlled_loss_linear_progress": self._safe_float(
+                        ramp_context.get("linear_progress"), 0.0
+                    ),
+                    "controlled_loss_effective_progress": self._safe_float(
+                        ramp_context.get("effective_progress"), 0.0
+                    ),
+                    "controlled_loss_directional_gap": self._safe_float(
+                        ramp_context.get("directional_gap"), 0.0
+                    ),
+                    "controlled_loss_elapsed_minutes": self._safe_float(
+                        ramp_context.get("elapsed_minutes"), 0.0
+                    ),
+                    "controlled_loss_ramp_minutes": self._safe_float(
+                        ramp_context.get("ramp_minutes"), 0.0
+                    ),
+                    "controlled_loss_macro_regime": str(
+                        ramp_context.get("macro_regime") or "neutral"
+                    ),
+                    "controlled_loss_macro_reason": str(
+                        ramp_context.get("macro_reason") or "neutral"
+                    ),
+                    "controlled_loss_volatility_reason": str(
+                        ramp_context.get("volatility_reason") or "neutral"
+                    ),
+                    "controlled_loss_ramp_profile": str(
+                        ramp_context.get("ramp_profile") or "linear"
+                    ),
                 }
             )
             return steps, context
@@ -1294,19 +1637,31 @@ class ExitStrategy:
             settings = config.EXTERNAL_PRICE_FEED
             steps = []
             runner_fraction = 0.0
-            for fraction, markup in zip(settings.tightened_ladder_fractions, settings.tightened_ladder_markups):
+            for fraction, markup in zip(
+                settings.tightened_ladder_fractions, settings.tightened_ladder_markups
+            ):
                 fraction = max(0.0, self._safe_float(fraction, 0.0))
                 if markup is None:
                     runner_fraction += fraction
                     continue
-                steps.append({"fraction": fraction, "markup": max(0.0, self._safe_float(markup, 0.0)), "runner": False})
+                steps.append(
+                    {
+                        "fraction": fraction,
+                        "markup": max(0.0, self._safe_float(markup, 0.0)),
+                        "runner": False,
+                    }
+                )
             if runner_fraction > 0:
-                steps.append({"fraction": runner_fraction, "markup": 0.0, "runner": True})
+                steps.append(
+                    {"fraction": runner_fraction, "markup": 0.0, "runner": True}
+                )
                 context["runner_enabled"] = True
                 context["runner_fraction"] = runner_fraction
             context["ladder_name"] = "external_tightened"
             context["external_spread_bps"] = external_exit.get("spread_bps", 0.0)
-            context["external_reason"] = external_exit.get("reason", "external_exit_tightened")
+            context["external_reason"] = external_exit.get(
+                "reason", "external_exit_tightened"
+            )
             return self._merge_exit_ladder_steps(steps), context
 
         ladder_name = self._adaptive_exit_ladder_name(position_ratio)
@@ -1327,16 +1682,30 @@ class ExitStrategy:
 
         fixed_steps: List[dict] = []
         runner_fraction = 0.0
-        trailing_enabled = bool(strategy.ema_exit_trailing_enabled and use_trailing_exit)
+        trailing_enabled = bool(
+            strategy.ema_exit_trailing_enabled and use_trailing_exit
+        )
         if trailing_enabled and runner_allowed:
-            fixed_fraction = self._clamp(strategy.ema_exit_trailing_fixed_fraction, 0.0, 1.0)
-            fixed_markup = max(0.0, markups[0] if markups else strategy.ema_take_profit_markup)
-            if first_cap_after > 0 and first_markup_cap > 0 and age_hours >= first_cap_after:
+            fixed_fraction = self._clamp(
+                strategy.ema_exit_trailing_fixed_fraction, 0.0, 1.0
+            )
+            fixed_markup = max(
+                0.0, markups[0] if markups else strategy.ema_take_profit_markup
+            )
+            if (
+                first_cap_after > 0
+                and first_markup_cap > 0
+                and age_hours >= first_cap_after
+            ):
                 fixed_markup = min(fixed_markup, first_markup_cap)
-            fixed_steps.append({"fraction": fixed_fraction, "markup": fixed_markup, "runner": False})
+            fixed_steps.append(
+                {"fraction": fixed_fraction, "markup": fixed_markup, "runner": False}
+            )
             runner_fraction = max(0.0, 1.0 - fixed_fraction)
             if runner_fraction > 0:
-                fixed_steps.append({"fraction": runner_fraction, "markup": 0.0, "runner": True})
+                fixed_steps.append(
+                    {"fraction": runner_fraction, "markup": 0.0, "runner": True}
+                )
                 context["runner_enabled"] = True
                 context["runner_fraction"] = runner_fraction
                 context["trailing_exit"] = True
@@ -1350,14 +1719,27 @@ class ExitStrategy:
                 runner_fraction += fraction
                 continue
 
-            if first_cap_after > 0 and first_markup_cap > 0 and age_hours >= first_cap_after and fixed_steps == []:
+            if (
+                first_cap_after > 0
+                and first_markup_cap > 0
+                and age_hours >= first_cap_after
+                and fixed_steps == []
+            ):
                 markup = min(markup, first_markup_cap)
-            if max_markup_after > 0 and max_markup > 0 and age_hours >= max_markup_after:
+            if (
+                max_markup_after > 0
+                and max_markup > 0
+                and age_hours >= max_markup_after
+            ):
                 markup = min(markup, max_markup)
-            fixed_steps.append({"fraction": fraction, "markup": markup, "runner": False})
+            fixed_steps.append(
+                {"fraction": fraction, "markup": markup, "runner": False}
+            )
 
         if runner_fraction > 0:
-            fixed_steps.append({"fraction": runner_fraction, "markup": 0.0, "runner": True})
+            fixed_steps.append(
+                {"fraction": runner_fraction, "markup": 0.0, "runner": True}
+            )
             context["runner_enabled"] = True
             context["runner_fraction"] = runner_fraction
 
@@ -1370,22 +1752,44 @@ class ExitStrategy:
         steps: List[dict],
         state: Optional[TradeState],
     ) -> Tuple[List[Tuple[int, dict, float]], float]:
-        fixed_steps = [(index, step) for index, step in enumerate(steps, start=1) if not step.get("runner")]
-        fixed_fraction_total = sum(self._safe_float(step.get("fraction"), 0.0) for _, step in fixed_steps)
-        runner_fraction_total = sum(self._safe_float(step.get("fraction"), 0.0) for step in steps if step.get("runner"))
+        fixed_steps = [
+            (index, step)
+            for index, step in enumerate(steps, start=1)
+            if not step.get("runner")
+        ]
+        fixed_fraction_total = sum(
+            self._safe_float(step.get("fraction"), 0.0) for _, step in fixed_steps
+        )
+        runner_fraction_total = sum(
+            self._safe_float(step.get("fraction"), 0.0)
+            for step in steps
+            if step.get("runner")
+        )
 
         fixed_contracts = ladder_contracts
         runner_contracts = 0.0
         if runner_fraction_total > 0 and fixed_fraction_total > 0:
-            existing_runner = self._safe_float(getattr(state, "exit_runner_contracts", 0.0), 0.0) if state else 0.0
+            existing_runner = (
+                self._safe_float(getattr(state, "exit_runner_contracts", 0.0), 0.0)
+                if state
+                else 0.0
+            )
             if existing_runner > 0:
-                runner_contracts = self._amount_to_precision(symbol, min(ladder_contracts, existing_runner))
-                fixed_contracts = self._amount_to_precision(symbol, max(0.0, ladder_contracts - runner_contracts))
+                runner_contracts = self._amount_to_precision(
+                    symbol, min(ladder_contracts, existing_runner)
+                )
+                fixed_contracts = self._amount_to_precision(
+                    symbol, max(0.0, ladder_contracts - runner_contracts)
+                )
             else:
-                fixed_target = self._amount_to_precision(symbol, ladder_contracts * min(1.0, fixed_fraction_total))
+                fixed_target = self._amount_to_precision(
+                    symbol, ladder_contracts * min(1.0, fixed_fraction_total)
+                )
                 if 0 < fixed_target < ladder_contracts:
                     fixed_contracts = fixed_target
-                    runner_contracts = self._amount_to_precision(symbol, max(0.0, ladder_contracts - fixed_contracts))
+                    runner_contracts = self._amount_to_precision(
+                        symbol, max(0.0, ladder_contracts - fixed_contracts)
+                    )
 
         if fixed_contracts <= 0 and runner_contracts <= 0 and ladder_contracts > 0:
             fixed_contracts = ladder_contracts
@@ -1400,12 +1804,18 @@ class ExitStrategy:
             if item_index == len(fixed_steps) - 1 or fixed_fraction_total <= 0:
                 contracts = self._amount_to_precision(symbol, remaining)
             else:
-                stage_fraction = self._safe_float(step.get("fraction"), 0.0) / fixed_fraction_total
-                contracts = self._amount_to_precision(symbol, min(fixed_contracts * stage_fraction, remaining))
+                stage_fraction = (
+                    self._safe_float(step.get("fraction"), 0.0) / fixed_fraction_total
+                )
+                contracts = self._amount_to_precision(
+                    symbol, min(fixed_contracts * stage_fraction, remaining)
+                )
             if contracts <= 0:
                 continue
             if allocated + contracts > fixed_contracts:
-                contracts = self._amount_to_precision(symbol, max(0.0, fixed_contracts - allocated))
+                contracts = self._amount_to_precision(
+                    symbol, max(0.0, fixed_contracts - allocated)
+                )
             if contracts <= 0:
                 continue
             allocated += contracts
@@ -1432,19 +1842,31 @@ class ExitStrategy:
 
         multiplier = 1.0
         reasons = []
-        threshold = max(0.0, strategy.dynamic_profit_floor_volatility_multiplier_threshold)
+        threshold = max(
+            0.0, strategy.dynamic_profit_floor_volatility_multiplier_threshold
+        )
         if threshold > 0 and daily_volatility_multiplier >= threshold:
-            multiplier *= self._clamp(strategy.dynamic_profit_floor_high_vol_multiplier, 0.0, 1.0)
+            multiplier *= self._clamp(
+                strategy.dynamic_profit_floor_high_vol_multiplier, 0.0, 1.0
+            )
             reasons.append("high_daily_volatility")
         if self._is_adverse_profit_floor_funding(funding_rate):
-            multiplier *= self._clamp(strategy.dynamic_profit_floor_adverse_funding_multiplier, 0.0, 1.0)
+            multiplier *= self._clamp(
+                strategy.dynamic_profit_floor_adverse_funding_multiplier, 0.0, 1.0
+            )
             reasons.append("adverse_funding")
         if mode == "urgent_time_exit":
-            multiplier *= self._clamp(strategy.dynamic_profit_floor_urgent_multiplier, 0.0, 1.0)
+            multiplier *= self._clamp(
+                strategy.dynamic_profit_floor_urgent_multiplier, 0.0, 1.0
+            )
             reasons.append("urgent_time_exit")
 
         minimum = max(0.0, strategy.dynamic_profit_floor_min_rate)
-        return max(minimum, base_profit_floor * multiplier), multiplier, "+".join(reasons) if reasons else "neutral"
+        return (
+            max(minimum, base_profit_floor * multiplier),
+            multiplier,
+            "+".join(reasons) if reasons else "neutral",
+        )
 
     def _sell_ladder_signature(
         self,
@@ -1459,9 +1881,17 @@ class ExitStrategy:
         if state is None and symbol:
             state = self._get_state(symbol)
         if total_contracts is None:
-            total_contracts = self._safe_float(getattr(state, "position_size", 0.0), 0.0) if state else 1.0
+            total_contracts = (
+                self._safe_float(getattr(state, "position_size", 0.0), 0.0)
+                if state
+                else 1.0
+            )
         if avg_entry_price is None:
-            avg_entry_price = self._safe_float(getattr(state, "entry_price", 0.0), 0.0) if state else 1.0
+            avg_entry_price = (
+                self._safe_float(getattr(state, "entry_price", 0.0), 0.0)
+                if state
+                else 1.0
+            )
         if total_contracts <= 0:
             total_contracts = 1.0
         if avg_entry_price <= 0:
@@ -1483,7 +1913,9 @@ class ExitStrategy:
             for step in steps
         )
         strategy = config.STRATEGY
-        trailing_enabled = bool(strategy.ema_exit_trailing_enabled and use_trailing_exit)
+        trailing_enabled = bool(
+            strategy.ema_exit_trailing_enabled and use_trailing_exit
+        )
         controlled_loss_signature = ""
         if mode == "controlled_loss_exit":
             controlled_loss_signature = (
@@ -1527,13 +1959,21 @@ class ExitStrategy:
             f"{controlled_loss_signature}"
         )
 
-    def _should_use_split_exit_ladder(self, symbol: str, state: Optional[TradeState], mode: str) -> bool:
+    def _should_use_split_exit_ladder(
+        self, symbol: str, state: Optional[TradeState], mode: str
+    ) -> bool:
         if mode != "normal" or not state or state.position_size <= 0:
             return False
         self._ensure_entry_buckets_initialized(symbol, state)
         eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
         base_contracts = max(0.0, min(state.base_entry_amount, state.position_size))
-        recovery_contracts = max(0.0, min(state.averaging_entry_amount, max(0.0, state.position_size - base_contracts)))
+        recovery_contracts = max(
+            0.0,
+            min(
+                state.averaging_entry_amount,
+                max(0.0, state.position_size - base_contracts),
+            ),
+        )
         return (
             base_contracts > eps
             and recovery_contracts > eps
@@ -1543,7 +1983,13 @@ class ExitStrategy:
     def _split_sell_ladder_signature(self, symbol: str, state: TradeState) -> str:
         self._ensure_entry_buckets_initialized(symbol, state)
         base_contracts = max(0.0, min(state.base_entry_amount, state.position_size))
-        recovery_contracts = max(0.0, min(state.averaging_entry_amount, max(0.0, state.position_size - base_contracts)))
+        recovery_contracts = max(
+            0.0,
+            min(
+                state.averaging_entry_amount,
+                max(0.0, state.position_size - base_contracts),
+            ),
+        )
         base_price = state.base_entry_price or state.entry_price
         base_signature = self._sell_ladder_signature(
             "normal",
@@ -1579,7 +2025,9 @@ class ExitStrategy:
             state = self._get_state(symbol)
         if symbol and self._should_use_split_exit_ladder(symbol, state, mode):
             return self._split_sell_ladder_signature(symbol, state)
-        return self._sell_ladder_signature(mode, symbol, state, total_contracts, avg_entry_price)
+        return self._sell_ladder_signature(
+            mode, symbol, state, total_contracts, avg_entry_price
+        )
 
     def _pending_exit_ladder_signature(
         self,
@@ -1606,11 +2054,15 @@ class ExitStrategy:
         current_signature = str(state.sell_ladder_signature or "")
         expected_signature = self._pending_exit_ladder_signature(mode, symbol, state)
         mode_pending_prefix = f"pending_closeable:{mode}|"
-        if current_signature != expected_signature and not current_signature.startswith(mode_pending_prefix):
+        if current_signature != expected_signature and not current_signature.startswith(
+            mode_pending_prefix
+        ):
             return False
 
         now = time.time()
-        pending_since = self._safe_float(getattr(state, "pending_exit_ladder_since", 0.0), 0.0)
+        pending_since = self._safe_float(
+            getattr(state, "pending_exit_ladder_since", 0.0), 0.0
+        )
         if pending_since <= 0:
             state.pending_exit_ladder_since = now
             self._save_state()
@@ -1666,8 +2118,13 @@ class ExitStrategy:
         state = self._get_state(symbol)
         state.sell_ladder_orders = []
         state.sell_ladder_mode = mode
-        state.sell_ladder_signature = self._pending_exit_ladder_signature(mode, symbol, state)
-        if not state.pending_exit_ladder_since or state.pending_exit_ladder_reason != reason:
+        state.sell_ladder_signature = self._pending_exit_ladder_signature(
+            mode, symbol, state
+        )
+        if (
+            not state.pending_exit_ladder_since
+            or state.pending_exit_ladder_reason != reason
+        ):
             state.pending_exit_ladder_since = time.time()
         state.pending_exit_ladder_reason = reason
         self._refresh_active_side(state)
@@ -1698,7 +2155,9 @@ class ExitStrategy:
             "base_profit_floor": fee_floor if mode == "breakeven" else 0.0,
             "profit_floor": fee_floor if mode == "breakeven" else 0.0,
             "profit_floor_multiplier": 1.0,
-            "profit_floor_reason": "ema_breakeven" if mode == "breakeven" else "ema_take_profit",
+            "profit_floor_reason": "ema_breakeven"
+            if mode == "breakeven"
+            else "ema_take_profit",
             "fee_floor": fee_floor,
             "spread_floor": 0.0,
             "volatility_floor": 0.0,
@@ -1745,7 +2204,13 @@ class ExitStrategy:
             return avg_entry_price * (1 - fee_floor)
         return avg_entry_price * (1 + fee_floor)
 
-    def _sell_price_floor(self, symbol: str, avg_entry_price: float, markup: float, context: Optional[dict] = None) -> float:
+    def _sell_price_floor(
+        self,
+        symbol: str,
+        avg_entry_price: float,
+        markup: float,
+        context: Optional[dict] = None,
+    ) -> float:
         context = context or {}
         mode = str(context.get("mode") or "normal")
         if mode == "breakeven":
@@ -1775,7 +2240,9 @@ class ExitStrategy:
     ) -> float:
         context = context or {}
         breakeven = self._breakeven_exit_price(avg_entry_price)
-        reference_price = self._safe_float(context.get("controlled_reference_price"), 0.0)
+        reference_price = self._safe_float(
+            context.get("controlled_reference_price"), 0.0
+        )
         if reference_price <= 0:
             reference_price, _ = self._fetch_reference_price(symbol)
         if breakeven <= 0 or reference_price <= 0:
@@ -1814,7 +2281,10 @@ class ExitStrategy:
 
         existing_tracked = 0.0
         if state.sell_ladder_orders and not rebuild and not signature_override:
-            existing_tracked = sum(self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders)
+            existing_tracked = sum(
+                self._safe_float(ref.get("amount"), 0.0)
+                for ref in state.sell_ladder_orders
+            )
             return ExitLadderPreflight(
                 ok=False,
                 requested_contracts=requested,
@@ -1870,12 +2340,12 @@ class ExitStrategy:
             reason="ok",
         )
 
-    def _place_sell_ladder(
+    def _parse_exit_ladder_config(
         self,
         ladder_config: Optional[ExitLadderConfig | SellLadderParams | str] = None,
         *args,
         **kwargs,
-    ):
+    ) -> ExitLadderConfig:
         fields = (
             "symbol",
             "total_contracts",
@@ -1896,19 +2366,25 @@ class ExitStrategy:
             else:
                 positional = args
             if len(positional) > len(fields) - len(values):
-                raise TypeError("_place_sell_ladder received too many positional arguments")
-            for name, value in zip(fields[len(values):], positional):
+                raise TypeError(
+                    "_place_sell_ladder received too many positional arguments"
+                )
+            for name, value in zip(fields[len(values) :], positional):
                 values[name] = value
             unexpected = set(kwargs) - set(fields)
             if unexpected:
-                raise TypeError(f"_place_sell_ladder got unexpected keyword argument {sorted(unexpected)[0]!r}")
+                raise TypeError(
+                    f"_place_sell_ladder got unexpected keyword argument {sorted(unexpected)[0]!r}"
+                )
             values.update(kwargs)
             missing = [name for name in fields[:4] if name not in values]
             if missing:
-                raise TypeError(f"_place_sell_ladder missing required argument {missing[0]!r}")
-            ladder_config = ExitLadderConfig(**values)
+                raise TypeError(
+                    f"_place_sell_ladder missing required argument {missing[0]!r}"
+                )
+            return ExitLadderConfig(**values)
         elif isinstance(ladder_config, SellLadderParams):
-            ladder_config = ExitLadderConfig(
+            return ExitLadderConfig(
                 symbol=ladder_config.symbol,
                 total_contracts=ladder_config.total_contracts,
                 avg_entry_price=ladder_config.avg_entry_price,
@@ -1921,9 +2397,23 @@ class ExitStrategy:
                 signal=ladder_config.signal,
             )
         elif args or kwargs:
-            raise TypeError("_place_sell_ladder does not accept extra arguments with ExitLadderConfig")
+            raise TypeError(
+                "_place_sell_ladder does not accept extra arguments with ExitLadderConfig"
+            )
         elif not isinstance(ladder_config, ExitLadderConfig):
-            raise TypeError("_place_sell_ladder requires ExitLadderConfig or SellLadderParams")
+            raise TypeError(
+                "_place_sell_ladder requires ExitLadderConfig or SellLadderParams"
+            )
+
+        return ladder_config
+
+    def _place_sell_ladder(
+        self,
+        ladder_config: Optional[ExitLadderConfig | SellLadderParams | str] = None,
+        *args,
+        **kwargs,
+    ):
+        ladder_config = self._parse_exit_ladder_config(ladder_config, *args, **kwargs)
 
         symbol = ladder_config.symbol
         total_contracts = ladder_config.total_contracts
@@ -1988,7 +2478,10 @@ class ExitStrategy:
             return
         ladder_contracts = preflight.planned_contracts
 
-        if ladder_contracts + max(self._get_min_contracts(symbol) * 1e-9, 1e-12) < total_contracts:
+        if (
+            ladder_contracts + max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+            < total_contracts
+        ):
             self._log_event(
                 "INFO",
                 f"{exit_label} exit ladder capped for {symbol}: closeable={ladder_contracts} position={total_contracts}",
@@ -2013,7 +2506,9 @@ class ExitStrategy:
             use_trailing_exit=use_trailing_exit,
             signal=signal,
         )
-        allocations, runner_contracts = self._exit_ladder_contract_allocations(symbol, ladder_contracts, steps, state)
+        allocations, runner_contracts = self._exit_ladder_contract_allocations(
+            symbol, ladder_contracts, steps, state
+        )
         state.sell_ladder_signature = signature_override or self._sell_ladder_signature(
             mode,
             symbol,
@@ -2033,8 +2528,14 @@ class ExitStrategy:
         exit_planned_orders = 0
         exit_planned_notional = 0.0
         sell_context = self._sell_ladder_context(symbol, mode=mode)
-        sell_context["external_spread_bps"] = self._safe_float(plan_context.get("external_spread_bps"), 0.0)
-        sell_context["external_reason"] = str(plan_context.get("external_reason") or sell_context.get("external_reason") or "unavailable")
+        sell_context["external_spread_bps"] = self._safe_float(
+            plan_context.get("external_spread_bps"), 0.0
+        )
+        sell_context["external_reason"] = str(
+            plan_context.get("external_reason")
+            or sell_context.get("external_reason")
+            or "unavailable"
+        )
         if mode == "controlled_loss_exit":
             for key in (
                 "controlled_loss_macro_intensity",
@@ -2057,12 +2558,18 @@ class ExitStrategy:
                 "controlled_loss_elapsed_minutes",
                 "controlled_loss_ramp_minutes",
             ):
-                sell_context[key] = self._safe_float(plan_context.get(key), self._safe_float(sell_context.get(key), 0.0))
+                sell_context[key] = self._safe_float(
+                    plan_context.get(key), self._safe_float(sell_context.get(key), 0.0)
+                )
             sell_context["controlled_loss_macro_regime"] = str(
-                plan_context.get("controlled_loss_macro_regime") or sell_context.get("controlled_loss_macro_regime") or "neutral"
+                plan_context.get("controlled_loss_macro_regime")
+                or sell_context.get("controlled_loss_macro_regime")
+                or "neutral"
             )
             sell_context["controlled_loss_macro_reason"] = str(
-                plan_context.get("controlled_loss_macro_reason") or sell_context.get("controlled_loss_macro_reason") or "neutral"
+                plan_context.get("controlled_loss_macro_reason")
+                or sell_context.get("controlled_loss_macro_reason")
+                or "neutral"
             )
             sell_context["controlled_loss_volatility_reason"] = str(
                 plan_context.get("controlled_loss_volatility_reason")
@@ -2077,11 +2584,17 @@ class ExitStrategy:
         for index, step, contracts in allocations:
             markup = self._safe_float(step.get("markup"), 0.0)
 
-            adaptive_markup = markup * self._safe_float(sell_context.get("markup_multiplier"), 1.0)
+            adaptive_markup = markup * self._safe_float(
+                sell_context.get("markup_multiplier"), 1.0
+            )
             if mode == "controlled_loss_exit":
-                price = self._controlled_loss_exit_price(symbol, avg_entry_price, markup, context=sell_context)
+                price = self._controlled_loss_exit_price(
+                    symbol, avg_entry_price, markup, context=sell_context
+                )
             else:
-                price = self._sell_price_floor(symbol, avg_entry_price, adaptive_markup, context=sell_context)
+                price = self._sell_price_floor(
+                    symbol, avg_entry_price, adaptive_markup, context=sell_context
+                )
             try:
                 order = self._create_one_way_order(
                     symbol=symbol,
@@ -2095,7 +2608,9 @@ class ExitStrategy:
             except Exception as exc:
                 band_limit = self._price_band_limit_from_error(exc, side=exit_side)
                 if band_limit > 0:
-                    adjusted_price = self._price_inside_htx_band(symbol, price, side=exit_side, limit=band_limit)
+                    adjusted_price = self._price_inside_htx_band(
+                        symbol, price, side=exit_side, limit=band_limit
+                    )
                     try:
                         order = self._create_one_way_order(
                             symbol=symbol,
@@ -2110,7 +2625,9 @@ class ExitStrategy:
                         self._log_event(
                             "WARNING",
                             f"{exit_label} reduce-only price adjusted for HTX band {symbol}: {price}",
-                            event="exit_ladder_rebuilt" if rebuild else "exit_ladder_placed",
+                            event="exit_ladder_rebuilt"
+                            if rebuild
+                            else "exit_ladder_placed",
                             symbol=symbol,
                             side=exit_side,
                             price=price,
@@ -2118,7 +2635,9 @@ class ExitStrategy:
                             reason=f"htx_price_band_adjusted;limit={band_limit:.12f};mode={mode}",
                         )
                     except Exception as retry_exc:
-                        if self._is_reduce_only_amount_exceeds_closeable_error(retry_exc):
+                        if self._is_reduce_only_amount_exceeds_closeable_error(
+                            retry_exc
+                        ):
                             if allocated <= 0:
                                 self._mark_exit_ladder_waiting_for_closeable(
                                     symbol,
@@ -2200,24 +2719,50 @@ class ExitStrategy:
                 "markup": markup,
                 "ladder_name": plan_context.get("ladder_name", mode),
                 "exit_scope": ref_exit_scope,
-                "external_spread_bps": self._safe_float(plan_context.get("external_spread_bps"), 0.0),
+                "external_spread_bps": self._safe_float(
+                    plan_context.get("external_spread_bps"), 0.0
+                ),
                 "operation_id": operation_id,
                 "cycle_id": state.cycle_id,
             }
             if mode == "controlled_loss_exit":
                 ref["loss_move_fraction"] = markup
-                ref["loss_budget_at_placement"] = self._safe_float(sell_context.get("controlled_loss_budget"), 0.0)
-                ref["reference_price_at_placement"] = self._safe_float(sell_context.get("controlled_reference_price"), 0.0)
-                ref["loss_macro_intensity"] = self._safe_float(sell_context.get("controlled_loss_macro_intensity"), 0.0)
-                ref["loss_speed_multiplier"] = self._safe_float(sell_context.get("controlled_loss_speed_multiplier"), 1.0)
-                ref["loss_macro_speed_multiplier"] = self._safe_float(sell_context.get("controlled_loss_macro_speed_multiplier"), 1.0)
-                ref["loss_volatility_intensity"] = self._safe_float(sell_context.get("controlled_loss_volatility_intensity"), 0.0)
-                ref["loss_volatility_speed_multiplier"] = self._safe_float(sell_context.get("controlled_loss_volatility_speed_multiplier"), 1.0)
-                ref["loss_volatility_ratio"] = self._safe_float(sell_context.get("controlled_loss_volatility_ratio"), 0.0)
-                ref["loss_atr_rate"] = self._safe_float(sell_context.get("controlled_loss_atr_rate"), 0.0)
-                ref["loss_ramp_profile"] = str(sell_context.get("controlled_loss_ramp_profile") or "linear")
-                ref["loss_directional_macro_gap"] = self._safe_float(sell_context.get("controlled_loss_directional_gap"), 0.0)
-                ref["loss_macro_regime"] = str(sell_context.get("controlled_loss_macro_regime") or "neutral")
+                ref["loss_budget_at_placement"] = self._safe_float(
+                    sell_context.get("controlled_loss_budget"), 0.0
+                )
+                ref["reference_price_at_placement"] = self._safe_float(
+                    sell_context.get("controlled_reference_price"), 0.0
+                )
+                ref["loss_macro_intensity"] = self._safe_float(
+                    sell_context.get("controlled_loss_macro_intensity"), 0.0
+                )
+                ref["loss_speed_multiplier"] = self._safe_float(
+                    sell_context.get("controlled_loss_speed_multiplier"), 1.0
+                )
+                ref["loss_macro_speed_multiplier"] = self._safe_float(
+                    sell_context.get("controlled_loss_macro_speed_multiplier"), 1.0
+                )
+                ref["loss_volatility_intensity"] = self._safe_float(
+                    sell_context.get("controlled_loss_volatility_intensity"), 0.0
+                )
+                ref["loss_volatility_speed_multiplier"] = self._safe_float(
+                    sell_context.get("controlled_loss_volatility_speed_multiplier"), 1.0
+                )
+                ref["loss_volatility_ratio"] = self._safe_float(
+                    sell_context.get("controlled_loss_volatility_ratio"), 0.0
+                )
+                ref["loss_atr_rate"] = self._safe_float(
+                    sell_context.get("controlled_loss_atr_rate"), 0.0
+                )
+                ref["loss_ramp_profile"] = str(
+                    sell_context.get("controlled_loss_ramp_profile") or "linear"
+                )
+                ref["loss_directional_macro_gap"] = self._safe_float(
+                    sell_context.get("controlled_loss_directional_gap"), 0.0
+                )
+                ref["loss_macro_regime"] = str(
+                    sell_context.get("controlled_loss_macro_regime") or "neutral"
+                )
             state.sell_ladder_orders.append(ref)
             event = "exit_ladder_rebuilt" if rebuild else "exit_ladder_placed"
             action = "rebuilt" if rebuild else "placed"
@@ -2288,8 +2833,12 @@ class ExitStrategy:
                 ),
             )
 
-        planned_fixed_contracts = sum(self._safe_float(contracts, 0.0) for _, _, contracts in allocations)
-        sell_total = sum(self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders)
+        planned_fixed_contracts = sum(
+            self._safe_float(contracts, 0.0) for _, _, contracts in allocations
+        )
+        sell_total = sum(
+            self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders
+        )
         eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
         if sell_total > ladder_contracts + eps:
             self._log_event(
@@ -2340,9 +2889,13 @@ class ExitStrategy:
         signature: str,
     ) -> bool:
         state = self._get_state(symbol)
-        existing_exit_contracts = sum(self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders)
+        existing_exit_contracts = sum(
+            self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders
+        )
         if state.position_size > 0:
-            contracts = min(contracts, max(0.0, state.position_size - existing_exit_contracts))
+            contracts = min(
+                contracts, max(0.0, state.position_size - existing_exit_contracts)
+            )
         contracts = self._amount_to_precision(symbol, contracts)
         if contracts <= 0 or price <= 0:
             return False
@@ -2363,7 +2916,9 @@ class ExitStrategy:
         except Exception as exc:
             band_limit = self._price_band_limit_from_error(exc, side=exit_side)
             if band_limit > 0:
-                adjusted_price = self._price_inside_htx_band(symbol, price, side=exit_side, limit=band_limit)
+                adjusted_price = self._price_inside_htx_band(
+                    symbol, price, side=exit_side, limit=band_limit
+                )
                 try:
                     order = self._create_one_way_order(
                         symbol=symbol,
@@ -2474,14 +3029,16 @@ class ExitStrategy:
     ):
         state = self._get_state(symbol)
         if not self._should_use_split_exit_ladder(symbol, state, mode):
-            self._place_sell_ladder(ExitLadderConfig(
-                symbol,
-                total_contracts,
-                avg_entry_price,
-                rebuild,
-                closeable_contracts=closeable_contracts,
-                mode=mode,
-            ))
+            self._place_sell_ladder(
+                ExitLadderConfig(
+                    symbol,
+                    total_contracts,
+                    avg_entry_price,
+                    rebuild,
+                    closeable_contracts=closeable_contracts,
+                    mode=mode,
+                )
+            )
             return
 
         total_contracts = max(0.0, min(total_contracts, state.position_size))
@@ -2509,17 +3066,32 @@ class ExitStrategy:
         closeable_total = preflight.planned_contracts
 
         base_contracts = max(0.0, min(state.base_entry_amount, state.position_size))
-        recovery_contracts_raw = max(0.0, min(state.averaging_entry_amount, max(0.0, state.position_size - base_contracts)))
-        recovery_contracts = self._amount_to_precision(symbol, min(recovery_contracts_raw, closeable_total))
-        base_closeable = self._amount_to_precision(symbol, min(base_contracts, max(0.0, closeable_total - recovery_contracts)))
+        recovery_contracts_raw = max(
+            0.0,
+            min(
+                state.averaging_entry_amount,
+                max(0.0, state.position_size - base_contracts),
+            ),
+        )
+        recovery_contracts = self._amount_to_precision(
+            symbol, min(recovery_contracts_raw, closeable_total)
+        )
+        base_closeable = self._amount_to_precision(
+            symbol, min(base_contracts, max(0.0, closeable_total - recovery_contracts))
+        )
         signature = self._split_sell_ladder_signature(symbol, state)
         base_price = state.base_entry_price or state.entry_price
 
         if base_closeable <= 0 and recovery_contracts <= 0:
-            self._mark_exit_ladder_waiting_for_closeable(symbol, mode, "no_closeable_position_available")
+            self._mark_exit_ladder_waiting_for_closeable(
+                symbol, mode, "no_closeable_position_available"
+            )
             return
 
-        if closeable_total + max(self._get_min_contracts(symbol) * 1e-9, 1e-12) < total_contracts:
+        if (
+            closeable_total + max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+            < total_contracts
+        ):
             self._log_event(
                 "INFO",
                 f"{config.EXIT_SIDE.title()} split exit ladder capped for {symbol}: closeable={closeable_total} position={total_contracts}",
@@ -2541,17 +3113,19 @@ class ExitStrategy:
         self._save_state()
 
         if base_closeable > 0:
-            self._place_sell_ladder(ExitLadderConfig(
-                symbol,
-                base_contracts,
-                base_price,
-                rebuild,
-                closeable_contracts=base_closeable,
-                mode=mode,
-                exit_scope="base",
-                signature_override=signature,
-                use_trailing_exit=False,
-            ))
+            self._place_sell_ladder(
+                ExitLadderConfig(
+                    symbol,
+                    base_contracts,
+                    base_price,
+                    rebuild,
+                    closeable_contracts=base_closeable,
+                    mode=mode,
+                    exit_scope="base",
+                    signature_override=signature,
+                    use_trailing_exit=False,
+                )
+            )
 
         state = self._get_state(symbol)
         if recovery_contracts > 0:
@@ -2571,7 +3145,9 @@ class ExitStrategy:
             )
 
         state = self._get_state(symbol)
-        sell_total = sum(self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders)
+        sell_total = sum(
+            self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders
+        )
         eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
         if sell_total > closeable_total + eps:
             self._log_event(
@@ -2584,9 +3160,13 @@ class ExitStrategy:
                 position_size=closeable_total,
                 reason="split_exit_amount_exceeds_position",
             )
-            self._cancel_sell_orders(symbol, reason="split_exit_amount_exceeds_position")
+            self._cancel_sell_orders(
+                symbol, reason="split_exit_amount_exceeds_position"
+            )
             return
-        expected_total = self._amount_to_precision(symbol, base_closeable + recovery_contracts)
+        expected_total = self._amount_to_precision(
+            symbol, base_closeable + recovery_contracts
+        )
         if sell_total + eps < expected_total:
             state.sell_ladder_signature = ""
             self._reset_exit_runner_state(state)
@@ -2633,14 +3213,16 @@ class ExitStrategy:
                 mode=mode,
             )
             return
-        self._place_sell_ladder(ExitLadderConfig(
-            symbol,
-            total_contracts,
-            avg_entry_price,
-            rebuild,
-            closeable_contracts=closeable_contracts,
-            mode=mode,
-        ))
+        self._place_sell_ladder(
+            ExitLadderConfig(
+                symbol,
+                total_contracts,
+                avg_entry_price,
+                rebuild,
+                closeable_contracts=closeable_contracts,
+                mode=mode,
+            )
+        )
 
     def _mark_zombie_position(self, symbol: str, reason: str):
         state = self._get_state(symbol)
@@ -2693,7 +3275,9 @@ class ExitStrategy:
         trade_type = ""
         for source in (order, info):
             offset = offset or str(source.get("offset") or "").lower()
-            trade_type = trade_type or str(source.get("trade_type") or source.get("tradeType") or "")
+            trade_type = trade_type or str(
+                source.get("trade_type") or source.get("tradeType") or ""
+            )
 
         if offset == "open":
             return False
@@ -2705,7 +3289,9 @@ class ExitStrategy:
             return True
         return self._order_reduce_only_flag(order) is True
 
-    def _exit_orders_priced_safely(self, symbol: str, orders: List[dict]) -> Tuple[bool, str]:
+    def _exit_orders_priced_safely(
+        self, symbol: str, orders: List[dict]
+    ) -> Tuple[bool, str]:
         state = self._get_state(symbol)
         if state.entry_price <= 0:
             return False, "unknown_exit_order_entry_price_missing"
@@ -2723,12 +3309,20 @@ class ExitStrategy:
                 return False, "unknown_exit_order_price_missing"
             if config.POSITION_SIDE == "short":
                 if price > floor_price + eps:
-                    return False, f"unknown_exit_order_above_profit_floor;floor={floor_price:.12f}"
+                    return (
+                        False,
+                        f"unknown_exit_order_above_profit_floor;floor={floor_price:.12f}",
+                    )
             elif price < floor_price - eps:
-                return False, f"unknown_exit_order_below_profit_floor;floor={floor_price:.12f}"
+                return (
+                    False,
+                    f"unknown_exit_order_below_profit_floor;floor={floor_price:.12f}",
+                )
         return True, "exit_orders_price_safe"
 
-    def _unknown_exit_adoption_reason(self, symbol: str, orders: List[dict], remaining: float) -> Tuple[bool, str]:
+    def _unknown_exit_adoption_reason(
+        self, symbol: str, orders: List[dict], remaining: float
+    ) -> Tuple[bool, str]:
         if remaining <= 0:
             return False, "unknown_exit_order_empty"
 
@@ -2755,10 +3349,14 @@ class ExitStrategy:
 
         return False, "unknown_exit_orders_without_reduce_only_proof"
 
-    def _should_cancel_hidden_exit_orders(self, orders: List[dict], reason: str) -> bool:
+    def _should_cancel_hidden_exit_orders(
+        self, orders: List[dict], reason: str
+    ) -> bool:
         if not config.STRATEGY.cancel_unsafe_hidden_close_orders:
             return False
-        if not orders or not all(self._is_hidden_close_order(order) for order in orders):
+        if not orders or not all(
+            self._is_hidden_close_order(order) for order in orders
+        ):
             return False
         return reason.startswith(
             (
@@ -2774,7 +3372,10 @@ class ExitStrategy:
             timestamp = self._safe_float(order.get("timestamp"), 0.0)
             if timestamp <= 0 and isinstance(order.get("info"), dict):
                 timestamp = self._safe_float(
-                    order["info"].get("created_at", order["info"].get("createdAt", order["info"].get("ctime"))),
+                    order["info"].get(
+                        "created_at",
+                        order["info"].get("createdAt", order["info"].get("ctime")),
+                    ),
                     0.0,
                 )
             if timestamp <= 0:
@@ -2787,8 +3388,10 @@ class ExitStrategy:
     def _unknown_exit_wait_timeout_sec(self) -> float:
         return max(
             60.0,
-            self._safe_float(getattr(config.RUNTIME, "order_timeout_sec", 0.0), 0.0) * 3.0,
-            self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 0.0), 0.0) * 3.0,
+            self._safe_float(getattr(config.RUNTIME, "order_timeout_sec", 0.0), 0.0)
+            * 3.0,
+            self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 0.0), 0.0)
+            * 3.0,
         )
 
     def _wait_or_cancel_stale_unknown_exit_orders(
@@ -2800,7 +3403,10 @@ class ExitStrategy:
         state = self._get_state(symbol)
         now = time.time()
         wait_reason = reason or "unknown_exit_orders_unadoptable"
-        if not state.pending_exit_ladder_since or state.pending_exit_ladder_reason != wait_reason:
+        if (
+            not state.pending_exit_ladder_since
+            or state.pending_exit_ladder_reason != wait_reason
+        ):
             state.pending_exit_ladder_since = now
             state.pending_exit_ladder_reason = wait_reason
             state.frozen_no_more_buys = True
@@ -2829,16 +3435,25 @@ class ExitStrategy:
             position_size=state.position_size,
             reason=f"{wait_reason};stale_unknown_exit_orders_canceled;elapsed={elapsed:.1f};timeout={timeout:.1f}",
         )
-        if self._cancel_exchange_orders(symbol, orders, side=config.EXIT_SIDE, reason="stale_unknown_exit_orders_canceled"):
+        if self._cancel_exchange_orders(
+            symbol,
+            orders,
+            side=config.EXIT_SIDE,
+            reason="stale_unknown_exit_orders_canceled",
+        ):
             self._clear_pending_exit_ladder(state)
         self._refresh_active_side(state)
         self._save_state()
         return False
 
-    def _adopt_sell_orders(self, symbol: str, open_sell_orders: List[dict], reason: str) -> bool:
+    def _adopt_sell_orders(
+        self, symbol: str, open_sell_orders: List[dict], reason: str
+    ) -> bool:
         state = self._get_state(symbol)
         eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
-        remaining = sum(self._order_remaining_amount(order) for order in open_sell_orders)
+        remaining = sum(
+            self._order_remaining_amount(order) for order in open_sell_orders
+        )
         if remaining <= 0:
             return False
         if remaining > state.position_size + eps:
@@ -2872,7 +3487,9 @@ class ExitStrategy:
                 ref["hidden_order_type"] = hidden_type
                 trigger_price = self._safe_float(order.get("triggerPrice"), 0.0)
                 if trigger_price <= 0 and isinstance(order.get("info"), dict):
-                    trigger_price = self._safe_float(order["info"].get("trigger_price"), 0.0)
+                    trigger_price = self._safe_float(
+                        order["info"].get("trigger_price"), 0.0
+                    )
                 if trigger_price > 0:
                     ref["trigger_price"] = trigger_price
             cancel_params = order.get("bot_cancel_params") or order.get("cancel_params")
@@ -2918,20 +3535,35 @@ class ExitStrategy:
         exit_side = config.EXIT_SIDE
         eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
         open_exit_orders = [
-            order for order in open_orders
+            order
+            for order in open_orders
             if (order.get("side") or "").lower() == exit_side
             and self._order_remaining_amount(order) > eps
         ]
         known_exit_ids = self._order_ids(state.sell_ladder_orders)
-        hard_stop_ids = self._order_ids([state.hard_stop_order] if state.hard_stop_order else [])
-        tracked_exit_orders = [order for order in open_exit_orders if str(order.get("id")) in known_exit_ids]
-        tracked_hard_stop_orders = [order for order in open_exit_orders if str(order.get("id")) in hard_stop_ids]
-        unknown_exit_orders = [
-            order for order in open_exit_orders
-            if str(order.get("id")) not in known_exit_ids and str(order.get("id")) not in hard_stop_ids
+        hard_stop_ids = self._order_ids(
+            [state.hard_stop_order] if state.hard_stop_order else []
+        )
+        tracked_exit_orders = [
+            order
+            for order in open_exit_orders
+            if str(order.get("id")) in known_exit_ids
         ]
-        tracked_remaining = sum(self._order_remaining_amount(order) for order in tracked_exit_orders)
-        unknown_remaining = sum(self._order_remaining_amount(order) for order in unknown_exit_orders)
+        tracked_hard_stop_orders = [
+            order for order in open_exit_orders if str(order.get("id")) in hard_stop_ids
+        ]
+        unknown_exit_orders = [
+            order
+            for order in open_exit_orders
+            if str(order.get("id")) not in known_exit_ids
+            and str(order.get("id")) not in hard_stop_ids
+        ]
+        tracked_remaining = sum(
+            self._order_remaining_amount(order) for order in tracked_exit_orders
+        )
+        unknown_remaining = sum(
+            self._order_remaining_amount(order) for order in unknown_exit_orders
+        )
         return {
             "exit_side": exit_side,
             "open_exit_orders": open_exit_orders,
@@ -2959,7 +3591,9 @@ class ExitStrategy:
                     side=exit_side,
                     reason=f"hard_stop_without_{config.POSITION_SIDE}_position",
                 )
-                self._cancel_hard_stop_order(symbol, reason=f"hard_stop_without_{config.POSITION_SIDE}_position")
+                self._cancel_hard_stop_order(
+                    symbol, reason=f"hard_stop_without_{config.POSITION_SIDE}_position"
+                )
                 return False
             if state.sell_ladder_orders:
                 self._log_event(
@@ -2970,12 +3604,17 @@ class ExitStrategy:
                     side=exit_side,
                     reason=f"{exit_side}_without_{config.POSITION_SIDE}_position",
                 )
-                self._cancel_sell_orders(symbol, reason=f"{exit_side}_without_{config.POSITION_SIDE}_position")
+                self._cancel_sell_orders(
+                    symbol,
+                    reason=f"{exit_side}_without_{config.POSITION_SIDE}_position",
+                )
                 return False
             if unknown_sells:
                 close_like = [
-                    order for order in unknown_sells
-                    if self._order_reduce_only_flag(order) is True or self._is_hidden_close_order(order)
+                    order
+                    for order in unknown_sells
+                    if self._order_reduce_only_flag(order) is True
+                    or self._is_hidden_close_order(order)
                 ]
                 unsafe = [order for order in unknown_sells if order not in close_like]
                 if close_like:
@@ -2985,10 +3624,17 @@ class ExitStrategy:
                         event="reduce_only_violation_prevented",
                         symbol=symbol,
                         side=exit_side,
-                        amount=sum(self._order_remaining_amount(order) for order in close_like),
+                        amount=sum(
+                            self._order_remaining_amount(order) for order in close_like
+                        ),
                         reason="flat_unknown_close_orders_canceled",
                     )
-                    self._cancel_exchange_orders(symbol, close_like, side=exit_side, reason="flat_unknown_close_orders_canceled")
+                    self._cancel_exchange_orders(
+                        symbol,
+                        close_like,
+                        side=exit_side,
+                        reason="flat_unknown_close_orders_canceled",
+                    )
                     return False
                 if unsafe:
                     self._log_event(
@@ -2997,7 +3643,9 @@ class ExitStrategy:
                         event="reduce_only_violation_prevented",
                         symbol=symbol,
                         side=exit_side,
-                        amount=sum(self._order_remaining_amount(order) for order in unsafe),
+                        amount=sum(
+                            self._order_remaining_amount(order) for order in unsafe
+                        ),
                         reason="flat_unknown_exit_side_orders_block_entry",
                     )
                     return False
@@ -3007,7 +3655,9 @@ class ExitStrategy:
                     event="state_exchange_mismatch",
                     symbol=symbol,
                     side=exit_side,
-                    amount=sum(self._order_remaining_amount(order) for order in unknown_sells),
+                    amount=sum(
+                        self._order_remaining_amount(order) for order in unknown_sells
+                    ),
                     reason="untracked_exit_side_orders_preserved",
                 )
         return True
@@ -3021,7 +3671,8 @@ class ExitStrategy:
 
         if tracked_hard_stop_orders:
             unsafe_stop_orders = [
-                order for order in tracked_hard_stop_orders
+                order
+                for order in tracked_hard_stop_orders
                 if self._order_reduce_only_flag(order) is False
             ]
             if unsafe_stop_orders:
@@ -3031,13 +3682,19 @@ class ExitStrategy:
                     event="reduce_only_violation_prevented",
                     symbol=symbol,
                     side=exit_side,
-                    amount=sum(self._order_remaining_amount(order) for order in unsafe_stop_orders),
+                    amount=sum(
+                        self._order_remaining_amount(order)
+                        for order in unsafe_stop_orders
+                    ),
                     position_size=state.position_size,
                     reason="hard_stop_not_reduce_only",
                 )
                 self._cancel_hard_stop_order(symbol, reason="hard_stop_not_reduce_only")
                 return False
-            stop_remaining = sum(self._order_remaining_amount(order) for order in tracked_hard_stop_orders)
+            stop_remaining = sum(
+                self._order_remaining_amount(order)
+                for order in tracked_hard_stop_orders
+            )
             if stop_remaining > state.position_size + eps:
                 self._log_event(
                     "ERROR",
@@ -3049,11 +3706,14 @@ class ExitStrategy:
                     position_size=state.position_size,
                     reason="hard_stop_amount_exceeds_position",
                 )
-                self._cancel_hard_stop_order(symbol, reason="hard_stop_amount_exceeds_position")
+                self._cancel_hard_stop_order(
+                    symbol, reason="hard_stop_amount_exceeds_position"
+                )
                 return False
 
         non_reduce_tracked = [
-            order for order in tracked_sell_orders
+            order
+            for order in tracked_sell_orders
             if self._order_reduce_only_flag(order) is False
         ]
         if non_reduce_tracked:
@@ -3064,13 +3724,21 @@ class ExitStrategy:
                 event="reduce_only_violation_prevented",
                 symbol=symbol,
                 side=exit_side,
-                amount=sum(self._order_remaining_amount(order) for order in non_reduce_tracked),
+                amount=sum(
+                    self._order_remaining_amount(order) for order in non_reduce_tracked
+                ),
                 position_size=state.position_size,
                 reason="tracked_exit_order_not_reduce_only",
             )
-            if self._cancel_exchange_orders(symbol, non_reduce_tracked, side=exit_side, reason="tracked_exit_order_not_reduce_only"):
+            if self._cancel_exchange_orders(
+                symbol,
+                non_reduce_tracked,
+                side=exit_side,
+                reason="tracked_exit_order_not_reduce_only",
+            ):
                 state.sell_ladder_orders = [
-                    ref for ref in state.sell_ladder_orders
+                    ref
+                    for ref in state.sell_ladder_orders
                     if str(ref.get("id")) not in bad_ids
                 ]
                 state.sell_ladder_signature = ""
@@ -3239,9 +3907,15 @@ class ExitStrategy:
         if state.sell_ladder_orders and len(active_refs) != len(state.sell_ladder_orders):
             unknown_remaining = sum(self._order_remaining_amount(order) for order in unknown_sells)
             if unknown_sells and unknown_remaining <= state.position_size + eps:
-                can_adopt, adopt_reason = self._unknown_exit_adoption_reason(symbol, unknown_sells, unknown_remaining)
+                can_adopt, adopt_reason = self._unknown_exit_adoption_reason(
+                    symbol, unknown_sells, unknown_remaining
+                )
                 if can_adopt:
-                    return self._adopt_sell_orders(symbol, unknown_sells, reason=f"{adopt_reason};tracked_exit_id_rotated")
+                    return self._adopt_sell_orders(
+                        symbol,
+                        unknown_sells,
+                        reason=f"{adopt_reason};tracked_exit_id_rotated",
+                    )
 
                 self._log_event(
                     "WARNING",
@@ -3260,10 +3934,13 @@ class ExitStrategy:
                 )
 
             missing_refs = [
-                ref for ref in state.sell_ladder_orders
+                ref
+                for ref in state.sell_ladder_orders
                 if str(ref.get("id")) not in open_tracked_sell_ids
             ]
-            missing_amount = sum(self._safe_float(ref.get("amount"), 0.0) for ref in missing_refs)
+            missing_amount = sum(
+                self._safe_float(ref.get("amount"), 0.0) for ref in missing_refs
+            )
             if missing_refs and not open_sell_orders:
                 first_preserve = not all(ref.get("invisible_preserved_at") for ref in missing_refs)
                 import time
@@ -3324,7 +4001,12 @@ class ExitStrategy:
                 side=exit_side,
                 reason="exit_ladder_order_set_mismatch",
             )
-            if not self._cancel_exchange_orders(symbol, tracked_sell_orders, side=exit_side, reason="exit_ladder_order_set_mismatch"):
+            if not self._cancel_exchange_orders(
+                symbol,
+                tracked_sell_orders,
+                side=exit_side,
+                reason="exit_ladder_order_set_mismatch",
+            ):
                 return False
             state.sell_ladder_orders = []
             state.sell_ladder_signature = ""
@@ -3353,7 +4035,12 @@ class ExitStrategy:
                 position_size=state.position_size,
                 reason="open_exit_amount_exceeds_position",
             )
-            self._cancel_exchange_orders(symbol, tracked_sell_orders, side=exit_side, reason="open_exit_amount_exceeds_position")
+            self._cancel_exchange_orders(
+                symbol,
+                tracked_sell_orders,
+                side=exit_side,
+                reason="open_exit_amount_exceeds_position",
+            )
             self._cancel_sell_orders(symbol, reason="open_exit_amount_exceeds_position")
             return False
 
@@ -3404,7 +4091,9 @@ class ExitStrategy:
     def _closeable_contracts_for_exit_ladder(self, symbol: str, had_sell_ladder: bool) -> float:
         state = self._get_state(symbol)
         position_size = max(0.0, self._safe_float(state.position_size, 0.0))
-        closeable = max(0.0, min(position_size, self._safe_float(state.position_available, 0.0)))
+        closeable = max(
+            0.0, min(position_size, self._safe_float(state.position_available, 0.0))
+        )
         if closeable > 0:
             return closeable
 
@@ -3449,13 +4138,22 @@ class ExitStrategy:
         ]
         return max(values) if values else 0.0
 
-    def _maybe_reprice_controlled_loss_for_volatility(self, symbol: str, signal: Optional[dict] = None) -> bool:
+    def _maybe_reprice_controlled_loss_for_volatility(
+        self, symbol: str, signal: Optional[dict] = None
+    ) -> bool:
         state = self._get_state(symbol)
-        if state.sell_ladder_mode != "controlled_loss_exit" or not state.sell_ladder_orders:
+        if (
+            state.sell_ladder_mode != "controlled_loss_exit"
+            or not state.sell_ladder_orders
+        ):
             return False
 
-        ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol, signal=signal)
-        volatility_intensity = self._safe_float(ramp_context.get("volatility_intensity"), 0.0)
+        ramp_context = self._controlled_loss_ramp_context(
+            state, symbol=symbol, signal=signal
+        )
+        volatility_intensity = self._safe_float(
+            ramp_context.get("volatility_intensity"), 0.0
+        )
         if volatility_intensity <= 0.0:
             return False
 
@@ -3463,7 +4161,14 @@ class ExitStrategy:
         current_move = self._controlled_loss_current_move_fraction(state)
         min_delta = max(
             0.0,
-            self._safe_float(getattr(config.STRATEGY, "controlled_loss_volatility_reprice_min_move_delta", 0.05), 0.05),
+            self._safe_float(
+                getattr(
+                    config.STRATEGY,
+                    "controlled_loss_volatility_reprice_min_move_delta",
+                    0.05,
+                ),
+                0.05,
+            ),
         )
         if desired_move <= current_move + min_delta:
             return False
@@ -3486,23 +4191,31 @@ class ExitStrategy:
                 f"profile={ramp_context.get('ramp_profile', 'linear')}"
             ),
         )
-        self._cancel_sell_orders(symbol, reason="controlled_loss_volatility_acceleration")
+        self._cancel_sell_orders(
+            symbol, reason="controlled_loss_volatility_acceleration"
+        )
         state = self._get_state(symbol)
         if state.sell_ladder_orders:
             return True
 
-        self._place_sell_ladder(ExitLadderConfig(
-            symbol,
-            state.position_size,
-            state.entry_price,
-            rebuild=True,
-            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=True),
-            mode="controlled_loss_exit",
-            signal=signal,
-        ))
+        self._place_sell_ladder(
+            ExitLadderConfig(
+                symbol,
+                state.position_size,
+                state.entry_price,
+                rebuild=True,
+                closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                    symbol, had_sell_ladder=True
+                ),
+                mode="controlled_loss_exit",
+                signal=signal,
+            )
+        )
         return True
 
-    def _controlled_loss_block_reason(self, symbol: str, state: TradeState, reference_price: float) -> str:
+    def _controlled_loss_block_reason(
+        self, symbol: str, state: TradeState, reference_price: float
+    ) -> str:
         strategy = config.STRATEGY
         hard_time_exit = self._hard_time_exit_elapsed(state)
         if not strategy.enable_controlled_loss_exit and not hard_time_exit:
@@ -3523,7 +4236,9 @@ class ExitStrategy:
                 return "controlled_loss_missing_zombie_age"
 
         drawdown = self._position_drawdown(state, reference_price)
-        if not hard_time_exit and drawdown < max(0.0, strategy.controlled_loss_min_drawdown):
+        if not hard_time_exit and drawdown < max(
+            0.0, strategy.controlled_loss_min_drawdown
+        ):
             return f"controlled_loss_drawdown_too_small;drawdown={drawdown:.5f}"
 
         budget = self._controlled_loss_available_budget()
@@ -3531,23 +4246,32 @@ class ExitStrategy:
             return "controlled_loss_no_profit_bank"
         return ""
 
-    def _rebuild_controlled_loss_exit_ladder(self, symbol: str, reason: str, signal: Optional[dict] = None) -> bool:
+    def _rebuild_controlled_loss_exit_ladder(
+        self, symbol: str, reason: str, signal: Optional[dict] = None
+    ) -> bool:
         state = self._get_state(symbol)
         reference_price, _ = self._fetch_reference_price(symbol)
         if reference_price <= 0:
             return False
 
-        block_reason = self._controlled_loss_block_reason(symbol, state, reference_price)
+        block_reason = self._controlled_loss_block_reason(
+            symbol, state, reference_price
+        )
         if block_reason:
             return False
 
         had_sell_ladder = bool(state.sell_ladder_orders)
-        close_contracts = self._controlled_loss_contracts(symbol, state, reference_price, had_sell_ladder=had_sell_ladder)
+        close_contracts = self._controlled_loss_contracts(
+            symbol, state, reference_price, had_sell_ladder=had_sell_ladder
+        )
         if close_contracts <= 0:
             eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
             wants_controlled_close = (
                 self._hard_time_exit_elapsed(state)
-                or self._clamp(config.STRATEGY.controlled_loss_max_position_fraction, 0.0, 1.0) > 0.0
+                or self._clamp(
+                    config.STRATEGY.controlled_loss_max_position_fraction, 0.0, 1.0
+                )
+                > 0.0
             )
             if (
                 wants_controlled_close
@@ -3583,19 +4307,23 @@ class ExitStrategy:
         self._refresh_active_side(state)
         self._save_state()
 
-        self._place_sell_ladder(ExitLadderConfig(
-            symbol,
-            state.position_size,
-            state.entry_price,
-            rebuild=True,
-            closeable_contracts=close_contracts,
-            mode="controlled_loss_exit",
-            signal=signal,
-        ))
+        self._place_sell_ladder(
+            ExitLadderConfig(
+                symbol,
+                state.position_size,
+                state.entry_price,
+                rebuild=True,
+                closeable_contracts=close_contracts,
+                mode="controlled_loss_exit",
+                signal=signal,
+            )
+        )
         state = self._get_state(symbol)
         if not state.sell_ladder_orders:
             return True
-        ramp_context = self._controlled_loss_ramp_context(state, symbol=symbol, signal=signal)
+        ramp_context = self._controlled_loss_ramp_context(
+            state, symbol=symbol, signal=signal
+        )
         self._log_event(
             "WARNING",
             f"Controlled loss exit ladder activated for {symbol}: contracts={close_contracts}",
@@ -3621,13 +4349,19 @@ class ExitStrategy:
         )
         return True
 
-    def _maybe_apply_controlled_loss_exit(self, symbol: str, signal: Optional[dict] = None) -> bool:
+    def _maybe_apply_controlled_loss_exit(
+        self, symbol: str, signal: Optional[dict] = None
+    ) -> bool:
         state = self._get_state(symbol)
         if state.position_size <= 0 or state.entry_price <= 0:
             return False
         if state.sell_ladder_mode == "controlled_loss_exit":
             reference_price, _ = self._fetch_reference_price(symbol)
-            block_reason = self._controlled_loss_block_reason(symbol, state, reference_price) if reference_price > 0 else "reference_price_unavailable"
+            block_reason = (
+                self._controlled_loss_block_reason(symbol, state, reference_price)
+                if reference_price > 0
+                else "reference_price_unavailable"
+            )
             if block_reason:
                 if state.sell_ladder_orders:
                     self._cancel_sell_orders(symbol, reason=block_reason)
@@ -3637,26 +4371,38 @@ class ExitStrategy:
                 self._refresh_active_side(state)
                 self._save_state()
                 if not state.sell_ladder_orders:
-                    self._place_sell_ladder(ExitLadderConfig(
-                        symbol,
-                        state.position_size,
-                        state.entry_price,
-                        rebuild=True,
-                        closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False),
-                        mode="urgent_time_exit",
-                    ))
+                    self._place_sell_ladder(
+                        ExitLadderConfig(
+                            symbol,
+                            state.position_size,
+                            state.entry_price,
+                            rebuild=True,
+                            closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                                symbol, had_sell_ladder=False
+                            ),
+                            mode="urgent_time_exit",
+                        )
+                    )
                 return True
             if not state.sell_ladder_orders:
-                if self._is_exit_ladder_waiting_for_closeable(symbol, "controlled_loss_exit", state):
+                if self._is_exit_ladder_waiting_for_closeable(
+                    symbol, "controlled_loss_exit", state
+                ):
                     return True
-                return self._rebuild_controlled_loss_exit_ladder(symbol, reason="controlled_loss_missing_ladder", signal=signal)
+                return self._rebuild_controlled_loss_exit_ladder(
+                    symbol, reason="controlled_loss_missing_ladder", signal=signal
+                )
             if self._maybe_reprice_controlled_loss_for_volatility(symbol, signal):
                 return True
             return self._maybe_reprice_time_exit_ladder(symbol, signal=signal) or True
 
-        return self._rebuild_controlled_loss_exit_ladder(symbol, reason="controlled_loss_activation", signal=signal)
+        return self._rebuild_controlled_loss_exit_ladder(
+            symbol, reason="controlled_loss_activation", signal=signal
+        )
 
-    def _maybe_apply_urgent_time_exit(self, symbol: str, signal: Optional[dict] = None) -> bool:
+    def _maybe_apply_urgent_time_exit(
+        self, symbol: str, signal: Optional[dict] = None
+    ) -> bool:
         state = self._get_state(symbol)
         if state.position_size <= 0 or state.entry_price <= 0:
             return False
@@ -3665,7 +4411,10 @@ class ExitStrategy:
         if after_minutes <= 0:
             return False
         held_minutes = self._position_held_minutes(state)
-        if state.sell_ladder_mode != "urgent_time_exit" and held_minutes < after_minutes:
+        if (
+            state.sell_ladder_mode != "urgent_time_exit"
+            and held_minutes < after_minutes
+        ):
             return False
 
         if state.sell_ladder_mode == "urgent_time_exit":
@@ -3675,16 +4424,22 @@ class ExitStrategy:
                 self._save_state()
             if state.sell_ladder_orders:
                 return self._maybe_reprice_time_exit_ladder(symbol) or True
-            if self._is_exit_ladder_waiting_for_closeable(symbol, "urgent_time_exit", state):
+            if self._is_exit_ladder_waiting_for_closeable(
+                symbol, "urgent_time_exit", state
+            ):
                 return True
-            self._place_sell_ladder(ExitLadderConfig(
-                symbol,
-                state.position_size,
-                state.entry_price,
-                rebuild=True,
-                closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False),
-                mode="urgent_time_exit",
-            ))
+            self._place_sell_ladder(
+                ExitLadderConfig(
+                    symbol,
+                    state.position_size,
+                    state.entry_price,
+                    rebuild=True,
+                    closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                        symbol, had_sell_ladder=False
+                    ),
+                    mode="urgent_time_exit",
+                )
+            )
             return True
 
         had_sell_ladder = bool(state.sell_ladder_orders)
@@ -3703,14 +4458,18 @@ class ExitStrategy:
         state = self._get_state(symbol)
         if state.sell_ladder_orders:
             return True
-        self._place_sell_ladder(ExitLadderConfig(
-            symbol,
-            state.position_size,
-            state.entry_price,
-            rebuild=True,
-            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder),
-            mode="urgent_time_exit",
-        ))
+        self._place_sell_ladder(
+            ExitLadderConfig(
+                symbol,
+                state.position_size,
+                state.entry_price,
+                rebuild=True,
+                closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                    symbol, had_sell_ladder=had_sell_ladder
+                ),
+                mode="urgent_time_exit",
+            )
+        )
         self._log_event(
             "WARNING",
             f"Urgent time exit activated for {symbol}: held={held_minutes:.1f}m",
@@ -3730,14 +4489,23 @@ class ExitStrategy:
             return max(0.0, config.STRATEGY.controlled_loss_reprice_minutes)
         return 0.0
 
-    def _maybe_reprice_time_exit_ladder(self, symbol: str, signal: Optional[dict] = None) -> bool:
+    def _maybe_reprice_time_exit_ladder(
+        self, symbol: str, signal: Optional[dict] = None
+    ) -> bool:
         state = self._get_state(symbol)
-        mode = state.sell_ladder_mode if self._is_managed_exit_mode(state.sell_ladder_mode) else "time_exit"
+        mode = (
+            state.sell_ladder_mode
+            if self._is_managed_exit_mode(state.sell_ladder_mode)
+            else "time_exit"
+        )
         reprice_after = self._time_exit_reprice_after_minutes(mode)
         if reprice_after <= 0:
             return False
 
-        if not self._is_managed_exit_mode(state.sell_ladder_mode) or not state.sell_ladder_orders:
+        if (
+            not self._is_managed_exit_mode(state.sell_ladder_mode)
+            or not state.sell_ladder_orders
+        ):
             return False
 
         now = time.time()
@@ -3752,7 +4520,9 @@ class ExitStrategy:
         self._log_event(
             "INFO",
             f"Repricing stale {mode} ladder for {symbol}",
-            event="ema_breakeven_repriced" if mode == "breakeven" else "exit_ladder_rebuilt",
+            event="ema_breakeven_repriced"
+            if mode == "breakeven"
+            else "exit_ladder_rebuilt",
             symbol=symbol,
             side=config.EXIT_SIDE,
             position_size=state.position_size,
@@ -3764,15 +4534,19 @@ class ExitStrategy:
         if state.sell_ladder_orders:
             return True
 
-        self._place_sell_ladder(ExitLadderConfig(
-            symbol,
-            state.position_size,
-            state.entry_price,
-            rebuild=True,
-            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=True),
-            mode=mode,
-            signal=signal if mode == "controlled_loss_exit" else None,
-        ))
+        self._place_sell_ladder(
+            ExitLadderConfig(
+                symbol,
+                state.position_size,
+                state.entry_price,
+                rebuild=True,
+                closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                    symbol, had_sell_ladder=True
+                ),
+                mode=mode,
+                signal=signal if mode == "controlled_loss_exit" else None,
+            )
+        )
         return True
 
     def _trigger_ema_broken_against_position(self, signal: Optional[dict]) -> bool:
@@ -3781,15 +4555,21 @@ class ExitStrategy:
         if "trigger_valid" in signal:
             return not bool(signal.get("trigger_valid"))
 
-        fast = self._safe_float(signal.get("ema_trigger_fast", signal.get("ema50")), 0.0)
-        slow = self._safe_float(signal.get("ema_trigger_slow", signal.get("ema100")), 0.0)
+        fast = self._safe_float(
+            signal.get("ema_trigger_fast", signal.get("ema50")), 0.0
+        )
+        slow = self._safe_float(
+            signal.get("ema_trigger_slow", signal.get("ema100")), 0.0
+        )
         if fast <= 0 or slow <= 0:
             return False
         if config.POSITION_SIDE == "short":
             return fast >= slow
         return fast <= slow
 
-    def _exit_runner_close_price(self, symbol: str, avg_entry_price: float, current_price: float) -> float:
+    def _exit_runner_close_price(
+        self, symbol: str, avg_entry_price: float, current_price: float
+    ) -> float:
         breakeven = self._breakeven_exit_price(avg_entry_price)
         if current_price <= 0 or breakeven <= 0:
             return 0.0
@@ -3824,12 +4604,16 @@ class ExitStrategy:
         if runner_contracts <= 0:
             runner_contracts = max(0.0, state.position_size - non_runner_reserved)
 
-        closeable = min(runner_contracts, max(0.0, state.position_size - non_runner_reserved))
+        closeable = min(
+            runner_contracts, max(0.0, state.position_size - non_runner_reserved)
+        )
         if state.position_available > 0:
             closeable = min(closeable, state.position_available)
         return self._amount_to_precision(symbol, closeable)
 
-    def _exit_runner_trailing_pullback(self, signal: Optional[dict] = None) -> Tuple[float, str]:
+    def _exit_runner_trailing_pullback(
+        self, signal: Optional[dict] = None
+    ) -> Tuple[float, str]:
         strategy = config.STRATEGY
         trailing_enabled = bool(strategy.ema_exit_trailing_enabled)
         base_pullback = max(
@@ -3847,12 +4631,22 @@ class ExitStrategy:
             self._safe_float(signal.get("atr_rate"), 0.0),
             self._safe_float(signal.get("volatility"), 0.0),
         )
-        atr_multiplier = max(0.0, self._safe_float(strategy.ema_exit_trailing_atr_multiplier, 0.0))
-        volatility_pullback = volatility * atr_multiplier if volatility > 0 and atr_multiplier > 0 else 0.0
+        atr_multiplier = max(
+            0.0, self._safe_float(strategy.ema_exit_trailing_atr_multiplier, 0.0)
+        )
+        volatility_pullback = (
+            volatility * atr_multiplier
+            if volatility > 0 and atr_multiplier > 0
+            else 0.0
+        )
         pullback = max(base_pullback, volatility_pullback)
 
-        min_pullback = max(0.0, self._safe_float(strategy.ema_exit_trailing_min_pullback, 0.0))
-        max_pullback = max(0.0, self._safe_float(strategy.ema_exit_trailing_max_pullback, 0.0))
+        min_pullback = max(
+            0.0, self._safe_float(strategy.ema_exit_trailing_min_pullback, 0.0)
+        )
+        max_pullback = max(
+            0.0, self._safe_float(strategy.ema_exit_trailing_max_pullback, 0.0)
+        )
         if min_pullback > 0:
             pullback = max(pullback, min_pullback)
         if max_pullback > 0:
@@ -3867,8 +4661,13 @@ class ExitStrategy:
             f"max_pullback={max_pullback:.6f}"
         )
 
-    def _exit_runner_reference_entry_price(self, symbol: str, state: TradeState) -> float:
-        if self._should_use_split_exit_ladder(symbol, state, "normal") and state.base_entry_price > 0:
+    def _exit_runner_reference_entry_price(
+        self, symbol: str, state: TradeState
+    ) -> float:
+        if (
+            self._should_use_split_exit_ladder(symbol, state, "normal")
+            and state.base_entry_price > 0
+        ):
             return state.base_entry_price
         return state.entry_price
 
@@ -3877,7 +4676,9 @@ class ExitStrategy:
             return max(0.0, min(state.base_entry_amount, state.position_size))
         return state.position_size
 
-    def _place_exit_runner_close_order(self, symbol: str, current_price: float, reason: str) -> bool:
+    def _place_exit_runner_close_order(
+        self, symbol: str, current_price: float, reason: str
+    ) -> bool:
         state = self._get_state(symbol)
         if any(ref.get("runner") for ref in state.sell_ladder_orders):
             return False
@@ -3953,7 +4754,9 @@ class ExitStrategy:
         }
         state.sell_ladder_orders.append(ref)
         state.exit_runner_contracts = contracts
-        state.sell_ladder_signature = self._exit_ladder_signature("normal", symbol, state)
+        state.sell_ladder_signature = self._exit_ladder_signature(
+            "normal", symbol, state
+        )
         self._refresh_active_side(state)
         self._save_state()
         self._log_event(
@@ -3971,19 +4774,31 @@ class ExitStrategy:
         )
         return True
 
-    def _maybe_manage_exit_runner(self, symbol: str, signal: Optional[dict] = None) -> bool:
+    def _maybe_manage_exit_runner(
+        self, symbol: str, signal: Optional[dict] = None
+    ) -> bool:
         strategy = config.STRATEGY
         if not strategy.ema_exit_runner_enabled:
             return False
         state = self._get_state(symbol)
-        if state.position_size <= 0 or state.entry_price <= 0 or state.sell_ladder_mode != "normal":
+        if (
+            state.position_size <= 0
+            or state.entry_price <= 0
+            or state.sell_ladder_mode != "normal"
+        ):
             return False
         if any(ref.get("runner") for ref in state.sell_ladder_orders):
             return False
 
         runner_base_contracts = self._exit_runner_base_contracts(symbol, state)
         runner_entry_price = self._exit_runner_reference_entry_price(symbol, state)
-        steps, plan_context = self._sell_ladder_plan(symbol, runner_base_contracts, runner_entry_price, mode="normal", state=state)
+        steps, plan_context = self._sell_ladder_plan(
+            symbol,
+            runner_base_contracts,
+            runner_entry_price,
+            mode="normal",
+            state=state,
+        )
         if not plan_context.get("runner_enabled"):
             if state.exit_runner_contracts > 0 or state.exit_runner_active:
                 self._reset_exit_runner_state(state)
@@ -3991,7 +4806,9 @@ class ExitStrategy:
             return False
 
         if state.exit_runner_contracts <= 0:
-            _, runner_contracts = self._exit_ladder_contract_allocations(symbol, runner_base_contracts, steps, state)
+            _, runner_contracts = self._exit_ladder_contract_allocations(
+                symbol, runner_base_contracts, steps, state
+            )
             state.exit_runner_contracts = runner_contracts
         if state.exit_runner_contracts <= 0:
             return False
@@ -4033,7 +4850,10 @@ class ExitStrategy:
                 entry_price=state.entry_price,
                 reason=f"runner_activation;ladder={plan_context.get('ladder_name', 'normal')}",
             )
-            if strategy.hard_stop_loss_enabled and strategy.ema_exit_runner_profit_lock_enabled:
+            if (
+                strategy.hard_stop_loss_enabled
+                and strategy.ema_exit_runner_profit_lock_enabled
+            ):
                 self._ensure_hard_stop_loss(symbol, signal=signal)
                 state = self._get_state(symbol)
 
@@ -4049,23 +4869,31 @@ class ExitStrategy:
             previous_bottom = state.exit_runner_bottom_price or current_price
             state.exit_runner_bottom_price = min(previous_bottom, current_price)
             changed = changed or state.exit_runner_bottom_price != previous_bottom
-            if pullback > 0 and current_price >= state.exit_runner_bottom_price * (1 + pullback):
+            if pullback > 0 and current_price >= state.exit_runner_bottom_price * (
+                1 + pullback
+            ):
                 close_reason = (
                     f"runner_trailing_pullback;bottom={state.exit_runner_bottom_price:.12f};"
                     f"pullback={pullback:.5f};{pullback_reason}"
                 )
-            elif take_profit > 0 and current_price <= runner_entry_price * (1 - take_profit):
+            elif take_profit > 0 and current_price <= runner_entry_price * (
+                1 - take_profit
+            ):
                 close_reason = f"runner_take_profit;target_markup={take_profit:.5f}"
         else:
             previous_peak = state.exit_runner_peak_price or current_price
             state.exit_runner_peak_price = max(previous_peak, current_price)
             changed = changed or state.exit_runner_peak_price != previous_peak
-            if pullback > 0 and current_price <= state.exit_runner_peak_price * (1 - pullback):
+            if pullback > 0 and current_price <= state.exit_runner_peak_price * (
+                1 - pullback
+            ):
                 close_reason = (
                     f"runner_trailing_pullback;peak={state.exit_runner_peak_price:.12f};"
                     f"pullback={pullback:.5f};{pullback_reason}"
                 )
-            elif take_profit > 0 and current_price >= runner_entry_price * (1 + take_profit):
+            elif take_profit > 0 and current_price >= runner_entry_price * (
+                1 + take_profit
+            ):
                 close_reason = f"runner_take_profit;target_markup={take_profit:.5f}"
 
         if not close_reason and self._trigger_ema_broken_against_position(signal):
@@ -4073,7 +4901,9 @@ class ExitStrategy:
 
         if close_reason:
             self._save_state()
-            return self._place_exit_runner_close_order(symbol, current_price, close_reason)
+            return self._place_exit_runner_close_order(
+                symbol, current_price, close_reason
+            )
 
         if changed:
             self._save_state()
@@ -4138,7 +4968,9 @@ class ExitStrategy:
             )
             return True
 
-        closeable = self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False)
+        closeable = self._closeable_contracts_for_exit_ladder(
+            symbol, had_sell_ladder=False
+        )
         closeable = min(max(0.0, closeable), max(0.0, state.position_size))
         close_amount = self._amount_to_precision(symbol, closeable)
         if close_amount <= 0:
@@ -4212,14 +5044,18 @@ class ExitStrategy:
                 return self._maybe_reprice_time_exit_ladder(symbol) or True
             if self._is_exit_ladder_waiting_for_closeable(symbol, "breakeven", state):
                 return True
-            self._place_sell_ladder(ExitLadderConfig(
-                symbol,
-                state.position_size,
-                state.entry_price,
-                rebuild=True,
-                closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=False),
-                mode="breakeven",
-            ))
+            self._place_sell_ladder(
+                ExitLadderConfig(
+                    symbol,
+                    state.position_size,
+                    state.entry_price,
+                    rebuild=True,
+                    closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                        symbol, had_sell_ladder=False
+                    ),
+                    mode="breakeven",
+                )
+            )
             return True
 
         if not state.cycle_opened_at or held_minutes < breakeven_after_minutes:
@@ -4243,14 +5079,18 @@ class ExitStrategy:
         state = self._get_state(symbol)
         if state.sell_ladder_orders:
             return True
-        self._place_sell_ladder(ExitLadderConfig(
-            symbol,
-            state.position_size,
-            state.entry_price,
-            rebuild=True,
-            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder),
-            mode="breakeven",
-        ))
+        self._place_sell_ladder(
+            ExitLadderConfig(
+                symbol,
+                state.position_size,
+                state.entry_price,
+                rebuild=True,
+                closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                    symbol, had_sell_ladder=had_sell_ladder
+                ),
+                mode="breakeven",
+            )
+        )
         self._log_event(
             "INFO",
             f"EMA breakeven activated for {symbol}: held={held_minutes:.1f}m",
@@ -4267,7 +5107,11 @@ class ExitStrategy:
         state = self._get_state(symbol)
         if state.position_size <= 0:
             return
-        mode = state.sell_ladder_mode if self._is_managed_exit_mode(state.sell_ladder_mode) else "normal"
+        mode = (
+            state.sell_ladder_mode
+            if self._is_managed_exit_mode(state.sell_ladder_mode)
+            else "normal"
+        )
         desired_signature = self._exit_ladder_signature(mode, symbol, state)
         if state.sell_ladder_orders:
             if state.sell_ladder_signature == desired_signature:
@@ -4283,7 +5127,7 @@ class ExitStrategy:
                 entry_price=state.entry_price,
                 reason=(
                     f"exit_ladder_config_changed;mode={mode};"
-                    f"desired_external={ 'external_tightened' in desired_signature }"
+                    f"desired_external={'external_tightened' in desired_signature}"
                 ),
             )
             self._cancel_sell_orders(symbol, reason="exit_ladder_config_changed")
@@ -4291,13 +5135,21 @@ class ExitStrategy:
             if state.sell_ladder_orders:
                 return
         else:
-            if state.sell_ladder_signature == desired_signature and state.exit_runner_contracts > 0:
+            if (
+                state.sell_ladder_signature == desired_signature
+                and state.exit_runner_contracts > 0
+            ):
                 eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
                 runner_contracts = self._amount_to_precision(
                     symbol,
-                    min(state.position_size, max(0.0, self._safe_float(state.exit_runner_contracts, 0.0))),
+                    min(
+                        state.position_size,
+                        max(0.0, self._safe_float(state.exit_runner_contracts, 0.0)),
+                    ),
                 )
-                position_contracts = self._amount_to_precision(symbol, max(0.0, state.position_size))
+                position_contracts = self._amount_to_precision(
+                    symbol, max(0.0, state.position_size)
+                )
                 if runner_contracts + eps >= position_contracts:
                     return
                 self._log_event(
@@ -4323,7 +5175,9 @@ class ExitStrategy:
             state.position_size,
             state.entry_price,
             rebuild=False,
-            closeable_contracts=self._closeable_contracts_for_exit_ladder(symbol, had_sell_ladder=had_sell_ladder),
+            closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                symbol, had_sell_ladder=had_sell_ladder
+            ),
             mode=mode,
         )
 
