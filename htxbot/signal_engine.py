@@ -1634,6 +1634,19 @@ class SignalMixin:
         rs_context = relative_strength_context(
             closes, benchmark_closes, rs_fast_window, rs_slow_window
         )
+        return self._calculate_ema_indicator_values(
+            closes,
+            latest_ts,
+            pullback_closes,
+            pullback_latest_ts,
+            macro_closes,
+            macro_latest_ts,
+            cache_key,
+            periods,
+            timeframes,
+            use_timeframe_ema,
+            rs_context,
+        )
 
     def _calculate_ema_indicator_values(
         self,
@@ -1647,6 +1660,7 @@ class SignalMixin:
         periods: dict,
         timeframes: dict,
         use_timeframe_ema: bool,
+        rs_context: dict,
     ) -> Optional[dict]:
         trigger_periods = {
             "ema_trigger_fast": periods["ema_trigger_fast"],
