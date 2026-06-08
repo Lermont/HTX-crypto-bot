@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import unittest
 from htxbot.exchange import ExchangeMixin
+from tests.config_overrides import override_frozen_config_fields
+import config
 
 class DummyExchange(ExchangeMixin):
     def __init__(self):
@@ -88,6 +90,112 @@ class TestAccountLeverageFromPayload(unittest.TestCase):
             ]
         }
         self.assertEqual(self.exchange._account_leverage_from_payload("BTC-USDT", payload), 12.5)
+
+
+
+class TestAvailableAndFrozen(unittest.TestCase):
+    """
+    Tests the logic of the `available_and_frozen` inner function located inside
+    ExchangeMixin._fetch_position_snapshot(). Since it's an inner function,
+    we test it indirectly via the outer function's resulting snapshot values.
+    """
+    def setUp(self):
+        self.exchange = DummyExchange()
+        self.exchange._contract_size = lambda s: 1.0
+        self.exchange._contracts_to_notional = lambda s, c, p: c * p
+        self.exchange._average_price_from_notional = lambda s, size, notional: notional / size if size > 0 else 0.0
+
+    def test_available_and_frozen_basic(self):
+        self.exchange._bulk_positions_by_symbol = lambda: {"BTC-USDT": [{
+            "contracts": 10,
+            "side": "long",
+            "available": 6,
+            "frozen": 4,
+            "entryPrice": 100
+        }]}
+
+        with override_frozen_config_fields(config.RISK, margin_mode="cross"):
+            snap = self.exchange._fetch_position_snapshot("BTC-USDT")
+
+        self.assertEqual(snap["long_available"], 6.0)
+        self.assertEqual(snap["long_frozen"], 4.0)
+
+    def test_available_and_frozen_from_info(self):
+        self.exchange._bulk_positions_by_symbol = lambda: {"BTC-USDT": [{
+            "contracts": 10,
+            "side": "long",
+            "info": {
+                "available": 3,
+                "frozen": 7
+            },
+            "entryPrice": 100
+        }]}
+
+        with override_frozen_config_fields(config.RISK, margin_mode="cross"):
+            snap = self.exchange._fetch_position_snapshot("BTC-USDT")
+
+        self.assertEqual(snap["long_available"], 3.0)
+        self.assertEqual(snap["long_frozen"], 7.0)
+
+    def test_available_and_frozen_alternate_keys(self):
+        self.exchange._bulk_positions_by_symbol = lambda: {"BTC-USDT": [{
+            "contracts": 15,
+            "side": "short",
+            "canCloseVolume": 8,
+            "frozen_volume": 7,
+            "entryPrice": 100
+        }]}
+
+        with override_frozen_config_fields(config.RISK, margin_mode="cross"):
+            snap = self.exchange._fetch_position_snapshot("BTC-USDT")
+
+        self.assertEqual(snap["short_available"], 8.0)
+        self.assertEqual(snap["short_frozen"], 7.0)
+
+    def test_available_and_frozen_fallback(self):
+        # When neither available nor frozen is provided
+        self.exchange._bulk_positions_by_symbol = lambda: {"BTC-USDT": [{
+            "contracts": 12,
+            "side": "long",
+            "entryPrice": 100
+        }]}
+
+        with override_frozen_config_fields(config.RISK, margin_mode="cross"):
+            snap = self.exchange._fetch_position_snapshot("BTC-USDT")
+
+        self.assertEqual(snap["long_available"], 12.0)
+        self.assertEqual(snap["long_frozen"], 0.0)
+
+    def test_available_and_frozen_partial_fallback(self):
+        # When only available is provided, frozen should be contracts - available
+        self.exchange._bulk_positions_by_symbol = lambda: {"BTC-USDT": [{
+            "contracts": 20,
+            "side": "short",
+            "available": 15,
+            "entryPrice": 100
+        }]}
+
+        with override_frozen_config_fields(config.RISK, margin_mode="cross"):
+            snap = self.exchange._fetch_position_snapshot("BTC-USDT")
+
+        self.assertEqual(snap["short_available"], 15.0)
+        self.assertEqual(snap["short_frozen"], 5.0)
+
+    def test_available_and_frozen_bounds(self):
+        # Available shouldn't exceed contracts, frozen shouldn't be negative
+        self.exchange._bulk_positions_by_symbol = lambda: {"BTC-USDT": [{
+            "contracts": 10,
+            "side": "long",
+            "available": 15,
+            "frozen": -5,
+            "entryPrice": 100
+        }]}
+
+        with override_frozen_config_fields(config.RISK, margin_mode="cross"):
+            snap = self.exchange._fetch_position_snapshot("BTC-USDT")
+
+        self.assertEqual(snap["long_available"], 10.0)
+        self.assertEqual(snap["long_frozen"], 0.0)
 
 if __name__ == '__main__':
     unittest.main()
