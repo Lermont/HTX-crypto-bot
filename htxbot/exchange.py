@@ -442,26 +442,35 @@ class ExchangeMixin:
         if not isinstance(payload, dict):
             return False
 
-        normalized = {
-            str(key).lower().replace("-", "_"): value for key, value in payload.items()
-        }
-        status = str(normalized.get("status") or "").strip().lower()
-        if status in {"error", "err", "failed", "fail"}:
-            return True
-        if normalized.get("success") is False:
-            return True
-        if any(
-            key in normalized
-            for key in ("err_code", "err_msg", "error_code", "error_msg")
-        ):
-            return True
+        for k, v in payload.items():
+            if not isinstance(k, str):
+                k = str(k)
 
-        error = normalized.get("error")
-        if isinstance(error, dict):
-            return bool(error)
-        if isinstance(error, str):
-            return bool(error.strip())
-        return bool(error)
+            k_lower = k.lower()
+            if "-" in k_lower:
+                k_lower = k_lower.replace("-", "_")
+
+            if k_lower == "status":
+                if v and isinstance(v, str):
+                    status = v.strip().lower()
+                    if status in {"error", "err", "failed", "fail"}:
+                        return True
+            elif k_lower == "success":
+                if v is False:
+                    return True
+            elif k_lower in {"err_code", "err_msg", "error_code", "error_msg"}:
+                return True
+            elif k_lower == "error":
+                if isinstance(v, dict):
+                    if v:
+                        return True
+                elif isinstance(v, str):
+                    if v.strip():
+                        return True
+                elif v:
+                    return True
+
+        return False
 
     def _expect_ccxt_list_response(
         self,
