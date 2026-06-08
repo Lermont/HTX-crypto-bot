@@ -2465,6 +2465,56 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertEqual(bot.exchange.fetch_ticker_calls, calls_after_prefetch)
 
+    def test_fetch_ticker_safe_handles_exception(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bot = self.make_bot(Path(raw_tmp))
+            bot.symbols = [SYMBOL, SECOND_SYMBOL]
+            bot.exchange.has["fetchTickers"] = False
+
+            def faulty_fetch_ticker(symbol):
+                if symbol == SYMBOL:
+                    raise RuntimeError("Simulated network failure")
+                return {"bid": 9.9, "ask": 10.1, "last": 10.0, "symbol": symbol}
+
+            bot.exchange.fetch_ticker = faulty_fetch_ticker
+
+            original_log = bot._log_event
+            logged_events = []
+            def mock_log_event(*args, **kwargs):
+                logged_events.append((args, kwargs))
+                original_log(*args, **kwargs)
+
+            bot._log_event = mock_log_event
+            bot._reset_market_data_caches()
+
+            # Use max_workers=1 to test sequential execution
+            result = bot._prefetch_ticker_snapshots([SYMBOL, SECOND_SYMBOL])
+
+            self.assertIn(SECOND_SYMBOL, result)
+            self.assertNotIn(SYMBOL, result)
+            self.assertEqual(result[SECOND_SYMBOL]["last"], 10.0)
+
+            failed_logs = [kw for args, kw in logged_events if kw.get("reason") == "ticker_prefetch_failed"]
+            self.assertTrue(len(failed_logs) > 0)
+            self.assertEqual(failed_logs[0]["symbol"], SYMBOL)
+            self.assertIsInstance(failed_logs[0]["exception"], RuntimeError)
+
+            # Test parallel execution
+            logged_events.clear()
+            runtime = replace(config.RUNTIME, market_data_max_workers=2)
+            with override_config(RUNTIME=runtime):
+                bot._reset_market_data_caches()
+                result_parallel = bot._prefetch_ticker_snapshots([SYMBOL, SECOND_SYMBOL])
+
+                self.assertIn(SECOND_SYMBOL, result_parallel)
+                self.assertNotIn(SYMBOL, result_parallel)
+                self.assertEqual(result_parallel[SECOND_SYMBOL]["last"], 10.0)
+
+                failed_logs_parallel = [kw for args, kw in logged_events if kw.get("reason") == "ticker_prefetch_failed"]
+                self.assertTrue(len(failed_logs_parallel) > 0)
+                self.assertEqual(failed_logs_parallel[0]["symbol"], SYMBOL)
+                self.assertIsInstance(failed_logs_parallel[0]["exception"], RuntimeError)
+
     def test_parallel_ticker_prefetch_preserves_profile_context(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, market_data_max_workers=2)
