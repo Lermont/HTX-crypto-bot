@@ -374,7 +374,16 @@ class CombinedHtxFuturesBot:
         if payload_symbol:
             try:
                 return str(payload_symbol(payload) or "")
-            except Exception:
+            except Exception as exc:
+                log_event = getattr(bot, "_log_event", None)
+                if log_event:
+                    log_event(
+                        "WARNING",
+                        f"Error retrieving payload symbol: {exc}",
+                        event="payload_symbol_error",
+                        reason="payload_symbol_extraction_failed",
+                        exception=exc,
+                    )
                 return ""
         return ""
 
@@ -403,8 +412,16 @@ class CombinedHtxFuturesBot:
                 price = self._safe_float(bot, ticker.get(key), 0.0)
                 if price > 0:
                     return price
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event = getattr(bot, "_log_event", None)
+            if log_event:
+                log_event(
+                    "WARNING",
+                    f"Could not fetch ticker price for {symbol}: {exc}",
+                    event="position_ticker_fallback_failed",
+                    reason="fetch_ticker_error",
+                    exception=exc,
+                )
         return 0.0
 
     def _position_payload_available(
