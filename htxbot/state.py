@@ -18,7 +18,7 @@ from .fileio import (
     replace_path_with_retry,
     write_text_path_with_retry,
 )
-from .models import DiagnosticEvent, PositionLifecycle, TradeState
+from .models import PositionLifecycle, TradeState
 
 
 _state_io_lock = threading.RLock()
@@ -264,8 +264,9 @@ class StateMixin:
                 except Exception:
                     try:
                         tmp_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        logger = getattr(self, "log", logging.getLogger(__name__))
+                        logger.warning("Failed to remove temporary state file: %s", exc)
                     raise
 
     def _pid_is_running(self, pid: int) -> bool:
@@ -335,12 +336,14 @@ class StateMixin:
             except Exception:
                 try:
                     os.close(fd)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger = getattr(self, "log", logging.getLogger(__name__))
+                    logger.warning("Failed to close lock fd: %s", exc)
                 try:
                     self.lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger = getattr(self, "log", logging.getLogger(__name__))
+                    logger.warning("Failed to remove lock path: %s", exc)
                 raise
             atexit.register(self._release_runtime_lock)
             return
@@ -371,8 +374,9 @@ class StateMixin:
             raw_pid = self.lock_path.read_text(encoding="utf-8").strip()
             if raw_pid == str(os.getpid()):
                 self.lock_path.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            logger = getattr(self, "log", logging.getLogger(__name__))
+            logger.warning("Failed to release runtime lock: %s", exc)
 
     def _get_state(self, symbol: str) -> TradeState:
         with instance_rlock(self, "_state_lock"):
