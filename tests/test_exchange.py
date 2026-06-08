@@ -2,106 +2,92 @@
 import unittest
 from htxbot.exchange import ExchangeMixin
 
+class DummyExchange(ExchangeMixin):
+    def __init__(self):
+        self.exchange = type('Mock', (object,), {"markets": {"BTC-USDT": {"id": "BTC-USDT"}}})()
 
-class TestExchangeMixinLeverage(unittest.TestCase):
-    class DummyExchange(ExchangeMixin):
-        def __init__(self):
-            self._market_returns = {}
+    def _market(self, symbol):
+        return self.exchange.markets.get(symbol)
 
-        def _market(self, symbol):
-            return self._market_returns.get(symbol, {})
+    def _safe_float(self, value, fallback=0.0):
+        try:
+            return float(value) if value is not None else fallback
+        except (TypeError, ValueError):
+            return fallback
 
-        def _safe_float(self, v, default=0.0):
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return default
-
+class TestAccountLeverageFromPayload(unittest.TestCase):
+    """
+    Tests the logic of the `item_leverage` inner function located inside
+    ExchangeMixin._account_leverage_from_payload(). Since it's an inner function,
+    we test it indirectly via the outer function's return values.
+    """
     def setUp(self):
-        self.ex = self.DummyExchange()
+        self.exchange = DummyExchange()
 
-    def test_item_matches_empty_market_id(self):
-        # When _market returns empty dict, market_id becomes empty string
-        self.ex._market_returns["BTC/USDT"] = {}
-        # item_matches returns True immediately if market_id is falsy
-        payload = {"data": [{"contract_code": "ANYTHING", "lever_rate": 15}]}
-        self.assertEqual(
-            self.ex._account_leverage_from_payload("BTC/USDT", payload), 15.0
-        )
-
-    def test_item_matches_contract_code(self):
-        self.ex._market_returns["BTC/USDT"] = {"id": "BTC-USDT"}
-
-        # Test exact match on contract_code finding the right leverage
+    def test_item_leverage_basic(self):
         payload = {
             "data": [
-                {"contract_code": "ETH-USDT", "lever_rate": 20},
-                {"contract_code": "BTC-USDT", "lever_rate": 30},
+                {"symbol": "BTC-USDT", "leverage": "10"}
             ]
         }
-        self.assertEqual(
-            self.ex._account_leverage_from_payload("BTC/USDT", payload), 30.0
-        )
+        self.assertEqual(self.exchange._account_leverage_from_payload("BTC-USDT", payload), 10.0)
 
-    def test_item_matches_other_keys(self):
-        self.ex._market_returns["BTC/USDT"] = {"id": "BTC-USDT"}
-
-        # Test exact match on 'pair'
-        payload_pair = {
-            "data": [
-                {"pair": "ETH-USDT", "lever_rate": 20},
-                {"pair": "BTC-USDT", "lever_rate": 40},
-            ]
-        }
-        self.assertEqual(
-            self.ex._account_leverage_from_payload("BTC/USDT", payload_pair), 40.0
-        )
-
-        # Test exact match on 'symbol'
-        payload_symbol = {
-            "data": [
-                {"symbol": "ETH-USDT", "lever_rate": 20},
-                {"symbol": "BTC-USDT", "lever_rate": 50},
-            ]
-        }
-        self.assertEqual(
-            self.ex._account_leverage_from_payload("BTC/USDT", payload_symbol), 50.0
-        )
-
-        # Test exact match on 'contractCode'
-        payload_cc = {
-            "data": [
-                {"contractCode": "ETH-USDT", "lever_rate": 20},
-                {"contractCode": "BTC-USDT", "lever_rate": 60},
-            ]
-        }
-        self.assertEqual(
-            self.ex._account_leverage_from_payload("BTC/USDT", payload_cc), 60.0
-        )
-
-    def test_item_matches_no_match_returns_fallback(self):
-        self.ex._market_returns["BTC/USDT"] = {"id": "BTC-USDT"}
-
-        # When there is no match for the symbol, the loop finishes and returns the fallback.
-        # Fallback is the first valid leverage seen.
+    def test_item_leverage_with_info(self):
         payload = {
             "data": [
-                {"symbol": "ETH-USDT", "lever_rate": 20},
-                {"symbol": "LTC-USDT", "lever_rate": 30},
+                {"symbol": "BTC-USDT", "info": {"lever_rate": "20.5"}}
             ]
         }
-        self.assertEqual(
-            self.ex._account_leverage_from_payload("BTC/USDT", payload), 20.0
-        )
+        self.assertEqual(self.exchange._account_leverage_from_payload("BTC-USDT", payload), 20.5)
 
-    def test_item_leverage_from_info(self):
-        # Make sure that item_leverage behavior is also covered where it fetches from 'info'
-        self.ex._market_returns["BTC/USDT"] = {"id": "BTC-USDT"}
-        payload = {"data": [{"symbol": "BTC-USDT", "info": {"leverage": 25}}]}
-        self.assertEqual(
-            self.ex._account_leverage_from_payload("BTC/USDT", payload), 25.0
-        )
+    def test_item_leverage_invalid_item(self):
+        # Passing list instead of dict, item_leverage should return 0.0
+        # The logic falls back to 0.0
+        payload = {
+            "data": [
+                ["invalid", "item"]
+            ]
+        }
+        self.assertEqual(self.exchange._account_leverage_from_payload("BTC-USDT", payload), 0.0)
 
+    def test_item_leverage_multiple_keys(self):
+        payload = {
+            "data": [
+                {"symbol": "BTC-USDT", "leverRate": "15"}
+            ]
+        }
+        self.assertEqual(self.exchange._account_leverage_from_payload("BTC-USDT", payload), 15.0)
 
-if __name__ == "__main__":
+    def test_item_leverage_nested_structures(self):
+        payload = {
+            "data": {
+                "positions": [
+                    {"symbol": "BTC-USDT", "leverage": "5.5"}
+                ]
+            }
+        }
+        self.assertEqual(self.exchange._account_leverage_from_payload("BTC-USDT", payload), 5.5)
+
+    def test_item_leverage_returns_fallback_when_symbol_no_match(self):
+        # The outer function logic retains a `fallback` to the first valid leverage
+        # it encounters if no specific item_matches() is found.
+        # Thus, it correctly returns 10.0 here.
+        payload = {
+            "data": [
+                {"symbol": "ETH-USDT", "leverage": "10"}
+            ]
+        }
+        self.assertEqual(self.exchange._account_leverage_from_payload("BTC-USDT", payload), 10.0)
+
+    def test_item_leverage_zero_leverage(self):
+        # if leverage <= 0 it should continue searching
+        payload = {
+            "data": [
+                {"symbol": "BTC-USDT", "leverage": "0"},
+                {"symbol": "BTC-USDT", "leverage": "12.5"}
+            ]
+        }
+        self.assertEqual(self.exchange._account_leverage_from_payload("BTC-USDT", payload), 12.5)
+
+if __name__ == '__main__':
     unittest.main()

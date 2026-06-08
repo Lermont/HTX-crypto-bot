@@ -40,7 +40,7 @@ from htxbot.shared_exchange import (
     MultiAccountExchange,
     ThreadSafeExchange,
 )
-from tests.config_overrides import override_config
+from tests.config_overrides import override_config, override_frozen_config_fields
 
 
 SYMBOL = "TEST/USDT:USDT"
@@ -2464,6 +2464,56 @@ class UnifiedBotTests(unittest.TestCase):
                     self.assertGreater(last, 0.0)
 
                 self.assertEqual(bot.exchange.fetch_ticker_calls, calls_after_prefetch)
+
+    def test_fetch_ticker_safe_handles_exception(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bot = self.make_bot(Path(raw_tmp))
+            bot.symbols = [SYMBOL, SECOND_SYMBOL]
+            bot.exchange.has["fetchTickers"] = False
+
+            def faulty_fetch_ticker(symbol):
+                if symbol == SYMBOL:
+                    raise RuntimeError("Simulated network failure")
+                return {"bid": 9.9, "ask": 10.1, "last": 10.0, "symbol": symbol}
+
+            bot.exchange.fetch_ticker = faulty_fetch_ticker
+
+            original_log = bot._log_event
+            logged_events = []
+            def mock_log_event(*args, **kwargs):
+                logged_events.append((args, kwargs))
+                original_log(*args, **kwargs)
+
+            bot._log_event = mock_log_event
+            bot._reset_market_data_caches()
+
+            # Use max_workers=1 to test sequential execution
+            result = bot._prefetch_ticker_snapshots([SYMBOL, SECOND_SYMBOL])
+
+            self.assertIn(SECOND_SYMBOL, result)
+            self.assertNotIn(SYMBOL, result)
+            self.assertEqual(result[SECOND_SYMBOL]["last"], 10.0)
+
+            failed_logs = [kw for args, kw in logged_events if kw.get("reason") == "ticker_prefetch_failed"]
+            self.assertTrue(len(failed_logs) > 0)
+            self.assertEqual(failed_logs[0]["symbol"], SYMBOL)
+            self.assertIsInstance(failed_logs[0]["exception"], RuntimeError)
+
+            # Test parallel execution
+            logged_events.clear()
+            runtime = replace(config.RUNTIME, market_data_max_workers=2)
+            with override_config(RUNTIME=runtime):
+                bot._reset_market_data_caches()
+                result_parallel = bot._prefetch_ticker_snapshots([SYMBOL, SECOND_SYMBOL])
+
+                self.assertIn(SECOND_SYMBOL, result_parallel)
+                self.assertNotIn(SYMBOL, result_parallel)
+                self.assertEqual(result_parallel[SECOND_SYMBOL]["last"], 10.0)
+
+                failed_logs_parallel = [kw for args, kw in logged_events if kw.get("reason") == "ticker_prefetch_failed"]
+                self.assertTrue(len(failed_logs_parallel) > 0)
+                self.assertEqual(failed_logs_parallel[0]["symbol"], SYMBOL)
+                self.assertIsInstance(failed_logs_parallel[0]["exception"], RuntimeError)
 
     def test_parallel_ticker_prefetch_preserves_profile_context(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
@@ -9231,6 +9281,24 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertIn("fetch_positions returned dict", position_rows[-1]["message"])
             self.assertFalse(any(row["reason"] == "step_error" for row in rows))
 
+    def test_bulk_open_orders_success(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot.exchange.has["fetchOpenOrders"] = True
+            mock_order_1 = {"id": "123", "symbol": SYMBOL, "side": "buy"}
+            mock_order_2 = {"id": "124", "symbol": SECOND_SYMBOL, "side": "sell"}
+            bot.exchange.open_orders = [mock_order_1, mock_order_2]
+
+            orders = bot._bulk_open_orders_by_symbol()
+
+            self.assertIsNotNone(orders)
+            self.assertEqual(len(orders), 2)
+            self.assertEqual(len(orders[SYMBOL]), 1)
+            self.assertEqual(orders[SYMBOL][0]["id"], "123")
+            self.assertEqual(len(orders[SECOND_SYMBOL]), 1)
+            self.assertEqual(orders[SECOND_SYMBOL][0]["id"], "124")
+            self.assertEqual(bot.exchange.fetch_open_orders_calls, 1)
+
     def test_bulk_open_orders_dict_response_falls_back_without_step_error(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -9321,6 +9389,31 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(rows[-1]["level"], "INFO")
                 self.assertEqual(rows[-1]["event"], "futures_setup")
                 self.assertIn("position_mode_one_way_confirmed", rows[-1]["reason"])
+
+    def test_position_mode_isolated_updates_per_symbol(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_frozen_config_fields(config.RISK, margin_mode="isolated"):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+
+                def fake_position_info(request):
+                    data = {"positions": [], "contract_detail": []}
+                    return {"status": "ok", "data": data}
+
+                bot.exchange.contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo = fake_position_info
+
+                self.assertTrue(bot._ensure_one_way_position_mode(force=True))
+                self.assertTrue(bot.one_way_mode_checked)
+
+                calls = bot.exchange.set_position_mode_calls
+                self.assertEqual(len(calls), 3)
+
+                expected_calls = [
+                    (False, "BTC/USDT:USDT", bot._position_params()),
+                    (False, "ETH/USDT:USDT", bot._position_params()),
+                    (False, "SOL/USDT:USDT", bot._position_params()),
+                ]
+                self.assertEqual(sorted(calls), sorted(expected_calls))
 
     def test_position_mode_locked_by_existing_positions_logs_info(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

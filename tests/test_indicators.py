@@ -185,6 +185,37 @@ class IndicatorMathTests(unittest.TestCase):
 
 
 class SignalMathTests(unittest.TestCase):
+
+    def test_choppiness_context_handles_valid_and_invalid_states(self):
+        trend = [
+            [index, close, close + 0.1, close - 0.1, close, 1.0]
+            for index, close in enumerate(range(100, 121))
+        ]
+        chop = [
+            [index, close, close + 0.2, close - 0.2, close, 1.0]
+            for index, close in enumerate([100.0, 102.0] * 11)
+        ]
+
+        # Trend (low choppiness)
+        trend_ctx = choppiness_context(trend, 14, 50.0)
+        self.assertTrue(trend_ctx["chop_valid"])
+        self.assertLess(trend_ctx["chop"], 50.0)
+        self.assertEqual(trend_ctx["chop_max"], 50.0)
+        self.assertEqual(trend_ctx["chop_period"], 14)
+        self.assertEqual(trend_ctx["chop_reason"], "chop_ok")
+
+        # Chop (high choppiness)
+        chop_ctx = choppiness_context(chop, 14, 50.0)
+        self.assertFalse(chop_ctx["chop_valid"])
+        self.assertGreater(chop_ctx["chop"], 50.0)
+        self.assertEqual(chop_ctx["chop_reason"], "chop_above_max")
+
+        # Insufficient history
+        short_ctx = choppiness_context(trend[:10], 14, 50.0)
+        self.assertFalse(short_ctx["chop_valid"])
+        self.assertEqual(short_ctx["chop"], 0.0)
+        self.assertTrue(short_ctx["chop_reason"].startswith("chop_history_short"))
+
     def test_signal_score_is_directional_and_clamped_at_zero(self):
         long_score = signal_score(
             rs30=0.01,
