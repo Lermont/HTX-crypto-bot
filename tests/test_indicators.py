@@ -2,6 +2,7 @@
 
 import math
 import unittest
+from unittest import mock
 import pytest
 
 from htxbot.indicators import (
@@ -30,7 +31,6 @@ from htxbot.signal_math import (
 )
 
 
-
 def _sample_standard_deviation(values):
     mean = sum(values) / len(values)
     variance = sum((item - mean) ** 2 for item in values) / (len(values) - 1)
@@ -38,7 +38,7 @@ def _sample_standard_deviation(values):
 
 
 def _expected_realized_volatility(closes, window):
-    sample = closes[-window - 1:]
+    sample = closes[-window - 1 :]
     returns = [
         math.log(sample[index] / sample[index - 1])
         for index in range(1, len(sample))
@@ -115,7 +115,9 @@ class IndicatorMathTests(unittest.TestCase):
     def test_log_return_valid_positive_prices(self):
         self.assertAlmostEqual(compute_log_return(110.0, 100.0), math.log(1.1))
 
-    def test_realized_volatility_uses_recent_window_log_returns_and_sample_variance(self):
+    def test_realized_volatility_uses_recent_window_log_returns_and_sample_variance(
+        self,
+    ):
         closes = [100.0, 110.0, 121.0, 133.1, 120.0, 108.0]
         window = 2
 
@@ -139,6 +141,7 @@ class IndicatorMathTests(unittest.TestCase):
 
     def test_realized_volatility_numpy_and_fallback_paths_match(self):
         import htxbot.indicators as indicators
+
         closes = [95.0, 101.0, 97.5, 106.0, 104.0, 111.0]
         window = 5
 
@@ -239,6 +242,103 @@ class SignalMathTests(unittest.TestCase):
         self.assertTrue(short_context["pullback_valid"])
         self.assertGreater(long_context["pullback_recovery_gap"], 0.0)
         self.assertGreater(short_context["pullback_recovery_gap"], 0.0)
+
+    def test_ema_pullback_recovery_context_invalidates_trend_without_pullback(self):
+        closes = [100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 112.0, 114.0]
+        context = ema_pullback_recovery_context(
+            closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=3,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        self.assertFalse(context["pullback_valid"])
+        self.assertFalse(context["pullback_had_pullback"])
+        self.assertTrue(context["pullback_recovered"])
+
+    def test_ema_pullback_recovery_context_invalidates_active_pullback_without_recovery(
+        self,
+    ):
+        closes = [100.0, 102.0, 104.0, 102.0, 100.0, 98.0, 96.0, 94.0]
+        context = ema_pullback_recovery_context(
+            closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=3,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        self.assertFalse(context["pullback_valid"])
+        self.assertTrue(context["pullback_had_pullback"])
+        self.assertFalse(context["pullback_recovered"])
+
+    def test_ema_pullback_recovery_context_respects_max_cross_age(self):
+        closes = [100.0, 95.0, 90.0, 100.0, 105.0, 105.0, 105.0, 105.0, 105.0, 105.0]
+        # Cross age will be 6 candles ago (from index 3 to 9)
+        context_valid = ema_pullback_recovery_context(
+            closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=8,
+            max_cross_age=6,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        context_invalid = ema_pullback_recovery_context(
+            closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=8,
+            max_cross_age=1,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        self.assertTrue(context_valid["pullback_valid"])
+        self.assertFalse(context_invalid["pullback_valid"])
+        self.assertEqual(context_valid["pullback_cross_age_candles"], 6)
+
+    def test_ema_pullback_recovery_context_respects_gap_threshold(self):
+        closes = [100.0, 99.0, 98.0, 97.0, 98.0, 100.0, 100.5, 101.0]
+        context_valid = ema_pullback_recovery_context(
+            closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=3,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        context_invalid = ema_pullback_recovery_context(
+            closes,
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=3,
+            gap_threshold=0.05,
+            position_side="long",
+        )
+        self.assertTrue(context_valid["pullback_valid"])
+        self.assertFalse(context_invalid["pullback_valid"])
+        self.assertTrue(context_valid["pullback_recovered"])
+        self.assertFalse(context_invalid["pullback_recovered"])
+
+    def test_ema_pullback_recovery_context_handles_empty_prices(self):
+        context = ema_pullback_recovery_context(
+            [],
+            fast_period=2,
+            slow_period=4,
+            lookback=6,
+            max_cross_age=3,
+            gap_threshold=0.0,
+            position_side="long",
+        )
+        self.assertFalse(context["pullback_valid"])
+        self.assertFalse(context["pullback_recovered"])
+        self.assertFalse(context["pullback_had_pullback"])
+        self.assertEqual(context["pullback_cross_age_candles"], -1)
 
     def test_ema_signal_direction_metrics_preserve_long_short_invariants(self):
         long_metrics = ema_signal_direction_metrics(
