@@ -40,7 +40,7 @@ from htxbot.shared_exchange import (
     MultiAccountExchange,
     ThreadSafeExchange,
 )
-from tests.config_overrides import override_config
+from tests.config_overrides import override_config, override_frozen_config_fields
 
 
 SYMBOL = "TEST/USDT:USDT"
@@ -9389,6 +9389,31 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(rows[-1]["level"], "INFO")
                 self.assertEqual(rows[-1]["event"], "futures_setup")
                 self.assertIn("position_mode_one_way_confirmed", rows[-1]["reason"])
+
+    def test_position_mode_isolated_updates_per_symbol(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            with override_frozen_config_fields(config.RISK, margin_mode="isolated"):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+
+                def fake_position_info(request):
+                    data = {"positions": [], "contract_detail": []}
+                    return {"status": "ok", "data": data}
+
+                bot.exchange.contractPrivatePostLinearSwapApiV1SwapCrossAccountPositionInfo = fake_position_info
+
+                self.assertTrue(bot._ensure_one_way_position_mode(force=True))
+                self.assertTrue(bot.one_way_mode_checked)
+
+                calls = bot.exchange.set_position_mode_calls
+                self.assertEqual(len(calls), 3)
+
+                expected_calls = [
+                    (False, "BTC/USDT:USDT", bot._position_params()),
+                    (False, "ETH/USDT:USDT", bot._position_params()),
+                    (False, "SOL/USDT:USDT", bot._position_params()),
+                ]
+                self.assertEqual(sorted(calls), sorted(expected_calls))
 
     def test_position_mode_locked_by_existing_positions_logs_info(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
