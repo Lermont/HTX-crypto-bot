@@ -1061,14 +1061,10 @@ class ExchangeMixin:
                 entry["event"].set()
 
     def _ticker_prefetch_symbols(self) -> List[str]:
-        symbols = []
-        seen = set()
-        for symbol in list(getattr(self, "symbols", []) or []):
-            if not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
-            symbols.append(symbol)
-        return symbols
+        raw = getattr(self, "symbols", None)
+        if not raw:
+            return []
+        return [s for s in dict.fromkeys(raw) if s]
 
     def _prefetch_ticker_snapshots(
         self, symbols: Optional[List[str]] = None
