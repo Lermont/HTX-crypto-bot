@@ -18,8 +18,6 @@ from .concurrency import instance_rlock
 from .shared_exchange import MultiAccountExchange, ThreadSafeExchange
 
 
-
-
 @functools.lru_cache(maxsize=16)
 def _compute_gold_coin_candidates(gold_coins: Tuple[str, ...]) -> Tuple[str, ...]:
     aliases = {
@@ -36,8 +34,8 @@ def _compute_gold_coin_candidates(gold_coins: Tuple[str, ...]) -> Tuple[str, ...
                 candidates.append(item)
     return tuple(candidates)
 
-class UnexpectedExchangeResponse(RuntimeError):
 
+class UnexpectedExchangeResponse(RuntimeError):
     """Raised when CCXT returns a payload shape that cannot be trusted."""
 
 
@@ -444,26 +442,35 @@ class ExchangeMixin:
         if not isinstance(payload, dict):
             return False
 
-        normalized = {
-            str(key).lower().replace("-", "_"): value for key, value in payload.items()
-        }
-        status = str(normalized.get("status") or "").strip().lower()
-        if status in {"error", "err", "failed", "fail"}:
-            return True
-        if normalized.get("success") is False:
-            return True
-        if any(
-            key in normalized
-            for key in ("err_code", "err_msg", "error_code", "error_msg")
-        ):
-            return True
+        for k, v in payload.items():
+            if not isinstance(k, str):
+                k = str(k)
 
-        error = normalized.get("error")
-        if isinstance(error, dict):
-            return bool(error)
-        if isinstance(error, str):
-            return bool(error.strip())
-        return bool(error)
+            k_lower = k.lower()
+            if "-" in k_lower:
+                k_lower = k_lower.replace("-", "_")
+
+            if k_lower == "status":
+                if v and isinstance(v, str):
+                    status = v.strip().lower()
+                    if status in {"error", "err", "failed", "fail"}:
+                        return True
+            elif k_lower == "success":
+                if v is False:
+                    return True
+            elif k_lower in {"err_code", "err_msg", "error_code", "error_msg"}:
+                return True
+            elif k_lower == "error":
+                if isinstance(v, dict):
+                    if v:
+                        return True
+                elif isinstance(v, str):
+                    if v.strip():
+                        return True
+                elif v:
+                    return True
+
+        return False
 
     def _expect_ccxt_list_response(
         self,
@@ -1930,7 +1937,6 @@ class ExchangeMixin:
         )
         return True
 
-
     def _get_max_leverage(self, symbol: str) -> float:
         try:
             tiers = self.exchange.fetch_leverage_tiers([symbol])
@@ -1940,7 +1946,9 @@ class ExchangeMixin:
             pass
         return 0.0
 
-    def _set_leverage_safe(self, symbol: str, leverage: int, _is_fallback: bool = False) -> bool:
+    def _set_leverage_safe(
+        self, symbol: str, leverage: int, _is_fallback: bool = False
+    ) -> bool:
         try:
             self.exchange.set_leverage(
                 int(leverage), symbol, params=self._position_params()
@@ -1960,7 +1968,9 @@ class ExchangeMixin:
                         symbol=symbol,
                         reason="leverage_fallback",
                     )
-                    return self._set_leverage_safe(symbol, int(max_leverage), _is_fallback=True)
+                    return self._set_leverage_safe(
+                        symbol, int(max_leverage), _is_fallback=True
+                    )
 
             self._log_event(
                 "WARNING",
