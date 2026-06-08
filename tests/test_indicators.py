@@ -3,6 +3,7 @@ from unittest import mock
 
 import math
 import unittest
+from unittest import mock
 import pytest
 
 from htxbot.indicators import (
@@ -222,6 +223,29 @@ class SignalMathTests(unittest.TestCase):
             context["rs60"], math.log(121.0 / 100.0) - math.log(110.25 / 100.0)
         )
         self.assertAlmostEqual(context["btc_return_30m"], math.log(110.25 / 105.0))
+
+    def test_relative_strength_handles_empty_lists(self):
+        context = relative_strength_context([], [], fast_window=1, slow_window=2)
+        self.assertEqual(context["rs30"], 0.0)
+        self.assertEqual(context["rs60"], 0.0)
+        self.assertEqual(context["btc_return_30m"], 0.0)
+
+    def test_relative_strength_handles_non_positive_prices(self):
+        closes = [100.0, 110.0, 0.0]
+        btc = [100.0, 105.0, -10.0]
+        context = relative_strength_context(closes, btc, fast_window=1, slow_window=2)
+        self.assertEqual(context["rs30"], 0.0)
+        self.assertEqual(context["rs60"], 0.0)
+        self.assertEqual(context["btc_return_30m"], 0.0)
+
+    def test_relative_strength_handles_insufficient_data(self):
+        closes = [100.0, 110.0]
+        btc = [100.0, 105.0]
+        # fast_window=1, slow_window=2 means required length is > max(1, 2) which is > 2
+        context = relative_strength_context(closes, btc, fast_window=1, slow_window=2)
+        self.assertEqual(context["rs30"], 0.0)
+        self.assertEqual(context["rs60"], 0.0)
+        self.assertEqual(context["btc_return_30m"], 0.0)
 
     def test_pullback_recovery_context_is_mirrored_for_long_and_short(self):
         long_context = ema_pullback_recovery_context(
