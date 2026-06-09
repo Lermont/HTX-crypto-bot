@@ -1,3 +1,4 @@
+from .models import SignalAnalyticsEvent
 # -*- coding: utf-8 -*-
 
 import atexit
@@ -181,12 +182,14 @@ class StateMixin:
             record_diagnostic = getattr(self, "_record_diagnostic", None)
             if record_diagnostic:
                 record_diagnostic(
-                    "fault",
-                    "state",
-                    "state_load_failed",
-                    f"Could not read futures state; starting with empty state: {exc}",
-                    reason="state_load_failed",
-                    exception=exc,
+                    DiagnosticEvent(
+                        severity="fault",
+                        category="state",
+                        event="state_load_failed",
+                        message=f"Could not read futures state; starting with empty state: {exc}",
+                        reason="state_load_failed",
+                        exception=exc,
+                    )
                 )
             return {}
 
@@ -262,8 +265,9 @@ class StateMixin:
                 except Exception:
                     try:
                         tmp_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
+                    except OSError as exc:
+                        logger = getattr(self, "log", logging.getLogger(__name__))
+                        logger.warning("Failed to remove temporary state file: %s", exc)
                     raise
 
     def _pid_is_running(self, pid: int) -> bool:
@@ -331,14 +335,17 @@ class StateMixin:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(str(os.getpid()))
             except Exception:
+                logger = getattr(self, "log", logging.getLogger(__name__))
                 try:
                     os.close(fd)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger = getattr(self, "log", logging.getLogger(__name__))
+                    logger.warning("Failed to close lock fd: %s", exc)
                 try:
                     self.lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger = getattr(self, "log", logging.getLogger(__name__))
+                    logger.warning("Failed to remove lock path: %s", exc)
                 raise
             atexit.register(self._release_runtime_lock)
             return
@@ -371,7 +378,7 @@ class StateMixin:
                 self.lock_path.unlink()
         except OSError as exc:
             logger = getattr(self, "log", logging.getLogger(__name__))
-            logger.warning("Failed to release runtime lock %s: %s", self.lock_path, exc)
+            logger.warning("Failed to release runtime lock: %s", exc)
 
     def _get_state(self, symbol: str) -> TradeState:
         with instance_rlock(self, "_state_lock"):
@@ -1561,7 +1568,7 @@ class StateMixin:
                 "btc_return_30m": state.last_btc_return_30m,
                 "valid": True,
             }
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "fill_synced",
                 symbol=symbol,
                 signal=fill_signal,
@@ -1585,7 +1592,7 @@ class StateMixin:
                     "fill_source": source,
                     "aggregate_avg": avg_entry,
                 },
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"{side.title()} entry fill synced for {symbol}: contracts={detail_contracts} avg={detail_price}",
@@ -1721,7 +1728,7 @@ class StateMixin:
                 "btc_return_30m": state.last_btc_return_30m,
                 "valid": True,
             }
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "fill_synced",
                 symbol=symbol,
                 signal=fill_signal,
@@ -1747,7 +1754,7 @@ class StateMixin:
                     "aggregate_avg": avg_exit,
                     "exit_scope": str(detail.get("exit_scope") or ""),
                 },
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"{side.title()} exit fill synced for {symbol}: contracts={detail_contracts} avg={detail_price}",
@@ -2228,7 +2235,7 @@ class StateMixin:
                 }
             )
 
-        self._record_signal_analytics(
+        self._record_signal_analytics(SignalAnalyticsEvent(
             "cycle_closed",
             symbol=symbol,
             signal={
@@ -2259,7 +2266,7 @@ class StateMixin:
                 "max_buy_stage": state.buy_stage,
                 "max_averaging_stage": state.average_stage,
             },
-        )
+        ))
         self._log_event(
             "INFO",
             f"Cycle closed for {symbol}: pnl={realized:.8f}",
