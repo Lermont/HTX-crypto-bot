@@ -333,7 +333,7 @@ class SignalMixin:
         return thresholds
 
     def _entry_signal_quality_context(
-        self, signal: Optional[dict], crowded: bool = False, external_bonus: float = 0.0
+        self, signal: Optional[dict], crowded: bool = False, external_bonus: float = 0.0, external_multiplier: float = 1.0
     ) -> dict:
         signal = signal or {}
         thresholds = self._entry_thresholds(crowded=crowded)
@@ -341,7 +341,8 @@ class SignalMixin:
         strategy = config.STRATEGY
         raw_score = self._safe_float(signal.get("score"), 0.0)
         external_bonus = self._safe_float(external_bonus, 0.0)
-        base_score = raw_score + external_bonus
+        external_multiplier = max(0.0, self._safe_float(external_multiplier, 1.0))
+        base_score = (raw_score + external_bonus) * external_multiplier
         penalties = {}
         flags = {
             "valid": bool(signal.get("valid", False)),
@@ -502,6 +503,7 @@ class SignalMixin:
             "min_score": min_score,
             "raw_score": raw_score,
             "external_bonus": external_bonus,
+            "external_multiplier": external_multiplier,
             "base_score": base_score,
             "weighted_score": weighted_score,
             "penalty_total": penalty_total,
@@ -544,6 +546,7 @@ class SignalMixin:
             f"weighted_score={self._safe_float(context.get('weighted_score'), 0.0):.6f};"
             f"raw_score={self._safe_float(context.get('raw_score'), 0.0):.6f};"
             f"external_bonus={self._safe_float(context.get('external_bonus'), 0.0):.6f};"
+            f"external_multiplier={self._safe_float(context.get('external_multiplier', 1.0), 1.0):.6f};"
             f"penalty_total={self._safe_float(context.get('penalty_total'), 0.0):.6f};"
             f"{penalty_text}"
             f"{flag_text}"
@@ -568,8 +571,12 @@ class SignalMixin:
             getattr(self, "_external_entry_score_bonus", lambda _signal: 0.0)(signal),
             0.0,
         )
+        external_multiplier = self._safe_float(
+            getattr(self, "_external_entry_score_multiplier", lambda _signal: 1.0)(signal),
+            1.0,
+        )
         context = self._entry_signal_quality_context(
-            signal, crowded=crowded, external_bonus=external_bonus
+            signal, crowded=crowded, external_bonus=external_bonus, external_multiplier=external_multiplier
         )
         if context.get("passed"):
             return ""
