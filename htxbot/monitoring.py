@@ -1074,6 +1074,7 @@ class MonitoringMixin:
                 except (ValueError, TypeError):
                     return 0.0
 
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in getattr(CsvEventData, "__dataclass_fields__", {})}
             csv_data = CsvEventData(
                 level=level_upper,
                 event=event,
@@ -1083,7 +1084,7 @@ class MonitoringMixin:
                 retryable=int(bool(exception_info.get("retryable", False)))
                 if diagnostic_exception or diagnostic_retryable is not None
                 else "",
-                **kwargs,
+                **filtered_kwargs,
             )
             self._append_csv(csv_data)
         except Exception as exc:
