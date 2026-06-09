@@ -240,4 +240,48 @@ __all__ = [
     "SignalAnalyticsEvent",
     "SignalContext",
     "TradeState",
+    "CsvEventData",
 ]
+
+@dataclass
+class CsvEventData:
+    level: str
+    event: str
+    message: str
+    exception_type: str = ""
+    error_code: str = ""
+    retryable: Any = ""
+    symbol: str = ""
+    side: str = ""
+    position_size: float = 0.0
+    entry_price: float = 0.0
+    rs30: float = 0.0
+    rs60: float = 0.0
+    ema30: float = 0.0
+    ema60: float = 0.0
+    ema25d: float = 0.0
+    ema50d: float = 0.0
+    ema1d: float = 0.0
+    ema2d: float = 0.0
+    ema50: float = 0.0
+    ema100: float = 0.0
+    btc_return_30m: float = 0.0
+    context: Optional[dict] = None
+    reason: str = ""
+    action: str = ""
+    amount: float = 0.0
+    price: float = 0.0
+    filled: float = 0.0
+    remaining: float = 0.0
+    notional: float = 0.0
+    fee_quote: float = 0.0
+    fee_currency: str = ""
+    fill_source: str = ""
+    order_id: str = ""
+    operation_id: str = ""
+    signal_id: str = ""
+    decision: str = ""
+    closeable_contracts: float = 0.0
+    planned_contracts: float = 0.0
+    existing_tracked_contracts: float = 0.0
+    cycle_id: str = ""
