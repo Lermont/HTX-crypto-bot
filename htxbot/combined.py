@@ -402,9 +402,7 @@ class CombinedHtxFuturesBot:
                 return ""
         return ""
 
-    def _position_payload_price(
-        self, bot: HtxFuturesBot, symbol: str, payload: dict
-    ) -> float:
+    def _extract_payload_price(self, bot: HtxFuturesBot, payload: dict) -> float:
         info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
         for source in (payload, info):
             if not isinstance(source, dict):
@@ -421,8 +419,23 @@ class CombinedHtxFuturesBot:
                 price = self._safe_float(bot, source.get(key), 0.0)
                 if price > 0:
                     return price
+        return 0.0
+
+    def _position_payload_price(
+        self,
+        bot: HtxFuturesBot,
+        symbol: str,
+        payload: dict,
+        preloaded_tickers: Optional[dict] = None,
+    ) -> float:
+        price = self._extract_payload_price(bot, payload)
+        if price > 0:
+            return price
         try:
-            ticker = bot.exchange.fetch_ticker(symbol)
+            if preloaded_tickers is not None and symbol in preloaded_tickers:
+                ticker = preloaded_tickers[symbol]
+            else:
+                ticker = bot.exchange.fetch_ticker(symbol)
             for key in ("last", "mark", "bid", "ask"):
                 price = self._safe_float(bot, ticker.get(key), 0.0)
                 if price > 0:
@@ -543,6 +556,8 @@ class CombinedHtxFuturesBot:
             "hedge_short_available": 0.0,
             "hedge_price": 0.0,
         }
+
+        missing_symbols = []
         for position in positions or []:
             if not isinstance(position, dict):
                 continue
@@ -555,7 +570,33 @@ class CombinedHtxFuturesBot:
             contracts = self._safe_float(bot, position.get("contracts"), 0.0)
             if contracts <= 0:
                 continue
-            price = self._position_payload_price(bot, symbol, position)
+            if self._extract_payload_price(bot, position) <= 0:
+                missing_symbols.append(symbol)
+
+        preloaded_tickers = {}
+        if missing_symbols:
+            try:
+                fetched = bot.exchange.fetch_tickers(list(set(missing_symbols)))
+                if isinstance(fetched, dict):
+                    preloaded_tickers = fetched
+            except Exception:
+                pass
+
+        for position in positions or []:
+            if not isinstance(position, dict):
+                continue
+            symbol = self._position_payload_symbol(bot, position)
+            if not symbol or (symbol != hedge_symbol and symbol not in managed_symbols):
+                continue
+            side = str(position.get("side") or "").lower()
+            if side not in {"long", "short"}:
+                continue
+            contracts = self._safe_float(bot, position.get("contracts"), 0.0)
+            if contracts <= 0:
+                continue
+            price = self._position_payload_price(
+                bot, symbol, position, preloaded_tickers
+            )
             if price <= 0:
                 continue
             if symbol == hedge_symbol:

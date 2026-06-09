@@ -542,6 +542,7 @@ class ExternalPriceFeedSettings:
     min_valid_ask_qty_usdt: float
     max_internal_spread_bps: float
     entry_filter_enabled: bool
+    score_penalty_multiplier: float
     max_htx_premium_for_long_bps: float
     max_htx_discount_for_short_bps: float
     block_if_exchange_divergence_1m_bps: float
@@ -1959,7 +1960,10 @@ def _make_external_price_feed_settings(name: str) -> ExternalPriceFeedSettings:
             "EXTERNAL_PRICE_MAX_INTERNAL_SPREAD_BPS", 30.0, profile=name
         ),
         entry_filter_enabled=_env_bool(
-            "EXTERNAL_PRICE_ENTRY_FILTER_ENABLED", True, profile=name
+            "EXTERNAL_PRICE_ENTRY_FILTER_ENABLED", False, profile=name
+        ),
+        score_penalty_multiplier=_env_float(
+            "EXTERNAL_PRICE_SCORE_PENALTY_MULTIPLIER", 0.5, profile=name
         ),
         max_htx_premium_for_long_bps=_env_float(
             "EXTERNAL_PRICE_MAX_HTX_PREMIUM_FOR_LONG_BPS", 15.0, profile=name

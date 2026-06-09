@@ -2047,9 +2047,10 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
-                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn("external_premium_blocked", rows[-1]["reason"])
+                self.assertIn("entry_weighted_score_below_min", rows[-1]["block_reason"])
+                self.assertIn("external_multiplier=0.5", rows[-1]["block_reason"])
 
     def test_external_price_short_discount_blocks_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
@@ -2068,9 +2069,10 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
-                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn("external_discount_blocked", rows[-1]["reason"])
+                self.assertIn("entry_weighted_score_below_min", rows[-1]["block_reason"])
+                self.assertIn("external_multiplier=0.5", rows[-1]["block_reason"])
 
     def test_entry_gate_external_and_budget_blocks_write_signal_analytics(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2104,7 +2106,7 @@ class UnifiedBotTests(unittest.TestCase):
             ) as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(rows[-1]["decision"], "entry_gate_checked")
-            self.assertIn("external_premium_blocked", rows[-1]["block_reason"])
+            self.assertIn("entry_weighted_score_below_min", rows[-1]["block_reason"])
             self.assertEqual(rows[-1]["external_valid"], "1")
 
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2151,10 +2153,11 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._maybe_place_initial_buy(SYMBOL, self.entry_signal())
 
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
-                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn("external_reference_invalid", rows[-1]["reason"])
-                self.assertIn("internal_spread_too_wide", rows[-1]["reason"])
+                self.assertIn("entry_weighted_score_below_min", rows[-1]["block_reason"])
+                self.assertIn("external_multiplier=0.5", rows[-1]["block_reason"])
+
 
     def test_external_price_disable_stale_reference_blocks_entry_even_when_ignore_is_true(
         self,
@@ -2175,9 +2178,10 @@ class UnifiedBotTests(unittest.TestCase):
                 bot._maybe_place_initial_buy(SYMBOL, self.entry_signal())
 
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
-                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                with bot.signal_analytics_csv_path.open(newline="", encoding="utf-8") as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn("external_reference_stale", rows[-1]["reason"])
+                self.assertIn("entry_weighted_score_below_min", rows[-1]["block_reason"])
+                self.assertIn("external_multiplier=0.5", rows[-1]["block_reason"])
 
     def test_default_external_impulse_bonus_matches_entry_score_scale(self):
         self.assertAlmostEqual(config.EXTERNAL_PRICE_FEED.impulse_score_bonus, 0.02)
@@ -2255,7 +2259,7 @@ class UnifiedBotTests(unittest.TestCase):
 
                 state = bot._get_state(SYMBOL)
                 self.assertFalse(state.entry_orders)
-                self.assertGreater(state.cooldown_until, time.time())
+                self.assertFalse(state.cooldown_until)
 
     def test_external_price_context_is_cached_within_cycle(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2310,9 +2314,8 @@ class UnifiedBotTests(unittest.TestCase):
                     newline="", encoding="utf-8"
                 ) as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn(
-                    "external_directional_1m_blocked", rows[-1]["block_reason"]
-                )
+                self.assertIn("entry_weighted_score_below_min", rows[-1]["block_reason"])
+                self.assertIn("external_multiplier=0.5", rows[-1]["block_reason"])
 
     def test_htx_orderbook_spread_filter_blocks_fresh_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -2388,6 +2391,72 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(
                     bot.exchange.fetch_order_book_calls, calls_after_prefetch
                 )
+
+
+    def test_order_book_prefetch_safe_exception_handling(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            strategy = replace(
+                config.STRATEGY,
+                entry_spread_filter_enabled=True,
+                entry_spread_filter_max_bps=30.0,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+
+                def mock_cached_order_book(symbol, limit=None):
+                    if symbol == SECOND_SYMBOL:
+                        raise ValueError("Simulated network error")
+                    return {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]]}
+
+                bot._cached_order_book = mock_cached_order_book
+
+                log_events = []
+                bot._log_event = lambda *args, **kwargs: log_events.append((args, kwargs))
+
+                bot._reset_market_data_caches()
+                bot._prefetch_market_data_snapshots()
+
+                self.assertEqual(len(log_events), 1)
+                args, kwargs = log_events[0]
+                self.assertEqual(args[0], "DEBUG")
+                self.assertIn(f"HTX order book prefetch failed for {SECOND_SYMBOL}", args[1])
+                self.assertEqual(kwargs["symbol"], SECOND_SYMBOL)
+                self.assertEqual(kwargs["reason"], "order_book_prefetch_failed")
+                self.assertIsInstance(kwargs["exception"], ValueError)
+
+    def test_parallel_order_book_prefetch_safe_exception_handling(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            runtime = replace(config.RUNTIME, market_data_max_workers=2)
+            strategy = replace(
+                config.STRATEGY,
+                entry_spread_filter_enabled=True,
+                entry_spread_filter_max_bps=30.0,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+
+                def mock_cached_order_book(symbol, limit=None):
+                    if symbol == SECOND_SYMBOL:
+                        raise ValueError("Simulated parallel network error")
+                    return {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]]}
+
+                bot._cached_order_book = mock_cached_order_book
+
+                log_events = []
+                bot._log_event = lambda *args, **kwargs: log_events.append((args, kwargs))
+
+                bot._reset_market_data_caches()
+                bot._prefetch_market_data_snapshots()
+
+                self.assertEqual(len(log_events), 1)
+                args, kwargs = log_events[0]
+                self.assertEqual(args[0], "DEBUG")
+                self.assertIn(f"HTX order book prefetch failed for {SECOND_SYMBOL}", args[1])
+                self.assertEqual(kwargs["symbol"], SECOND_SYMBOL)
+                self.assertEqual(kwargs["reason"], "order_book_prefetch_failed")
+                self.assertIsInstance(kwargs["exception"], ValueError)
 
     def test_parallel_order_book_prefetch_preserves_profile_context(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
@@ -2586,9 +2655,8 @@ class UnifiedBotTests(unittest.TestCase):
                     newline="", encoding="utf-8"
                 ) as handle:
                     rows = list(csv.DictReader(handle))
-                self.assertIn(
-                    "external_directional_1m_blocked", rows[-1]["block_reason"]
-                )
+                self.assertIn("entry_weighted_score_below_min", rows[-1]["block_reason"])
+                self.assertIn("external_multiplier=0.5", rows[-1]["block_reason"])
 
     def test_pending_entry_is_canceled_when_directional_1m_turns_adverse(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -4450,12 +4518,10 @@ class UnifiedBotTests(unittest.TestCase):
 
                 gate = bot._prepare_new_entry_gate()
 
-                self.assertEqual(gate["external_blocked_count"], 1)
-                self.assertNotIn(SYMBOL, gate["ranked_symbols"])
-                self.assertEqual(gate["allowed_symbols"], {SECOND_SYMBOL, BTC_SYMBOL})
-                self.assertIn(
-                    "external_reference_invalid", gate["blocked_reasons"][SYMBOL]
-                )
+                self.assertEqual(gate["external_blocked_count"], 0) # No longer blocked at gate, it is penalized
+                self.assertIn(SYMBOL, gate["ranked_symbols"]) # Kept in ranked but with lower score due to penalty
+                self.assertEqual(gate["allowed_symbols"], {SECOND_SYMBOL, BTC_SYMBOL}) # Still allowed these two because SYMBOL score 0.10 * 0.5 = 0.05 is lower than 0.08 and 0.07
+                self.assertIn("entry_top_n_blocked", gate["blocked_reasons"].get(SYMBOL, "ok"))
 
     def test_entry_gate_rate_limit_counts_recent_positions(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5770,9 +5836,7 @@ class UnifiedBotTests(unittest.TestCase):
                 ) as handle:
                     rows = list(csv.DictReader(handle))
                 self.assertEqual(rows[-1]["decision"], "averaging_checked")
-                self.assertIn(
-                    "external_directional_1m_blocked", rows[-1]["block_reason"]
-                )
+                self.assertIn("external_directional_1m_blocked", rows[-1]["block_reason"])
 
     def test_ema_averaging_uses_add_signal_even_if_full_entry_invalid(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
