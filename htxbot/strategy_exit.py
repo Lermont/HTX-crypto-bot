@@ -1,3 +1,4 @@
+from .models import SignalAnalyticsEvent
 # -*- coding: utf-8 -*-
 
 import math
@@ -2769,7 +2770,7 @@ class ExitStrategy:
             stage_notional = self._contracts_to_notional(symbol, contracts, price)
             exit_planned_orders += 1
             exit_planned_notional += stage_notional
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 event,
                 symbol=symbol,
                 signal=signal or {},
@@ -2791,7 +2792,7 @@ class ExitStrategy:
                     "plan_context": plan_context,
                     "sell_context": sell_context,
                 },
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"{exit_label} exit ladder {action} for {symbol}: stage={index} contracts={contracts} price={price}",
@@ -2984,7 +2985,7 @@ class ExitStrategy:
 
         event = "exit_ladder_rebuilt" if rebuild else "exit_ladder_placed"
         stage_notional = self._contracts_to_notional(symbol, contracts, price)
-        self._record_signal_analytics(
+        self._record_signal_analytics(SignalAnalyticsEvent(
             event,
             symbol=symbol,
             signal={},
@@ -3003,7 +3004,7 @@ class ExitStrategy:
                 "markup": 0.0,
                 "exit_scope": "average_recovery",
             },
-        )
+        ))
         action = "rebuilt" if rebuild else "placed"
         self._log_event(
             "INFO",

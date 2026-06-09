@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 import config
 
+from .models import SignalAnalyticsEvent
 from .concurrency import instance_rlock
 from .fileio import replace_path_with_retry
 
@@ -423,37 +424,20 @@ class MonitoringMixin:
             return dict(cached) if isinstance(cached, dict) else {}
         return {}
 
-    def _record_signal_analytics(
-        self,
-        decision: str,
-        symbol: str = "",
-        signal: Optional[dict] = None,
-        block_reason: str = "",
-        external_context: Optional[dict] = None,
-        planned_budget: float = 0.0,
-        planned_orders: int = 0,
-        planned_notional: float = 0.0,
-        placed_orders: int = 0,
-        filled_notional: float = 0.0,
-        realized_pnl_quote: float = 0.0,
-        operation_id: str = "",
-        order_id: str = "",
-        cycle_id: str = "",
-        context: Optional[dict] = None,
-    ):
-        signal = signal or {}
-        symbol = symbol or str(signal.get("symbol") or "")
-        external_context = external_context if isinstance(external_context, dict) else self._external_context_from_cache(symbol)
+    def _record_signal_analytics(self, event: SignalAnalyticsEvent):
+        signal = event.signal or {}
+        symbol = event.symbol or str(signal.get("symbol") or "")
+        external_event.context = event.external_event.context if isinstance(event.external_event.context, dict) else self._external_context_from_cache(symbol)
         signal_id = self._signal_id(symbol, signal)
         signal_ts = signal.get("ts") or ""
         strategy_name = signal.get("strategy_name") or "ema_pullback"
         side = config.POSITION_SIDE
-        block_reason = block_reason or self._signal_block_reason(signal)
+        event.block_reason = event.block_reason or self._signal_block_reason(signal)
         state = None
         if symbol and hasattr(self, "states") and symbol in self.states:
             state = self.states[symbol]
-        if not cycle_id and state is not None:
-            cycle_id = str(getattr(state, "cycle_id", "") or "")
+        if not event.cycle_id and state is not None:
+            event.cycle_id = str(getattr(state, "cycle_id", "") or "")
 
         row = [
             int(time.time()),
@@ -466,8 +450,8 @@ class MonitoringMixin:
             int(bool(signal.get("valid", False))),
             int(bool(signal.get("entry_valid", False))),
             int(bool(signal.get("add_valid", False))),
-            decision,
-            block_reason,
+            event.decision,
+            event.block_reason,
             self._fmt_monitoring_float(signal.get("score"), 8),
             self._fmt_monitoring_float(signal.get("rs30"), 8),
             self._fmt_monitoring_float(signal.get("rs60"), 8),
@@ -495,15 +479,15 @@ class MonitoringMixin:
             self._fmt_monitoring_float(signal.get("volume_profile_value_area_high"), 12),
             signal.get("volume_reason", ""),
             signal.get("macro_regime", ""),
-            int(bool(external_context.get("valid", False))) if external_context else "",
-            int(bool(external_context.get("stale", False))) if external_context else "",
-            self._fmt_monitoring_float(external_context.get("spread_bps"), 8) if external_context else "",
-            self._fmt_monitoring_float(planned_budget, 8),
-            int(planned_orders or 0),
-            self._fmt_monitoring_float(planned_notional, 8),
-            int(placed_orders or 0),
-            self._fmt_monitoring_float(filled_notional, 8),
-            self._fmt_monitoring_float(realized_pnl_quote, 8),
+            int(bool(external_event.context.get("valid", False))) if external_event.context else "",
+            int(bool(external_event.context.get("stale", False))) if external_event.context else "",
+            self._fmt_monitoring_float(external_event.context.get("spread_bps"), 8) if external_event.context else "",
+            self._fmt_monitoring_float(event.planned_budget, 8),
+            int(event.planned_orders or 0),
+            self._fmt_monitoring_float(event.planned_notional, 8),
+            int(event.placed_orders or 0),
+            self._fmt_monitoring_float(event.filled_notional, 8),
+            self._fmt_monitoring_float(event.realized_pnl_quote, 8),
         ]
 
         csv_path = getattr(self, "signal_analytics_csv_path", None)
@@ -515,25 +499,25 @@ class MonitoringMixin:
             "profile": self._current_profile_name(),
             "symbol": symbol,
             "side": side,
-            "decision": decision,
-            "block_reason": block_reason,
+            "event.decision": event.decision,
+            "event.block_reason": event.block_reason,
             "signal_id": signal_id,
-            "operation_id": operation_id,
-            "order_id": order_id,
-            "cycle_id": cycle_id,
+            "event.operation_id": event.operation_id,
+            "event.order_id": event.order_id,
+            "event.cycle_id": event.cycle_id,
             "signal": signal,
-            "external_context": external_context,
-            "macro_context": (getattr(self, "signal_cache", {}) or {}).get("macro", {}),
+            "external_event.context": external_event.context,
+            "macro_event.context": (getattr(self, "signal_cache", {}) or {}).get("macro", {}),
             "config": self._selected_config_snapshot(),
             "metrics": {
-                "planned_budget": planned_budget,
-                "planned_orders": planned_orders,
-                "planned_notional": planned_notional,
-                "placed_orders": placed_orders,
-                "filled_notional": filled_notional,
-                "realized_pnl_quote": realized_pnl_quote,
+                "event.planned_budget": event.planned_budget,
+                "event.planned_orders": event.planned_orders,
+                "event.planned_notional": event.planned_notional,
+                "event.placed_orders": event.placed_orders,
+                "event.filled_notional": event.filled_notional,
+                "event.realized_pnl_quote": event.realized_pnl_quote,
             },
-            "context": context or {},
+            "event.context": event.context or {},
         }
         self._append_jsonl(getattr(self, "signal_analytics_jsonl_path", None), payload)
 
