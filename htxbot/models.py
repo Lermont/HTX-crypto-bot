@@ -182,7 +182,18 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
+
+@dataclass(frozen=True)
+class BtcHedgeLogContext:
+    level: str
+    message: str
+    reason: str = ''
+    event: str = "btc_hedge"
+    throttle_sec: float = 0.0
+    extra: dict = field(default_factory=dict)
+
 __all__ = [
+    "BtcHedgeLogContext",
     "OrderRequest",
     "ExitLadderConfig",
     "ExitLadderPreflight",
