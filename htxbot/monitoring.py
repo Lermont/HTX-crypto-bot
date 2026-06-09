@@ -21,6 +21,7 @@ from .models import DiagnosticEvent
 
 
 _monitoring_global_lock = threading.RLock()
+_HTML_MARKER_PATTERN = re.compile(r"<!DOCTYPE html|<html|<head|<body")
 _CSV_STREAM_COPY_CHUNK_SIZE = 1024 * 1024
 
 
