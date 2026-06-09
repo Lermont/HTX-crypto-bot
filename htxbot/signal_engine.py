@@ -3,7 +3,7 @@
 import concurrent.futures
 import math
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import config
 
@@ -1634,6 +1634,19 @@ class SignalMixin:
         rs_context = relative_strength_context(
             closes, benchmark_closes, rs_fast_window, rs_slow_window
         )
+        return self._calculate_ema_indicator_values(
+            closes,
+            latest_ts,
+            pullback_closes,
+            pullback_latest_ts,
+            macro_closes,
+            macro_latest_ts,
+            cache_key,
+            periods,
+            timeframes,
+            use_timeframe_ema,
+            rs_context,
+        )
 
     def _calculate_ema_indicator_values(
         self,
@@ -1647,7 +1660,8 @@ class SignalMixin:
         periods: dict,
         timeframes: dict,
         use_timeframe_ema: bool,
-    ) -> Optional[dict]:
+        rs_context: dict,
+    ) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict]]:
         trigger_periods = {
             "ema_trigger_fast": periods["ema_trigger_fast"],
             "ema_trigger_slow": periods["ema_trigger_slow"],
@@ -1693,7 +1707,7 @@ class SignalMixin:
         )
 
         if not trigger_values or not pullback_values or not macro_values:
-            return None, None, None, None
+            return None, None, None, None, None, None
 
         ema_macro_fast = macro_values["ema_macro_fast"]
         ema_macro_slow = macro_values["ema_macro_slow"]
