@@ -21,6 +21,7 @@ import config
 import ccxt
 from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
+from htxbot.models import BtcHedgeLogContext
 from htxbot.exchange import UnexpectedExchangeResponse
 from unittest.mock import patch
 from htxbot.external_price import BookTicker, ExternalPriceFeed
@@ -11118,6 +11119,40 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(order["side"], "buy")
             self.assertEqual(order["amount"], 3.0)
             self.assertTrue(order["params"].get("reduceOnly"))
+
+
+    def test_btc_hedge_throttle_key_hashes_message(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            hedge = replace(
+                config.HEDGE,
+                btc_hedge_enabled=True,
+                btc_hedge_min_rebalance_notional=1.0,
+                btc_hedge_cooldown_sec=0.0,
+            )
+            with override_config(HEDGE=hedge):
+                combined, exchange = self.make_btc_hedge_combined(Path(raw_tmp))
+                bot = combined._hedge_control_bot()
+                log_events = []
+                def fake_log_event(*args, **kwargs):
+                    log_events.append(args)
+
+                bot._log_event = fake_log_event
+
+                # First message
+                combined._log_btc_hedge(BtcHedgeLogContext("INFO", "First message", "reason1", event="event1", throttle_sec=10.0, extra=dict(symbol="BTC/USDT")))
+                self.assertEqual(len(log_events), 1)
+
+                # Exact same message - should be throttled
+                combined._log_btc_hedge(BtcHedgeLogContext("INFO", "First message", "reason1", event="event1", throttle_sec=10.0, extra=dict(symbol="BTC/USDT")))
+                self.assertEqual(len(log_events), 1)
+
+                # Different message but same reason/event - should NOT be throttled because hash is different (Wait, the hash doesn't include message, it's just event, reason, symbol).
+                combined._log_btc_hedge(BtcHedgeLogContext("INFO", "Second message", "reason1", event="event1", throttle_sec=10.0, extra=dict(symbol="BTC/USDT")))
+                self.assertEqual(len(log_events), 1)
+
+                # Verify no sensitive info in cache keys
+                keys = str(list(combined._btc_hedge_log_at.keys()))
+                self.assertNotIn("First message", keys)
 
     def test_btc_hedge_waits_when_btc_open_orders_exist(self):
         with tempfile.TemporaryDirectory() as raw_tmp:

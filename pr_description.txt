@@ -1,7 +1,20 @@
-🎯 **What:** The testing gap addressed is the lack of unit tests for the `replace_path_with_retry` function in `htxbot/fileio.py`.
-📊 **Coverage:** Tests now cover:
-- Successful first execution
-- Retries on transient errors (like `PermissionError`) with correct exponential backoff times
-- Immediate failure on non-transient errors (like `FileNotFoundError`)
-- Correct behavior when retry limit is exhausted
-✨ **Result:** The test suite now safely confirms the retry behavior and allows confident refactoring.
+🧹 [Refactor] Extract BtcHedgeLogContext for _log_btc_hedge to reduce arguments
+
+🎯 **What:** The code health issue addressed
+The `_log_btc_hedge` method was taking too many function arguments. Grouped them into a `BtcHedgeLogContext` dataclass in `htxbot/models.py`.
+
+💡 **Why:** How this improves maintainability
+Reduces function signature complexity and makes argument passing more robust. Follows standard Python patterns for grouped context variables instead of passing a long list of explicit keyword arguments.
+
+✅ **Verification:** How you confirmed the change is safe
+* `BtcHedgeLogContext` added to `htxbot/models.py`.
+* `_log_btc_hedge` refactored to accept the dataclass.
+* all call sites updated across `combined.py`.
+* throttling regression test added to `tests/test_unified_bot.py`.
+* `ruff check --fix` and `ruff format` passed on the modified files.
+* targeted tests passed locally.
+* broader test suite run: verified that only unrelated baseline failures in `signal_engine` persist, which is a known pre-existing issue on the base branch.
+* automated code review returned `#Correct#`.
+
+✨ **Result:** The improvement achieved
+A cleaner signature for the logging method and better encapsulation of logging context args.
