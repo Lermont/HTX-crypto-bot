@@ -398,7 +398,16 @@ class CombinedHtxFuturesBot:
         if payload_symbol:
             try:
                 return str(payload_symbol(payload) or "")
-            except Exception:
+            except Exception as exc:
+                log_event = getattr(bot, "_log_event", None)
+                if log_event:
+                    log_event(
+                        "WARNING",
+                        f"Error retrieving payload symbol: {exc}",
+                        event="payload_symbol_error",
+                        reason="payload_symbol_extraction_failed",
+                        exception=exc,
+                    )
                 return ""
         return ""
 
