@@ -2392,6 +2392,72 @@ class UnifiedBotTests(unittest.TestCase):
                     bot.exchange.fetch_order_book_calls, calls_after_prefetch
                 )
 
+
+    def test_order_book_prefetch_safe_exception_handling(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            strategy = replace(
+                config.STRATEGY,
+                entry_spread_filter_enabled=True,
+                entry_spread_filter_max_bps=30.0,
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+
+                def mock_cached_order_book(symbol, limit=None):
+                    if symbol == SECOND_SYMBOL:
+                        raise ValueError("Simulated network error")
+                    return {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]]}
+
+                bot._cached_order_book = mock_cached_order_book
+
+                log_events = []
+                bot._log_event = lambda *args, **kwargs: log_events.append((args, kwargs))
+
+                bot._reset_market_data_caches()
+                bot._prefetch_market_data_snapshots()
+
+                self.assertEqual(len(log_events), 1)
+                args, kwargs = log_events[0]
+                self.assertEqual(args[0], "DEBUG")
+                self.assertIn(f"HTX order book prefetch failed for {SECOND_SYMBOL}", args[1])
+                self.assertEqual(kwargs["symbol"], SECOND_SYMBOL)
+                self.assertEqual(kwargs["reason"], "order_book_prefetch_failed")
+                self.assertIsInstance(kwargs["exception"], ValueError)
+
+    def test_parallel_order_book_prefetch_safe_exception_handling(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            runtime = replace(config.RUNTIME, market_data_max_workers=2)
+            strategy = replace(
+                config.STRATEGY,
+                entry_spread_filter_enabled=True,
+                entry_spread_filter_max_bps=30.0,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+
+                def mock_cached_order_book(symbol, limit=None):
+                    if symbol == SECOND_SYMBOL:
+                        raise ValueError("Simulated parallel network error")
+                    return {"bids": [[9.99, 100.0]], "asks": [[10.01, 100.0]]}
+
+                bot._cached_order_book = mock_cached_order_book
+
+                log_events = []
+                bot._log_event = lambda *args, **kwargs: log_events.append((args, kwargs))
+
+                bot._reset_market_data_caches()
+                bot._prefetch_market_data_snapshots()
+
+                self.assertEqual(len(log_events), 1)
+                args, kwargs = log_events[0]
+                self.assertEqual(args[0], "DEBUG")
+                self.assertIn(f"HTX order book prefetch failed for {SECOND_SYMBOL}", args[1])
+                self.assertEqual(kwargs["symbol"], SECOND_SYMBOL)
+                self.assertEqual(kwargs["reason"], "order_book_prefetch_failed")
+                self.assertIsInstance(kwargs["exception"], ValueError)
+
     def test_parallel_order_book_prefetch_preserves_profile_context(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             runtime = replace(config.RUNTIME, market_data_max_workers=2)
