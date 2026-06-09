@@ -92,9 +92,9 @@ if __name__ == "__main__":
 class TestFetchOrderBookSafe(unittest.TestCase):
     """
     Tests the logic of the `fetch_order_book_safe` inner function located inside
-    ExchangeMixin._prefetch_market_data_snapshots(). Since it's an inner function,
-    we test it indirectly via the outer function's execution and observing the side effects
-    (i.e., cached calls and log events) as recommended by testing guidelines.
+    ExchangeMixin._prefetch_market_data_snapshots(). We test it indirectly via the
+    outer function's execution, and directly by capturing the function reference
+    during a ThreadPoolExecutor patch.
     """
 
     def setUp(self):
