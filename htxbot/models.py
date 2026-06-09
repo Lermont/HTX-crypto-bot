@@ -2,9 +2,46 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import config
+
+
+
+@dataclass
+class SignalAnalyticsEvent:
+    decision: str
+    symbol: str = ""
+    signal: Optional[dict] = None
+    block_reason: str = ""
+    external_context: Optional[dict] = None
+    planned_budget: float = 0.0
+    planned_orders: int = 0
+    planned_notional: float = 0.0
+    placed_orders: int = 0
+    filled_notional: float = 0.0
+    realized_pnl_quote: float = 0.0
+    operation_id: str = ""
+    order_id: str = ""
+    cycle_id: str = ""
+    context: Optional[dict] = None
+
+@dataclass
+class DiagnosticEvent:
+    severity: str
+    category: str
+    event: str
+    message: str
+    symbol: str = ""
+    operation_id: str = ""
+    signal_id: str = ""
+    order_id: str = ""
+    reason: str = ""
+    exception: Optional[Exception] = None
+    retryable: Optional[bool] = None
+    attempt: Any = ""
+    hostname: str = ""
+    context: Optional[dict] = None
 
 
 @dataclass
@@ -182,13 +219,25 @@ class TradeState:
     entry_btc_return_30m: float = 0.0
 
 
+
+@dataclass(frozen=True)
+class BtcHedgeLogContext:
+    level: str
+    message: str
+    reason: str = ''
+    event: str = "btc_hedge"
+    throttle_sec: float = 0.0
+    extra: dict = field(default_factory=dict)
+
 __all__ = [
+    "BtcHedgeLogContext",
     "OrderRequest",
     "ExitLadderConfig",
     "ExitLadderPreflight",
     "OrderRequest",
     "PositionLifecycle",
     "SellLadderParams",
+    "SignalAnalyticsEvent",
     "SignalContext",
     "TradeState",
 ]
