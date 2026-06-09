@@ -3,6 +3,7 @@
 import concurrent.futures
 import threading
 import time
+from .models import BtcHedgeLogContext
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import config
@@ -106,12 +107,14 @@ class CombinedHtxFuturesBot:
             )
         except Exception as exc:
             self._log_btc_hedge(
-                "ERROR",
-                f"BTC hedge skipped after unexpected error: {exc}",
-                reason="btc_hedge_unhandled_error",
-                event="btc_hedge_order_failed",
-                exception=exc,
+                BtcHedgeLogContext(
+                    'ERROR',
+                f'BTC hedge skipped after unexpected error: {exc}',
+                reason='btc_hedge_unhandled_error',
+                event='btc_hedge_order_failed',
                 throttle_sec=60.0,
+                extra=dict(exception=exc),
+                )
             )
 
     def _combined_market_data_max_workers(self) -> int:
@@ -122,8 +125,16 @@ class CombinedHtxFuturesBot:
                 try:
                     workers = max(workers, int(resolver()))
                     continue
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event = getattr(bot, "_log_event", None)
+                    if log_event:
+                        log_event(
+                            "WARNING",
+                            f"Failed to get max workers from resolver: {exc}",
+                            event="max_workers_error",
+                            reason="resolver_failed",
+                            exception=exc,
+                        )
             try:
                 workers = max(
                     workers,
@@ -244,8 +255,16 @@ class CombinedHtxFuturesBot:
             if min_contracts:
                 try:
                     epsilon = max(min_contracts(symbol) * 1e-9, epsilon)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event = getattr(bot, "_log_event", None)
+                    if log_event:
+                        log_event(
+                            "WARNING",
+                            f"Failed to calculate minimum contracts epsilon for symbol {symbol}: {exc}",
+                            event="epsilon_calculation_failed",
+                            reason="min_contracts_error",
+                            exception=exc,
+                        )
             for position in positions or []:
                 side = str((position or {}).get("side") or "").lower()
                 contracts = self._safe_float(
@@ -278,8 +297,16 @@ class CombinedHtxFuturesBot:
             if min_contracts:
                 try:
                     epsilon = max(min_contracts(symbol) * 1e-9, epsilon)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event = getattr(bot, "_log_event", None)
+                    if log_event:
+                        log_event(
+                            "WARNING",
+                            f"Failed to calculate minimum contracts epsilon for symbol {symbol}: {exc}",
+                            event="epsilon_calculation_failed",
+                            reason="min_contracts_error",
+                            exception=exc,
+                        )
             for order in orders or []:
                 side = str((order or {}).get("side") or "").lower()
                 if side not in reserved_order_sides:
@@ -292,34 +319,31 @@ class CombinedHtxFuturesBot:
     def _hedge_control_bot(self) -> Optional[HtxFuturesBot]:
         return self.bots[0] if getattr(self, "bots", None) else None
 
-    def _log_btc_hedge(
-        self,
-        level: str,
-        message: str,
-        reason: str,
-        event: str = "btc_hedge",
-        throttle_sec: float = 0.0,
-        **kwargs,
-    ):
+    def _log_btc_hedge(self, ctx: BtcHedgeLogContext):
         bot = self._hedge_control_bot()
         if not bot:
             return
         log_event = getattr(bot, "_log_event", None)
         if not log_event:
             return
-        if throttle_sec > 0:
+        if ctx.throttle_sec > 0:
             now = time.time()
             logged = getattr(self, "_btc_hedge_log_at", {})
             if not isinstance(logged, dict):
                 logged = {}
-            key = (event, reason, str(kwargs.get("symbol") or ""))
+            key = (ctx.event, ctx.reason, str(ctx.extra.get("symbol") or ""))
             last = self._safe_float(bot, logged.get(key), 0.0)
-            if now - last < throttle_sec:
+            if now - last < ctx.throttle_sec:
                 return
             logged[key] = now
             self._btc_hedge_log_at = logged
         with config.use_profile(bot.profile):
-            log_event(level, message, event=event, reason=reason, **kwargs)
+            kwargs = ctx.extra.copy()
+            if "event" not in kwargs:
+                kwargs["event"] = ctx.event
+            if "reason" not in kwargs:
+                kwargs["reason"] = ctx.reason
+            log_event(ctx.level, ctx.message, **kwargs)
 
     def _btc_hedge_settings(self):
         return getattr(config, "HEDGE", None)
@@ -378,9 +402,7 @@ class CombinedHtxFuturesBot:
                 return ""
         return ""
 
-    def _position_payload_price(
-        self, bot: HtxFuturesBot, symbol: str, payload: dict
-    ) -> float:
+    def _extract_payload_price(self, bot: HtxFuturesBot, payload: dict) -> float:
         info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
         for source in (payload, info):
             if not isinstance(source, dict):
@@ -397,14 +419,37 @@ class CombinedHtxFuturesBot:
                 price = self._safe_float(bot, source.get(key), 0.0)
                 if price > 0:
                     return price
+        return 0.0
+
+    def _position_payload_price(
+        self,
+        bot: HtxFuturesBot,
+        symbol: str,
+        payload: dict,
+        preloaded_tickers: Optional[dict] = None,
+    ) -> float:
+        price = self._extract_payload_price(bot, payload)
+        if price > 0:
+            return price
         try:
-            ticker = bot.exchange.fetch_ticker(symbol)
+            if preloaded_tickers is not None and symbol in preloaded_tickers:
+                ticker = preloaded_tickers[symbol]
+            else:
+                ticker = bot.exchange.fetch_ticker(symbol)
             for key in ("last", "mark", "bid", "ask"):
                 price = self._safe_float(bot, ticker.get(key), 0.0)
                 if price > 0:
                     return price
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event = getattr(bot, "_log_event", None)
+            if log_event:
+                log_event(
+                    "WARNING",
+                    f"Failed to fetch ticker for symbol {symbol}: {exc}",
+                    event="fetch_ticker_error",
+                    reason="api_error",
+                    exception=exc,
+                )
         return 0.0
 
     def _position_payload_available(
@@ -452,12 +497,14 @@ class CombinedHtxFuturesBot:
             except Exception as exc:
                 level = "WARNING" if bot._is_transient_exchange_error(exc) else "ERROR"
                 self._log_btc_hedge(
-                    level,
-                    f"BTC hedge skipped: could not fetch fresh positions: {exc}",
-                    reason="positions_fetch_failed",
-                    event="btc_hedge",
-                    exception=exc,
+                    BtcHedgeLogContext(
+                        level,
+                    f'BTC hedge skipped: could not fetch fresh positions: {exc}',
+                    reason='positions_fetch_failed',
+                    event='btc_hedge',
                     throttle_sec=60.0,
+                    extra=dict(exception=exc),
+                    )
                 )
                 return None
 
@@ -483,12 +530,13 @@ class CombinedHtxFuturesBot:
             except Exception as exc:
                 level = "WARNING" if bot._is_transient_exchange_error(exc) else "ERROR"
                 self._log_btc_hedge(
-                    level,
-                    f"BTC hedge skipped: could not fetch open orders for {symbol}: {exc}",
-                    reason="open_orders_fetch_failed",
-                    symbol=symbol,
-                    exception=exc,
+                    BtcHedgeLogContext(
+                        level,
+                    f'BTC hedge skipped: could not fetch open orders for {symbol}: {exc}',
+                    reason='open_orders_fetch_failed',
                     throttle_sec=60.0,
+                    extra=dict(symbol=symbol, exception=exc),
+                    )
                 )
                 return None
 
@@ -508,6 +556,8 @@ class CombinedHtxFuturesBot:
             "hedge_short_available": 0.0,
             "hedge_price": 0.0,
         }
+
+        missing_symbols = []
         for position in positions or []:
             if not isinstance(position, dict):
                 continue
@@ -520,7 +570,33 @@ class CombinedHtxFuturesBot:
             contracts = self._safe_float(bot, position.get("contracts"), 0.0)
             if contracts <= 0:
                 continue
-            price = self._position_payload_price(bot, symbol, position)
+            if self._extract_payload_price(bot, position) <= 0:
+                missing_symbols.append(symbol)
+
+        preloaded_tickers = {}
+        if missing_symbols:
+            try:
+                fetched = bot.exchange.fetch_tickers(list(set(missing_symbols)))
+                if isinstance(fetched, dict):
+                    preloaded_tickers = fetched
+            except Exception:
+                pass
+
+        for position in positions or []:
+            if not isinstance(position, dict):
+                continue
+            symbol = self._position_payload_symbol(bot, position)
+            if not symbol or (symbol != hedge_symbol and symbol not in managed_symbols):
+                continue
+            side = str(position.get("side") or "").lower()
+            if side not in {"long", "short"}:
+                continue
+            contracts = self._safe_float(bot, position.get("contracts"), 0.0)
+            if contracts <= 0:
+                continue
+            price = self._position_payload_price(
+                bot, symbol, position, preloaded_tickers
+            )
             if price <= 0:
                 continue
             if symbol == hedge_symbol:
@@ -539,12 +615,13 @@ class CombinedHtxFuturesBot:
             ticker = bot.exchange.fetch_ticker(symbol)
         except Exception as exc:
             self._log_btc_hedge(
-                "WARNING",
-                f"BTC hedge skipped: ticker unavailable for {symbol}: {exc}",
-                reason="ticker_unavailable",
-                symbol=symbol,
-                exception=exc,
+                BtcHedgeLogContext(
+                    'WARNING',
+                f'BTC hedge skipped: ticker unavailable for {symbol}: {exc}',
+                reason='ticker_unavailable',
                 throttle_sec=60.0,
+                extra=dict(symbol=symbol, exception=exc),
+                )
             )
             return 0.0
         for key in ("last", "mark", "bid", "ask"):
@@ -598,14 +675,13 @@ class CombinedHtxFuturesBot:
             ticker = bot.exchange.fetch_ticker(symbol)
         except Exception as exc:
             self._log_btc_hedge(
-                "WARNING",
-                f"BTC hedge open skipped: ticker unavailable for {symbol}: {exc}",
-                reason="market_spread_unavailable",
-                symbol=symbol,
-                amount=amount,
-                price=reference_price,
-                exception=exc,
+                BtcHedgeLogContext(
+                    'WARNING',
+                f'BTC hedge open skipped: ticker unavailable for {symbol}: {exc}',
+                reason='market_spread_unavailable',
                 throttle_sec=60.0,
+                extra=dict(symbol=symbol, amount=amount, price=reference_price, exception=exc),
+                )
             )
             return False
 
@@ -613,13 +689,13 @@ class CombinedHtxFuturesBot:
         ask = self._safe_float(bot, (ticker or {}).get("ask"), 0.0)
         if bid <= 0 or ask <= 0 or ask < bid:
             self._log_btc_hedge(
-                "WARNING",
-                f"BTC hedge open skipped: bid/ask spread is unavailable for {symbol}",
-                reason="market_spread_unavailable",
-                symbol=symbol,
-                amount=amount,
-                price=reference_price,
+                BtcHedgeLogContext(
+                    'WARNING',
+                f'BTC hedge open skipped: bid/ask spread is unavailable for {symbol}',
+                reason='market_spread_unavailable',
                 throttle_sec=60.0,
+                extra=dict(symbol=symbol, amount=amount, price=reference_price),
+                )
             )
             return False
 
@@ -627,19 +703,13 @@ class CombinedHtxFuturesBot:
         spread_bps = ((ask - bid) / midpoint) * 10000.0 if midpoint > 0 else 0.0
         if spread_bps > max_spread_bps:
             self._log_btc_hedge(
-                "WARNING",
-                f"BTC hedge open skipped: BTC spread {spread_bps:.4f} bps exceeds limit {max_spread_bps:.4f}",
-                reason="market_spread_too_wide",
-                symbol=symbol,
-                amount=amount,
-                price=reference_price,
-                diagnostic_context={
-                    "bid": bid,
-                    "ask": ask,
-                    "spread_bps": spread_bps,
-                    "max_spread_bps": max_spread_bps,
-                },
+                BtcHedgeLogContext(
+                    'WARNING',
+                f'BTC hedge open skipped: BTC spread {spread_bps:.4f} bps exceeds limit {max_spread_bps:.4f}',
+                reason='market_spread_too_wide',
                 throttle_sec=60.0,
+                extra=dict(symbol=symbol, amount=amount, price=reference_price, diagnostic_context={'bid': bid, 'ask': ask, 'spread_bps': spread_bps, 'max_spread_bps': max_spread_bps}),
+                )
             )
             return False
         return True
@@ -665,12 +735,14 @@ class CombinedHtxFuturesBot:
             )
             if not method:
                 self._log_btc_hedge(
-                    "ERROR",
-                    f"BTC hedge cannot read manual HTX leverage for {symbol}: raw account-position endpoint is unavailable",
-                    reason="manual_account_leverage_unavailable",
-                    event="btc_hedge_order_failed",
-                    symbol=symbol,
+                    BtcHedgeLogContext(
+                        'ERROR',
+                    f'BTC hedge cannot read manual HTX leverage for {symbol}: raw account-position endpoint is unavailable',
+                    reason='manual_account_leverage_unavailable',
+                    event='btc_hedge_order_failed',
                     throttle_sec=60.0,
+                    extra=dict(symbol=symbol),
+                    )
                 )
                 return 0.0
 
@@ -684,25 +756,28 @@ class CombinedHtxFuturesBot:
                 )
             except Exception as exc:
                 self._log_btc_hedge(
-                    "ERROR",
-                    f"BTC hedge cannot read manual HTX leverage for {symbol}: {exc}",
-                    reason="manual_account_leverage_unavailable",
-                    event="btc_hedge_order_failed",
-                    symbol=symbol,
-                    exception=exc,
+                    BtcHedgeLogContext(
+                        'ERROR',
+                    f'BTC hedge cannot read manual HTX leverage for {symbol}: {exc}',
+                    reason='manual_account_leverage_unavailable',
+                    event='btc_hedge_order_failed',
                     throttle_sec=60.0,
+                    extra=dict(symbol=symbol, exception=exc),
+                    )
                 )
                 return 0.0
 
             leverage = bot._account_leverage_from_payload(symbol, response)
             if leverage <= 0:
                 self._log_btc_hedge(
-                    "ERROR",
-                    f"BTC hedge cannot determine manual HTX leverage for {symbol}; hedge order is blocked",
-                    reason="manual_account_leverage_missing",
-                    event="btc_hedge_order_failed",
-                    symbol=symbol,
+                    BtcHedgeLogContext(
+                        'ERROR',
+                    f'BTC hedge cannot determine manual HTX leverage for {symbol}; hedge order is blocked',
+                    reason='manual_account_leverage_missing',
+                    event='btc_hedge_order_failed',
                     throttle_sec=60.0,
+                    extra=dict(symbol=symbol),
+                    )
                 )
                 return 0.0
             bot.order_leverage_cache[symbol] = leverage
@@ -725,13 +800,13 @@ class CombinedHtxFuturesBot:
             amount = bot._amount_to_precision(symbol, amount)
             if amount <= 0:
                 self._log_btc_hedge(
-                    "WARNING",
-                    f"BTC hedge skipped for {symbol}: rebalance amount is below precision/minimum",
-                    reason="amount_below_min_contracts",
-                    symbol=symbol,
-                    side=side,
-                    amount=amount,
+                    BtcHedgeLogContext(
+                        'WARNING',
+                    f'BTC hedge skipped for {symbol}: rebalance amount is below precision/minimum',
+                    reason='amount_below_min_contracts',
                     throttle_sec=60.0,
+                    extra=dict(symbol=symbol, side=side, amount=amount),
+                    )
                 )
                 return False
             if not reduce_only and not self._btc_hedge_open_market_safe(
@@ -754,41 +829,27 @@ class CombinedHtxFuturesBot:
                 )
             except Exception as exc:
                 self._log_btc_hedge(
-                    "ERROR",
-                    f"BTC hedge order failed for {symbol}: {exc}",
-                    reason=f"{reason}_order_failed",
-                    event="btc_hedge_order_failed",
-                    symbol=symbol,
-                    side=side,
-                    amount=amount,
-                    price=reference_price,
-                    notional=bot._contracts_to_notional(
-                        symbol, amount, reference_price
-                    ),
-                    exception=exc,
+                    BtcHedgeLogContext(
+                        'ERROR',
+                    f'BTC hedge order failed for {symbol}: {exc}',
+                    reason=f'{reason}_order_failed',
+                    event='btc_hedge_order_failed',
                     throttle_sec=60.0,
+                    extra=dict(symbol=symbol, side=side, amount=amount, price=reference_price, notional=bot._contracts_to_notional(symbol, amount, reference_price), exception=exc),
+                    )
                 )
                 return False
 
             order_id = str((order or {}).get("id") or "")
             self._last_btc_hedge_action_at = time.time()
             self._log_btc_hedge(
-                "INFO",
-                f"BTC hedge rebalanced for {symbol}: side={side} contracts={amount} reduce_only={int(reduce_only)}",
+                BtcHedgeLogContext(
+                    'INFO',
+                f'BTC hedge rebalanced for {symbol}: side={side} contracts={amount} reduce_only={int(reduce_only)}',
                 reason=reason,
-                event="btc_hedge_rebalanced",
-                symbol=symbol,
-                side=side,
-                order_id=order_id,
-                amount=amount,
-                price=reference_price,
-                notional=bot._contracts_to_notional(symbol, amount, reference_price),
-                diagnostic_context={
-                    "net_notional": net_notional,
-                    "target_side": target_side,
-                    "target_contracts": target_contracts,
-                    "reduce_only": reduce_only,
-                },
+                event='btc_hedge_rebalanced',
+                extra=dict(symbol=symbol, side=side, order_id=order_id, amount=amount, price=reference_price, notional=bot._contracts_to_notional(symbol, amount, reference_price), diagnostic_context={'net_notional': net_notional, 'target_side': target_side, 'target_contracts': target_contracts, 'reduce_only': reduce_only}),
+                )
             )
             return True
 
@@ -800,10 +861,12 @@ class CombinedHtxFuturesBot:
             return
         if skip_reason:
             self._log_btc_hedge(
-                "WARNING",
-                f"BTC hedge skipped: profile step failed earlier in cycle ({skip_reason})",
-                reason=f"skip_{skip_reason}",
+                BtcHedgeLogContext(
+                    'WARNING',
+                f'BTC hedge skipped: profile step failed earlier in cycle ({skip_reason})',
+                reason=f'skip_{skip_reason}',
                 throttle_sec=60.0,
+                )
             )
             return
         settings = self._btc_hedge_settings()
@@ -823,10 +886,12 @@ class CombinedHtxFuturesBot:
         hedge_symbol = self._btc_hedge_symbol(bot)
         if not hedge_symbol:
             self._log_btc_hedge(
-                "ERROR",
-                "BTC hedge enabled but BTC futures symbol was not found",
-                reason="btc_symbol_not_found",
+                BtcHedgeLogContext(
+                    'ERROR',
+                'BTC hedge enabled but BTC futures symbol was not found',
+                reason='btc_symbol_not_found',
                 throttle_sec=300.0,
+                )
             )
             return
         managed_symbols = self._btc_hedge_managed_symbols(hedge_symbol)
@@ -845,6 +910,13 @@ class CombinedHtxFuturesBot:
         target_side, target_contracts, target_notional, reference_price = (
             self._btc_hedge_target(bot, hedge_symbol, net_notional)
         )
+
+        return self._execute_btc_hedge_rebalance(
+            bot, hedge_symbol, settings, exposure,
+            target_side, target_contracts, target_notional, reference_price, net_notional
+        )
+
+    def _get_btc_hedge_current_state(self, bot, hedge_symbol, settings, exposure, reference_price):
         current_long = exposure["hedge_long_contracts"]
         current_short = exposure["hedge_short_contracts"]
         hedge_price = (
@@ -855,14 +927,15 @@ class CombinedHtxFuturesBot:
         epsilon = 1e-12
         if current_long > epsilon and current_short > epsilon:
             self._log_btc_hedge(
-                "ERROR",
-                f"BTC hedge found both long and short positions on {hedge_symbol}; manual review required",
-                reason="both_hedge_sides_open",
-                symbol=hedge_symbol,
-                amount=current_long + current_short,
+                BtcHedgeLogContext(
+                    'ERROR',
+                f'BTC hedge found both long and short positions on {hedge_symbol}; manual review required',
+                reason='both_hedge_sides_open',
                 throttle_sec=60.0,
+                extra=dict(symbol=hedge_symbol, amount=current_long + current_short),
+                )
             )
-            return
+            return None
 
         current_side = (
             "long"
@@ -904,24 +977,52 @@ class CombinedHtxFuturesBot:
             min_contract_notional,
         )
 
+        return {
+            "current_side": current_side,
+            "current_contracts": current_contracts,
+            "current_available": current_available,
+            "current_notional": current_notional,
+            "hedge_price": hedge_price,
+            "min_rebalance": min_rebalance,
+            "epsilon": epsilon
+        }
+
+    def _execute_btc_hedge_rebalance(
+        self, bot, hedge_symbol, settings, exposure,
+        target_side, target_contracts, target_notional, reference_price, net_notional
+    ):
+        state = self._get_btc_hedge_current_state(bot, hedge_symbol, settings, exposure, reference_price)
+        if not state:
+            return
+
+        current_side = state["current_side"]
+        current_contracts = state["current_contracts"]
+        current_available = state["current_available"]
+        current_notional = state["current_notional"]
+        hedge_price = state["hedge_price"]
+        min_rebalance = state["min_rebalance"]
+        epsilon = state["epsilon"]
+
         if not self._btc_hedge_profiles_ready():
             if current_contracts <= epsilon:
                 self._log_btc_hedge(
-                    "WARNING",
-                    "BTC hedge skipped: both long and short profiles must be active before opening hedge exposure",
-                    reason="profiles_not_ready",
-                    symbol=hedge_symbol,
+                    BtcHedgeLogContext(
+                        'WARNING',
+                    'BTC hedge skipped: both long and short profiles must be active before opening hedge exposure',
+                    reason='profiles_not_ready',
                     throttle_sec=300.0,
+                    extra=dict(symbol=hedge_symbol),
+                    )
                 )
                 return
             self._log_btc_hedge(
-                "WARNING",
-                f"BTC hedge closing existing {current_side} exposure on {hedge_symbol}: long/short profiles are not both active",
-                reason="profiles_not_ready_close_existing",
-                symbol=hedge_symbol,
-                side=current_side,
-                amount=current_contracts,
+                BtcHedgeLogContext(
+                    'WARNING',
+                f'BTC hedge closing existing {current_side} exposure on {hedge_symbol}: long/short profiles are not both active',
+                reason='profiles_not_ready_close_existing',
                 throttle_sec=60.0,
+                extra=dict(symbol=hedge_symbol, side=current_side, amount=current_contracts),
+                )
             )
             target_side = ""
             target_contracts = 0.0
@@ -949,17 +1050,25 @@ class CombinedHtxFuturesBot:
         ]
         if active_orders:
             self._log_btc_hedge(
-                "WARNING",
-                f"BTC hedge skipped for {hedge_symbol}: open BTC orders are present",
-                reason="open_hedge_orders_present",
-                symbol=hedge_symbol,
-                amount=sum(
-                    self._order_remaining_amount(bot, order) for order in active_orders
-                ),
+                BtcHedgeLogContext(
+                    'WARNING',
+                f'BTC hedge skipped for {hedge_symbol}: open BTC orders are present',
+                reason='open_hedge_orders_present',
                 throttle_sec=60.0,
+                extra=dict(symbol=hedge_symbol, amount=sum((self._order_remaining_amount(bot, order) for order in active_orders))),
+                )
             )
             return
 
+        return self._dispatch_btc_hedge_order(
+            bot, hedge_symbol, current_side, current_contracts, current_available,
+            target_side, target_contracts, hedge_price, reference_price, net_notional, min_rebalance
+        )
+
+    def _dispatch_btc_hedge_order(
+        self, bot, hedge_symbol, current_side, current_contracts, current_available,
+        target_side, target_contracts, hedge_price, reference_price, net_notional, min_rebalance
+    ):
         if not target_side:
             close_side = "sell" if current_side == "long" else "buy"
             close_amount = min(current_contracts, current_available)

@@ -14,8 +14,10 @@ from typing import Any, Dict, Optional
 
 import config
 
+from .models import SignalAnalyticsEvent
 from .concurrency import instance_rlock
 from .fileio import replace_path_with_retry
+from .models import DiagnosticEvent
 
 
 _monitoring_global_lock = threading.RLock()
@@ -150,8 +152,10 @@ class MonitoringMixin:
         except Exception as exc:
             try:
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                self.log.warning(
+                    "Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc
+                )
             self.log.warning("Could not replace CSV header for %s: %s", path, exc)
 
     def _apply_legacy_csv_aliases(self, row: Dict[str, Any]):
@@ -175,8 +179,10 @@ class MonitoringMixin:
         except Exception as exc:
             try:
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                self.log.warning(
+                    "Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc
+                )
             self.log.warning("Could not add CSV header for %s: %s", path, exc)
 
     def _ensure_csv_file(self):
@@ -485,7 +491,7 @@ class MonitoringMixin:
 
     def _record_signal_analytics(
         self,
-        decision: str,
+        decision,
         symbol: str = "",
         signal: Optional[dict] = None,
         block_reason: str = "",
@@ -501,23 +507,43 @@ class MonitoringMixin:
         cycle_id: str = "",
         context: Optional[dict] = None,
     ):
-        signal = signal or {}
-        symbol = symbol or str(signal.get("symbol") or "")
+        if hasattr(decision, 'decision'):
+            event = decision
+        else:
+            event = SignalAnalyticsEvent(
+                decision=decision,
+                symbol=symbol,
+                signal=signal,
+                block_reason=block_reason,
+                external_context=external_context,
+                planned_budget=planned_budget,
+                planned_orders=planned_orders,
+                planned_notional=planned_notional,
+                placed_orders=placed_orders,
+                filled_notional=filled_notional,
+                realized_pnl_quote=realized_pnl_quote,
+                operation_id=operation_id,
+                order_id=order_id,
+                cycle_id=cycle_id,
+                context=context
+            )
+        signal = event.signal or {}
+        symbol = event.symbol or str(signal.get("symbol") or "")
         external_context = (
-            external_context
-            if isinstance(external_context, dict)
+            event.external_context
+            if isinstance(event.external_context, dict)
             else self._external_context_from_cache(symbol)
         )
         signal_id = self._signal_id(symbol, signal)
         signal_ts = signal.get("ts") or ""
         strategy_name = signal.get("strategy_name") or "ema_pullback"
         side = config.POSITION_SIDE
-        block_reason = block_reason or self._signal_block_reason(signal)
+        event.block_reason = event.block_reason or self._signal_block_reason(signal)
         state = None
         if symbol and hasattr(self, "states") and symbol in self.states:
             state = self.states[symbol]
-        if not cycle_id and state is not None:
-            cycle_id = str(getattr(state, "cycle_id", "") or "")
+        if not event.cycle_id and state is not None:
+            event.cycle_id = str(getattr(state, "cycle_id", "") or "")
 
         row = [
             int(time.time()),
@@ -530,8 +556,8 @@ class MonitoringMixin:
             int(bool(signal.get("valid", False))),
             int(bool(signal.get("entry_valid", False))),
             int(bool(signal.get("add_valid", False))),
-            decision,
-            block_reason,
+            event.decision,
+            event.block_reason,
             self._fmt_monitoring_float(signal.get("score"), 8),
             self._fmt_monitoring_float(signal.get("rs30"), 8),
             self._fmt_monitoring_float(signal.get("rs60"), 8),
@@ -603,25 +629,25 @@ class MonitoringMixin:
             "profile": self._current_profile_name(),
             "symbol": symbol,
             "side": side,
-            "decision": decision,
-            "block_reason": block_reason,
+            "event.decision": event.decision,
+            "event.block_reason": event.block_reason,
             "signal_id": signal_id,
-            "operation_id": operation_id,
-            "order_id": order_id,
-            "cycle_id": cycle_id,
+            "event.operation_id": event.operation_id,
+            "event.order_id": event.order_id,
+            "event.cycle_id": event.cycle_id,
             "signal": signal,
             "external_context": external_context,
-            "macro_context": (getattr(self, "signal_cache", {}) or {}).get("macro", {}),
+            "macro_event.context": (getattr(self, "signal_cache", {}) or {}).get("macro", {}),
             "config": self._selected_config_snapshot(),
             "metrics": {
-                "planned_budget": planned_budget,
-                "planned_orders": planned_orders,
-                "planned_notional": planned_notional,
-                "placed_orders": placed_orders,
-                "filled_notional": filled_notional,
-                "realized_pnl_quote": realized_pnl_quote,
+                "event.planned_budget": event.planned_budget,
+                "event.planned_orders": event.planned_orders,
+                "event.planned_notional": event.planned_notional,
+                "event.placed_orders": event.placed_orders,
+                "event.filled_notional": event.filled_notional,
+                "event.realized_pnl_quote": event.realized_pnl_quote,
             },
-            "context": context or {},
+            "event.context": event.context or {},
         }
         self._append_jsonl(getattr(self, "signal_analytics_jsonl_path", None), payload)
 
@@ -947,36 +973,20 @@ class MonitoringMixin:
             "retryable": bool(retryable),
         }
 
-    def _record_diagnostic(
-        self,
-        severity: str,
-        category: str,
-        event: str,
-        message: str,
-        symbol: str = "",
-        operation_id: str = "",
-        signal_id: str = "",
-        order_id: str = "",
-        reason: str = "",
-        exception: Optional[Exception] = None,
-        retryable: Optional[bool] = None,
-        attempt: Any = "",
-        hostname: str = "",
-        context: Optional[dict] = None,
-    ):
-        message = self._redact_sensitive_text(message)
-        severity = str(severity or "").lower()
+    def _record_diagnostic(self, diagnostic: DiagnosticEvent):
+        message = self._redact_sensitive_text(diagnostic.message)
+        severity = str(diagnostic.severity or "").lower()
         if severity == "critical":
             severity = "fault"
         category = self._diagnostic_category(
-            event,
-            reason=reason,
+            diagnostic.event,
+            reason=diagnostic.reason,
             message=message,
-            exception=exception,
-            category=category,
+            exception=diagnostic.exception,
+            category=diagnostic.category,
         )
         exception_info = self._diagnostic_from_exception(
-            exception, message=message, retryable=retryable
+            diagnostic.exception, message=message, retryable=diagnostic.retryable
         )
         retryable_value = bool(exception_info.get("retryable", False))
         row = [
@@ -984,18 +994,18 @@ class MonitoringMixin:
             self._current_profile_name(),
             severity,
             category,
-            event,
-            symbol,
-            operation_id,
-            signal_id,
-            order_id,
+            diagnostic.event,
+            diagnostic.symbol,
+            diagnostic.operation_id,
+            diagnostic.signal_id,
+            diagnostic.order_id,
             exception_info.get("exception_type", ""),
             exception_info.get("error_code", ""),
             message,
-            reason,
+            diagnostic.reason,
             int(retryable_value),
-            attempt,
-            hostname,
+            diagnostic.attempt,
+            diagnostic.hostname,
         ]
 
         csv_path = getattr(self, "diagnostics_csv_path", None)
@@ -1007,20 +1017,22 @@ class MonitoringMixin:
             "profile": self._current_profile_name(),
             "severity": severity,
             "category": category,
-            "event": event,
-            "symbol": symbol,
-            "operation_id": operation_id,
-            "signal_id": signal_id,
-            "order_id": order_id,
+            "event": diagnostic.event,
+            "symbol": diagnostic.symbol,
+            "operation_id": diagnostic.operation_id,
+            "signal_id": diagnostic.signal_id,
+            "order_id": diagnostic.order_id,
             "message": message,
-            "reason": reason,
-            "attempt": attempt,
-            "hostname": hostname,
+            "reason": diagnostic.reason,
+            "attempt": diagnostic.attempt,
+            "hostname": diagnostic.hostname,
             "exception": {
                 **exception_info,
-                "message": self._redact_sensitive_text(exception) if exception else "",
+                "message": self._redact_sensitive_text(diagnostic.exception)
+                if diagnostic.exception
+                else "",
             },
-            "context": context or {},
+            "context": diagnostic.context or {},
         }
         self._append_jsonl(getattr(self, "diagnostics_jsonl_path", None), payload)
 
@@ -1031,19 +1043,24 @@ class MonitoringMixin:
                 continue
             seen.add(message)
             self._record_diagnostic(
-                "warning",
-                "config",
-                "config_warning",
-                str(message),
-                reason="config_warning",
+                DiagnosticEvent(
+                    severity="warning",
+                    category="config",
+                    event="config_warning",
+                    message=str(message),
+                    reason="config_warning",
+                )
             )
         self._recorded_config_warnings = seen
 
     def _compact_log_message(self, message: str) -> str:
         text = self._redact_sensitive_text(message)
-        match = _HTML_MARKER_PATTERN.search(text)
-        if match:
-            head = text[: match.start()].strip()
+        html_markers = ("<!DOCTYPE html", "<html", "<head", "<body")
+        marker_positions = [
+            text.find(marker) for marker in html_markers if marker in text
+        ]
+        if marker_positions:
+            head = text[: min(marker_positions)].strip()
             if len(head) > 500:
                 head = f"{head[:500]}..."
             return (
@@ -1096,18 +1113,20 @@ class MonitoringMixin:
                 "fault" if level_upper in {"FAULT", "CRITICAL"} else level_upper.lower()
             )
             self._record_diagnostic(
-                severity,
-                diagnostic_category,
-                event,
-                message,
-                symbol=str(kwargs.get("symbol") or ""),
-                operation_id=operation_id,
-                signal_id=signal_id,
-                order_id=str(kwargs.get("order_id") or ""),
-                reason=str(kwargs.get("reason") or ""),
-                exception=diagnostic_exception,
-                retryable=diagnostic_retryable,
-                attempt=diagnostic_attempt,
-                hostname=diagnostic_hostname,
-                context=diagnostic_context,
+                DiagnosticEvent(
+                    severity=severity,
+                    category=diagnostic_category,
+                    event=event,
+                    message=message,
+                    symbol=str(kwargs.get("symbol") or ""),
+                    operation_id=operation_id,
+                    signal_id=signal_id,
+                    order_id=str(kwargs.get("order_id") or ""),
+                    reason=str(kwargs.get("reason") or ""),
+                    exception=diagnostic_exception,
+                    retryable=diagnostic_retryable,
+                    attempt=diagnostic_attempt,
+                    hostname=diagnostic_hostname,
+                    context=diagnostic_context,
+                )
             )
