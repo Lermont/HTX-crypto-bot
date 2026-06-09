@@ -18,8 +18,6 @@ from .concurrency import instance_rlock
 from .shared_exchange import MultiAccountExchange, ThreadSafeExchange
 
 
-
-
 @functools.lru_cache(maxsize=16)
 def _compute_gold_coin_candidates(gold_coins: Tuple[str, ...]) -> Tuple[str, ...]:
     aliases = {
@@ -36,8 +34,8 @@ def _compute_gold_coin_candidates(gold_coins: Tuple[str, ...]) -> Tuple[str, ...
                 candidates.append(item)
     return tuple(candidates)
 
-class UnexpectedExchangeResponse(RuntimeError):
 
+class UnexpectedExchangeResponse(RuntimeError):
     """Raised when CCXT returns a payload shape that cannot be trusted."""
 
 
@@ -1930,17 +1928,25 @@ class ExchangeMixin:
         )
         return True
 
-
     def _get_max_leverage(self, symbol: str) -> float:
         try:
             tiers = self.exchange.fetch_leverage_tiers([symbol])
             if symbol in tiers and tiers[symbol]:
                 return max(tier.get("maxLeverage", 0.0) for tier in tiers[symbol])
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log_event(
+                "WARNING",
+                f"Could not fetch max leverage for {symbol}: {exc}",
+                event="futures_setup",
+                symbol=symbol,
+                reason="max_leverage_fetch_failed",
+                exception=exc,
+            )
         return 0.0
 
-    def _set_leverage_safe(self, symbol: str, leverage: int, _is_fallback: bool = False) -> bool:
+    def _set_leverage_safe(
+        self, symbol: str, leverage: int, _is_fallback: bool = False
+    ) -> bool:
         try:
             self.exchange.set_leverage(
                 int(leverage), symbol, params=self._position_params()
@@ -1960,7 +1966,9 @@ class ExchangeMixin:
                         symbol=symbol,
                         reason="leverage_fallback",
                     )
-                    return self._set_leverage_safe(symbol, int(max_leverage), _is_fallback=True)
+                    return self._set_leverage_safe(
+                        symbol, int(max_leverage), _is_fallback=True
+                    )
 
             self._log_event(
                 "WARNING",

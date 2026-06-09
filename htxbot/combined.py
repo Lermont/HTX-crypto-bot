@@ -403,8 +403,14 @@ class CombinedHtxFuturesBot:
                 price = self._safe_float(bot, ticker.get(key), 0.0)
                 if price > 0:
                     return price
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log_event(
+                "WARNING",
+                f"Could not fetch fallback price for {symbol}: {exc}",
+                event="fallback_price_fetch_failed",
+                symbol=symbol,
+                exception=exc,
+            )
         return 0.0
 
     def _position_payload_available(
