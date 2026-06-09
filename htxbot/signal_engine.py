@@ -3,7 +3,7 @@
 import concurrent.futures
 import math
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import config
 
@@ -333,7 +333,7 @@ class SignalMixin:
         return thresholds
 
     def _entry_signal_quality_context(
-        self, signal: Optional[dict], crowded: bool = False, external_bonus: float = 0.0
+        self, signal: Optional[dict], crowded: bool = False, external_bonus: float = 0.0, external_multiplier: float = 1.0
     ) -> dict:
         signal = signal or {}
         thresholds = self._entry_thresholds(crowded=crowded)
@@ -341,7 +341,8 @@ class SignalMixin:
         strategy = config.STRATEGY
         raw_score = self._safe_float(signal.get("score"), 0.0)
         external_bonus = self._safe_float(external_bonus, 0.0)
-        base_score = raw_score + external_bonus
+        external_multiplier = max(0.0, self._safe_float(external_multiplier, 1.0))
+        base_score = (raw_score + external_bonus) * external_multiplier
         penalties = {}
         flags = {
             "valid": bool(signal.get("valid", False)),
@@ -502,6 +503,7 @@ class SignalMixin:
             "min_score": min_score,
             "raw_score": raw_score,
             "external_bonus": external_bonus,
+            "external_multiplier": external_multiplier,
             "base_score": base_score,
             "weighted_score": weighted_score,
             "penalty_total": penalty_total,
@@ -544,6 +546,7 @@ class SignalMixin:
             f"weighted_score={self._safe_float(context.get('weighted_score'), 0.0):.6f};"
             f"raw_score={self._safe_float(context.get('raw_score'), 0.0):.6f};"
             f"external_bonus={self._safe_float(context.get('external_bonus'), 0.0):.6f};"
+            f"external_multiplier={self._safe_float(context.get('external_multiplier', 1.0), 1.0):.6f};"
             f"penalty_total={self._safe_float(context.get('penalty_total'), 0.0):.6f};"
             f"{penalty_text}"
             f"{flag_text}"
@@ -568,8 +571,12 @@ class SignalMixin:
             getattr(self, "_external_entry_score_bonus", lambda _signal: 0.0)(signal),
             0.0,
         )
+        external_multiplier = self._safe_float(
+            getattr(self, "_external_entry_score_multiplier", lambda _signal: 1.0)(signal),
+            1.0,
+        )
         context = self._entry_signal_quality_context(
-            signal, crowded=crowded, external_bonus=external_bonus
+            signal, crowded=crowded, external_bonus=external_bonus, external_multiplier=external_multiplier
         )
         if context.get("passed"):
             return ""
@@ -1634,6 +1641,19 @@ class SignalMixin:
         rs_context = relative_strength_context(
             closes, benchmark_closes, rs_fast_window, rs_slow_window
         )
+        return self._calculate_ema_indicator_values(
+            closes,
+            latest_ts,
+            pullback_closes,
+            pullback_latest_ts,
+            macro_closes,
+            macro_latest_ts,
+            cache_key,
+            periods,
+            timeframes,
+            use_timeframe_ema,
+            rs_context,
+        )
 
     def _calculate_ema_indicator_values(
         self,
@@ -1647,7 +1667,8 @@ class SignalMixin:
         periods: dict,
         timeframes: dict,
         use_timeframe_ema: bool,
-    ) -> Optional[dict]:
+        rs_context: dict,
+    ) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict], Optional[dict]]:
         trigger_periods = {
             "ema_trigger_fast": periods["ema_trigger_fast"],
             "ema_trigger_slow": periods["ema_trigger_slow"],
@@ -1693,7 +1714,7 @@ class SignalMixin:
         )
 
         if not trigger_values or not pullback_values or not macro_values:
-            return None, None, None, None
+            return None, None, None, None, None, None
 
         ema_macro_fast = macro_values["ema_macro_fast"]
         ema_macro_slow = macro_values["ema_macro_slow"]

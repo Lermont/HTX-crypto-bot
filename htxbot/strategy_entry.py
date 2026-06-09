@@ -1,13 +1,12 @@
+from .models import SignalAnalyticsEvent
 # -*- coding: utf-8 -*-
 
-import csv
-import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import config
 
-from .models import ExitLadderConfig, ExitLadderPreflight, SellLadderParams, TradeState
+from .models import TradeState
 
 
 class EntryStrategy:
@@ -91,7 +90,7 @@ class EntryStrategy:
                 "fresh_free_margin_below_reserve;"
                 f"free={fresh_free:.8f};equity={fresh_equity:.8f};reserve={reserve:.8f}"
             )
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_ladder_rejected",
                 symbol=symbol,
                 signal=signal,
@@ -103,7 +102,7 @@ class EntryStrategy:
                 operation_id=operation_id,
                 cycle_id=cycle_id,
                 context={"fresh_account": fresh_account, "reserve": reserve},
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"{entry_label} entry ladder blocked for {symbol}: fresh free margin is below reserve",
@@ -269,7 +268,7 @@ class EntryStrategy:
             placed_orders += 1
             event = "entry_ladder_placed"
             action = "placed"
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 event,
                 symbol=symbol,
                 signal=signal,
@@ -290,7 +289,7 @@ class EntryStrategy:
                     "account_leverage": order_leverage,
                     "reason": reason,
                 },
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"{entry_label} entry ladder {action} for {symbol}: stage={index} contracts={contracts} price={price}",
@@ -315,7 +314,7 @@ class EntryStrategy:
             last_ema30 = state.last_ema30
             last_ema60 = state.last_ema60
             state.active_side = None
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_ladder_rejected",
                 symbol=symbol,
                 signal=signal,
@@ -326,7 +325,7 @@ class EntryStrategy:
                 placed_orders=placed_orders,
                 operation_id=operation_id,
                 cycle_id=cycle_id,
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"No {entry_side} entry ladder orders placed for {symbol}",
@@ -730,13 +729,13 @@ class EntryStrategy:
         if self._position_too_old_for_averaging(state):
             held_minutes = self._position_held_minutes(state)
             block_reason = f"ema_position_too_old_for_averaging;holding_minutes={held_minutes:.1f}"
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "averaging_checked",
                 symbol=symbol,
                 signal=signal,
                 block_reason=block_reason,
                 context={"position_size": state.position_size, "entry_price": state.entry_price},
-            )
+            ))
             self._log_event(
                 "DEBUG",
                 f"EMA averaging skipped for {symbol}: position is too old",
@@ -755,13 +754,13 @@ class EntryStrategy:
         signal_for_quality["symbol"] = symbol
         signal_block_reason = self._averaging_signal_block_reason(signal_for_quality, state=state)
         if signal_block_reason:
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "averaging_checked",
                 symbol=symbol,
                 signal=signal_for_quality,
                 block_reason=signal_block_reason,
                 context={"position_size": state.position_size, "entry_price": state.entry_price},
-            )
+            ))
             if signal_block_reason == "ema_macro_broken_no_average":
                 self._log_event(
                     "DEBUG",
@@ -786,13 +785,13 @@ class EntryStrategy:
 
         macro_context = self._macro_guard_context()
         if macro_context.get("disable_averaging"):
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "averaging_checked",
                 symbol=symbol,
                 signal=signal,
                 block_reason="macro_disable_averaging",
                 context={"macro_context": macro_context},
-            )
+            ))
             self._log_macro_action_blocked("macro_averaging_blocked", symbol, signal, macro_context)
             return
 
@@ -810,13 +809,13 @@ class EntryStrategy:
             return
 
         if state.average_stage >= max(0, int(strategy.ema_max_averaging_stages)):
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "averaging_checked",
                 symbol=symbol,
                 signal=signal,
                 block_reason="ema_max_averaging_stages_reached",
                 context={"average_stage": state.average_stage},
-            )
+            ))
             self._log_event(
                 "DEBUG",
                 f"EMA averaging skipped for {symbol}: max stages reached",
@@ -853,7 +852,7 @@ class EntryStrategy:
 
         external_directional_reason = self._external_directional_1m_block_reason(symbol, scope="averaging")
         if external_directional_reason:
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "averaging_checked",
                 symbol=symbol,
                 signal=signal,
@@ -866,7 +865,7 @@ class EntryStrategy:
                     "daily_volatility": daily_volatility,
                     "stage": state.average_stage + 1,
                 },
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"EMA averaging skipped for {symbol}: external 1m gate",
@@ -890,7 +889,7 @@ class EntryStrategy:
             budget_scale=account_budget_scale,
         )
         if drawdown + 1e-12 < drawdown_threshold:
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "averaging_checked",
                 symbol=symbol,
                 signal=signal,
@@ -903,7 +902,7 @@ class EntryStrategy:
                     "daily_volatility": daily_volatility,
                     "stage": state.average_stage + 1,
                 },
-            )
+            ))
             self._log_event(
                 "DEBUG",
                 f"EMA averaging skipped for {symbol}: drawdown below threshold",
@@ -919,7 +918,7 @@ class EntryStrategy:
                 ),
             )
             return
-        self._record_signal_analytics(
+        self._record_signal_analytics(SignalAnalyticsEvent(
             "averaging_checked",
             symbol=symbol,
             signal=signal,
@@ -935,7 +934,7 @@ class EntryStrategy:
                 "budget_reason": budget_reason,
                 "threshold_reason": threshold_reason,
             },
-        )
+        ))
         if budget <= 0:
             self._log_event(
                 "INFO",
@@ -994,34 +993,34 @@ class EntryStrategy:
         signal_for_quality["symbol"] = symbol
         quality_reason = self._entry_signal_quality_block_reason(signal_for_quality)
         if quality_reason:
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_gate_checked",
                 symbol=symbol,
                 signal=signal_for_quality,
                 block_reason=quality_reason,
-            )
+            ))
             return
         if state.last_entry_ladder_signal_timestamp == (signal or {}).get("ts"):
             return
         macro_context = self._macro_guard_context()
         if macro_context.get("disable_new_entries"):
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_gate_checked",
                 symbol=symbol,
                 signal=signal,
                 block_reason="macro_disable_new_entries",
                 context={"macro_context": macro_context},
-            )
+            ))
             self._log_macro_action_blocked("macro_entry_blocked", symbol, signal, macro_context)
             return
         gate_reason = self._entry_gate_block_reason(symbol, signal)
         if gate_reason:
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_gate_checked",
                 symbol=symbol,
                 signal=signal,
                 block_reason=gate_reason,
-            )
+            ))
             logged = getattr(self, "_entry_gate_skip_logged", set())
             key = (symbol, (signal or {}).get("ts"), gate_reason)
             if key not in logged:
@@ -1037,12 +1036,12 @@ class EntryStrategy:
             return
         health_reason = self._profile_health_block_reason()
         if health_reason:
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_gate_checked",
                 symbol=symbol,
                 signal=signal,
                 block_reason=health_reason,
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"Signal skipped for {symbol}: profile health gate",
@@ -1054,12 +1053,12 @@ class EntryStrategy:
 
         reference_price, _ = self._fetch_reference_price(symbol)
         if reference_price <= 0:
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_gate_checked",
                 symbol=symbol,
                 signal=signal,
                 block_reason="reference_price_unavailable",
-            )
+            ))
             self._log_event(
                 "WARNING",
                 f"No reference bid/last price for {symbol}",
@@ -1071,13 +1070,13 @@ class EntryStrategy:
 
         external_block_reason = self._external_entry_block_reason(symbol)
         if external_block_reason:
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_gate_checked",
                 symbol=symbol,
                 signal=signal,
                 block_reason=external_block_reason,
                 external_context=self._external_context_from_cache(symbol),
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"Signal skipped for {symbol}: external price filter",
@@ -1089,13 +1088,13 @@ class EntryStrategy:
 
         spread_block_reason = self._entry_orderbook_spread_block_reason(symbol)
         if spread_block_reason:
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_gate_checked",
                 symbol=symbol,
                 signal=signal,
                 block_reason=spread_block_reason,
                 external_context=self._external_context_from_cache(symbol),
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"Signal skipped for {symbol}: HTX order book spread filter",
@@ -1105,12 +1104,12 @@ class EntryStrategy:
             )
             return
 
-        self._record_signal_analytics(
+        self._record_signal_analytics(SignalAnalyticsEvent(
             "entry_gate_checked",
             symbol=symbol,
             signal=signal,
             external_context=self._external_context_from_cache(symbol),
-        )
+        ))
         budget, budget_reason = self._risk_budget(
             symbol,
             state,
@@ -1124,7 +1123,7 @@ class EntryStrategy:
             budget_context.get("planned_notional"),
             budget * max(float(config.RISK.leverage), 1.0),
         )
-        self._record_signal_analytics(
+        self._record_signal_analytics(SignalAnalyticsEvent(
             "entry_budget_calculated" if budget > 0 else "entry_budget_blocked",
             symbol=symbol,
             signal=signal,
@@ -1137,7 +1136,7 @@ class EntryStrategy:
                 "budget_reason": budget_reason,
                 "budget_context": budget_context,
             },
-        )
+        ))
         if budget <= 0:
             self._log_event(
                 "INFO",

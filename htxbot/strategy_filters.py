@@ -165,10 +165,12 @@ class SignalFilters:
             signal_for_quality = dict(signal or {})
             signal_for_quality["symbol"] = symbol
             external_bonus = self._safe_float(self._external_entry_score_bonus(signal_for_quality, symbol=symbol), 0.0)
+            external_multiplier = self._safe_float(self._external_entry_score_multiplier(signal_for_quality, symbol=symbol), 1.0)
             quality_context = self._entry_signal_quality_context(
                 signal_for_quality,
                 crowded=crowded,
                 external_bonus=external_bonus,
+                external_multiplier=external_multiplier,
             )
             if not quality_context.get("passed"):
                 reason = self._entry_weighted_score_block_reason(quality_context)
@@ -433,6 +435,48 @@ class SignalFilters:
             f"htx_change_1m_bps={htx_change:.4f};mexc_change_1m_bps={mexc_change:.4f};"
             f"{self._external_price_reason(context)}"
         )
+
+    def _external_entry_score_multiplier(self, signal: Optional[dict], symbol: str = "") -> float:
+        settings = config.EXTERNAL_PRICE_FEED
+        if not self._external_price_settings_enabled():
+            return 1.0
+
+        penalty = max(0.0, self._safe_float(getattr(settings, "score_penalty_multiplier", 0.5), 0.5))
+        if penalty >= 1.0:
+            return 1.0
+
+        symbol = symbol or str((signal or {}).get("symbol") or "")
+        if not symbol:
+            return 1.0
+
+        context = self._external_price_context(symbol)
+        if not context.get("valid"):
+            if self._external_context_tradable(context):
+                return 1.0
+            return penalty
+
+        htx_change = self._safe_float(context.get("htx_change_1m_bps"), 0.0)
+        mexc_change = self._safe_float(context.get("mexc_change_1m_bps"), 0.0)
+        divergence = abs(htx_change - mexc_change)
+        threshold = max(0.0, self._safe_float(settings.block_if_exchange_divergence_1m_bps, 0.0))
+        if threshold > 0 and divergence > threshold:
+            return penalty
+
+        directional_reason = getattr(self, "_external_directional_1m_block_reason", lambda *args, **kwargs: "")(symbol, context=context, scope="entry")
+        if directional_reason:
+            return penalty
+
+        spread_bps = self._safe_float(context.get("spread_bps"), 0.0)
+        if config.POSITION_SIDE == "short":
+            limit = max(0.0, self._safe_float(settings.max_htx_discount_for_short_bps, 0.0))
+            if limit > 0 and spread_bps < -limit:
+                return penalty
+        else:
+            limit = max(0.0, self._safe_float(settings.max_htx_premium_for_long_bps, 0.0))
+            if limit > 0 and spread_bps > limit:
+                return penalty
+
+        return 1.0
 
     def _external_entry_block_reason(self, symbol: str) -> str:
         settings = config.EXTERNAL_PRICE_FEED
