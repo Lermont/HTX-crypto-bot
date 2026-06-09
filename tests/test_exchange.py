@@ -155,3 +155,48 @@ class TestFetchOrderBookSafe(unittest.TestCase):
         self.assertEqual(kwargs.get("symbol"), "ETH-USDT")
         self.assertIsInstance(kwargs.get("exception"), ValueError)
         self.assertEqual(str(kwargs.get("exception")), "Simulated fetch error")
+
+    def test_fetch_order_book_safe_direct(self):
+        from tests.config_overrides import override_frozen_config_fields
+        from htxbot import config
+        from unittest.mock import patch
+        import concurrent.futures
+
+        captured_func = []
+
+        class MockExecutor:
+            def __init__(self, max_workers):
+                pass
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+            def map(self, func, *iterables):
+                captured_func.append(func)
+                return []
+
+        # We force max_workers to 2 to hit the thread pool path where map is called
+        with override_frozen_config_fields(
+            config.RUNTIME, market_data_max_workers=2
+        ), override_frozen_config_fields(
+            config.STRATEGY,
+            entry_spread_filter_enabled=True,
+            entry_spread_filter_max_bps=10.0,
+        ), patch('concurrent.futures.ThreadPoolExecutor', MockExecutor):
+            self.exchange._prefetch_market_data_snapshots()
+
+        self.assertEqual(len(captured_func), 1)
+        fetch_order_book_safe = captured_func[0]
+
+        # Test success path
+        symbol, exc = fetch_order_book_safe("BTC-USDT")
+        self.assertEqual(symbol, "BTC-USDT")
+        self.assertIsNone(exc)
+        self.assertIn(("BTC-USDT", 5), self.exchange._cached_calls)
+
+        # Test error path
+        symbol, exc = fetch_order_book_safe("ETH-USDT")
+        self.assertEqual(symbol, "ETH-USDT")
+        self.assertIsInstance(exc, ValueError)
+        self.assertEqual(str(exc), "Simulated fetch error")
+        self.assertIn(("ETH-USDT", 5), self.exchange._cached_calls)
