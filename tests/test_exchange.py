@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import unittest
 from htxbot.exchange import ExchangeMixin
+from tests.config_overrides import override_frozen_config_fields
+import config
 
 
 class DummyExchange(ExchangeMixin):
