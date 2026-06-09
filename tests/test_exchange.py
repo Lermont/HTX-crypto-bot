@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
+
 import unittest
+from unittest.mock import MagicMock, patch
 from htxbot.exchange import ExchangeMixin
 from tests.config_overrides import override_frozen_config_fields
 import config
