@@ -122,8 +122,16 @@ class CombinedHtxFuturesBot:
                 try:
                     workers = max(workers, int(resolver()))
                     continue
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event = getattr(bot, "_log_event", None)
+                    if log_event:
+                        log_event(
+                            "WARNING",
+                            f"Failed to get max workers from resolver: {exc}",
+                            event="max_workers_error",
+                            reason="resolver_failed",
+                            exception=exc,
+                        )
             try:
                 workers = max(
                     workers,
@@ -244,8 +252,16 @@ class CombinedHtxFuturesBot:
             if min_contracts:
                 try:
                     epsilon = max(min_contracts(symbol) * 1e-9, epsilon)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event = getattr(bot, "_log_event", None)
+                    if log_event:
+                        log_event(
+                            "WARNING",
+                            f"Failed to calculate minimum contracts epsilon for symbol {symbol}: {exc}",
+                            event="epsilon_calculation_failed",
+                            reason="min_contracts_error",
+                            exception=exc,
+                        )
             for position in positions or []:
                 side = str((position or {}).get("side") or "").lower()
                 contracts = self._safe_float(
@@ -278,8 +294,16 @@ class CombinedHtxFuturesBot:
             if min_contracts:
                 try:
                     epsilon = max(min_contracts(symbol) * 1e-9, epsilon)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log_event = getattr(bot, "_log_event", None)
+                    if log_event:
+                        log_event(
+                            "WARNING",
+                            f"Failed to calculate minimum contracts epsilon for symbol {symbol}: {exc}",
+                            event="epsilon_calculation_failed",
+                            reason="min_contracts_error",
+                            exception=exc,
+                        )
             for order in orders or []:
                 side = str((order or {}).get("side") or "").lower()
                 if side not in reserved_order_sides:
@@ -403,8 +427,16 @@ class CombinedHtxFuturesBot:
                 price = self._safe_float(bot, ticker.get(key), 0.0)
                 if price > 0:
                     return price
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event = getattr(bot, "_log_event", None)
+            if log_event:
+                log_event(
+                    "WARNING",
+                    f"Failed to fetch ticker for symbol {symbol}: {exc}",
+                    event="fetch_ticker_error",
+                    reason="api_error",
+                    exception=exc,
+                )
         return 0.0
 
     def _position_payload_available(
