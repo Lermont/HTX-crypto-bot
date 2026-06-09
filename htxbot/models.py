@@ -7,6 +7,25 @@ from typing import List, Optional
 import config
 
 
+
+@dataclass
+class SignalAnalyticsEvent:
+    decision: str
+    symbol: str = ""
+    signal: Optional[dict] = None
+    block_reason: str = ""
+    external_context: Optional[dict] = None
+    planned_budget: float = 0.0
+    planned_orders: int = 0
+    planned_notional: float = 0.0
+    placed_orders: int = 0
+    filled_notional: float = 0.0
+    realized_pnl_quote: float = 0.0
+    operation_id: str = ""
+    order_id: str = ""
+    cycle_id: str = ""
+    context: Optional[dict] = None
+
 @dataclass
 class OrderRequest:
     symbol: str
@@ -189,6 +208,7 @@ __all__ = [
     "OrderRequest",
     "PositionLifecycle",
     "SellLadderParams",
+    "SignalAnalyticsEvent",
     "SignalContext",
     "TradeState",
 ]

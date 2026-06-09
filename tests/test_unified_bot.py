@@ -1,3 +1,4 @@
+from htxbot.models import SignalAnalyticsEvent
 # -*- coding: utf-8 -*-
 
 import csv
@@ -867,12 +868,12 @@ class UnifiedBotTests(unittest.TestCase):
                 "_rotate_jsonl_if_needed",
                 side_effect=PermissionError("jsonl locked"),
             ):
-                bot._record_signal_analytics(
+                bot._record_signal_analytics(SignalAnalyticsEvent(
                     "signal_built",
                     symbol=SYMBOL,
                     signal=self.entry_signal(),
                     context={"note": "monitoring failure must not stop trading"},
-                )
+                )))
 
             failures = getattr(bot, "_monitoring_write_failures", set())
             self.assertTrue(any("signal_analytics" in item[0] for item in failures))
@@ -1493,12 +1494,12 @@ class UnifiedBotTests(unittest.TestCase):
             signal["volume_profile_value_area_high"] = 102.5
             signal["volume_reason"] = "volume_spike_confirmed"
 
-            bot._record_signal_analytics(
+            bot._record_signal_analytics(SignalAnalyticsEvent(
                 "signal_built",
                 symbol=SYMBOL,
                 signal=signal,
                 context={"token": "hidden", "note": "kept"},
-            )
+            )))
 
             with bot.signal_analytics_csv_path.open(
                 newline="", encoding="utf-8"
@@ -4777,9 +4778,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertIn("rs_confirm_valid=0", block_reason)
             self.assertIn("raw_score=0.012300", block_reason)
 
-            bot._record_signal_analytics(
+            bot._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_gate_checked", symbol=SYMBOL, signal=signal
-            )
+            )))
             with (Path(raw_tmp) / "signal_analytics.csv").open(
                 newline="", encoding="utf-8"
             ) as handle:

@@ -1,3 +1,4 @@
+from .models import SignalAnalyticsEvent
 # -*- coding: utf-8 -*-
 
 import atexit
@@ -1565,7 +1566,7 @@ class StateMixin:
                 "btc_return_30m": state.last_btc_return_30m,
                 "valid": True,
             }
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "fill_synced",
                 symbol=symbol,
                 signal=fill_signal,
@@ -1589,7 +1590,7 @@ class StateMixin:
                     "fill_source": source,
                     "aggregate_avg": avg_entry,
                 },
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"{side.title()} entry fill synced for {symbol}: contracts={detail_contracts} avg={detail_price}",
@@ -1725,7 +1726,7 @@ class StateMixin:
                 "btc_return_30m": state.last_btc_return_30m,
                 "valid": True,
             }
-            self._record_signal_analytics(
+            self._record_signal_analytics(SignalAnalyticsEvent(
                 "fill_synced",
                 symbol=symbol,
                 signal=fill_signal,
@@ -1751,7 +1752,7 @@ class StateMixin:
                     "aggregate_avg": avg_exit,
                     "exit_scope": str(detail.get("exit_scope") or ""),
                 },
-            )
+            ))
             self._log_event(
                 "INFO",
                 f"{side.title()} exit fill synced for {symbol}: contracts={detail_contracts} avg={detail_price}",
@@ -2232,7 +2233,7 @@ class StateMixin:
                 }
             )
 
-        self._record_signal_analytics(
+        self._record_signal_analytics(SignalAnalyticsEvent(
             "cycle_closed",
             symbol=symbol,
             signal={
@@ -2263,7 +2264,7 @@ class StateMixin:
                 "max_buy_stage": state.buy_stage,
                 "max_averaging_stage": state.average_stage,
             },
-        )
+        ))
         self._log_event(
             "INFO",
             f"Cycle closed for {symbol}: pnl={realized:.8f}",

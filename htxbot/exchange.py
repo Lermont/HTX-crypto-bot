@@ -1,3 +1,4 @@
+from .models import SignalAnalyticsEvent
 # -*- coding: utf-8 -*-
 
 import concurrent.futures
@@ -2278,7 +2279,7 @@ class ExchangeMixin:
             )
             return False
 
-        self._record_signal_analytics(
+        self._record_signal_analytics(SignalAnalyticsEvent(
             "order_canceled",
             symbol=symbol,
             signal={"ts": ref.get("signal_ts"), "strategy_name": "ema_pullback"},
@@ -2296,7 +2297,7 @@ class ExchangeMixin:
                 "price": self._safe_float(ref.get("price"), 0.0),
                 "amount": self._safe_float(ref.get("amount"), 0.0),
             },
-        )
+        ))
         self._log_event(
             "INFO",
             f"Order canceled for {symbol}: {order_id}",
