@@ -332,6 +332,7 @@ class StateMixin:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.write(str(os.getpid()))
             except Exception:
+                logger = getattr(self, "log", logging.getLogger(__name__))
                 try:
                     os.close(fd)
                 except OSError as exc:
