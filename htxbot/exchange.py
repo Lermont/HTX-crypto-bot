@@ -1,3 +1,4 @@
+from .models import SignalAnalyticsEvent
 # -*- coding: utf-8 -*-
 
 import concurrent.futures
@@ -1068,14 +1069,10 @@ class ExchangeMixin:
                 entry["event"].set()
 
     def _ticker_prefetch_symbols(self) -> List[str]:
-        symbols = []
-        seen = set()
-        for symbol in list(getattr(self, "symbols", []) or []):
-            if not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
-            symbols.append(symbol)
-        return symbols
+        raw = getattr(self, "symbols", None)
+        if not raw:
+            return []
+        return [s for s in dict.fromkeys(raw) if s]
 
     def _prefetch_ticker_snapshots(
         self, symbols: Optional[List[str]] = None
@@ -1942,8 +1939,15 @@ class ExchangeMixin:
             tiers = self.exchange.fetch_leverage_tiers([symbol])
             if symbol in tiers and tiers[symbol]:
                 return max(tier.get("maxLeverage", 0.0) for tier in tiers[symbol])
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log_event(
+                "WARNING",
+                f"Could not fetch max leverage for {symbol}: {exc}",
+                event="futures_setup",
+                symbol=symbol,
+                reason="max_leverage_fetch_failed",
+                exception=exc,
+            )
         return 0.0
 
     def _set_leverage_safe(
@@ -2278,7 +2282,7 @@ class ExchangeMixin:
             )
             return False
 
-        self._record_signal_analytics(
+        self._record_signal_analytics(SignalAnalyticsEvent(
             "order_canceled",
             symbol=symbol,
             signal={"ts": ref.get("signal_ts"), "strategy_name": "ema_pullback"},
@@ -2296,7 +2300,7 @@ class ExchangeMixin:
                 "price": self._safe_float(ref.get("price"), 0.0),
                 "amount": self._safe_float(ref.get("amount"), 0.0),
             },
-        )
+        ))
         self._log_event(
             "INFO",
             f"Order canceled for {symbol}: {order_id}",
