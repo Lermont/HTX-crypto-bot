@@ -978,14 +978,14 @@ class MonitoringMixin:
         if severity == "critical":
             severity = "fault"
         category = self._diagnostic_category(
-            event,
-            reason=reason,
+            diagnostic.event,
+            reason=diagnostic.reason,
             message=message,
-            exception=exception,
-            category=category,
+            exception=diagnostic.exception,
+            category=diagnostic.category,
         )
         exception_info = self._diagnostic_from_exception(
-            exception, message=message, retryable=retryable
+            diagnostic.exception, message=message, retryable=diagnostic.retryable
         )
         retryable_value = bool(exception_info.get("retryable", False))
         row = [
