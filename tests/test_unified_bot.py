@@ -2611,6 +2611,28 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(seen_sides)
                 self.assertEqual(set(seen_sides), {"short"})
 
+    def test_parallel_ticker_prefetch_handles_exception(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, market_data_max_workers=2)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.symbols = [SYMBOL, SECOND_SYMBOL]
+                bot.exchange.has["fetchTickers"] = False
+
+                def fetch_ticker_raises(symbol):
+                    if symbol == SYMBOL:
+                        raise ValueError("Network Error")
+                    return {"bid": 9.9, "ask": 10.1, "last": 10.0, "symbol": symbol}
+
+                bot.exchange.fetch_ticker = fetch_ticker_raises
+
+                bot._reset_private_caches()
+                bot._reset_market_data_caches()
+                tickers = bot._prefetch_ticker_snapshots()
+
+                self.assertIn(SECOND_SYMBOL, tickers)
+                self.assertNotIn(SYMBOL, tickers)
+
     def test_profitable_cycle_uses_post_win_cooldown(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             risk = replace(
