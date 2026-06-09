@@ -95,6 +95,31 @@ class IndicatorMathTests(unittest.TestCase):
         # zero prices can be included as numeric input
         self.assertAlmostEqual(calculate_ema([0.0, 0.0], 2), 0.0)
 
+    def test_signal_budget_multiplier(self):
+        from htxbot.signal_math import signal_budget_multiplier
+        # When disabled, should always return 1.0 regardless of other inputs
+        self.assertEqual(signal_budget_multiplier(10.0, False, 1.0, 0.25, 1.0), 1.0)
+        self.assertEqual(signal_budget_multiplier(0.0, False, 1.0, 0.25, 2.0), 1.0)
+
+        # When score is <= 0, ratio is clamped to 0, returns min_multiplier
+        self.assertAlmostEqual(signal_budget_multiplier(0.0, True, 1.0, 0.25, 1.0), 0.25)
+        self.assertAlmostEqual(signal_budget_multiplier(-5.0, True, 1.0, 0.5, 2.0), 0.5)
+
+        # When score >= reference, ratio is clamped to 1.0, returns max_multiplier
+        self.assertAlmostEqual(signal_budget_multiplier(1.0, True, 1.0, 0.25, 1.0), 1.0)
+        self.assertAlmostEqual(signal_budget_multiplier(2.0, True, 1.0, 0.5, 2.0), 2.0)
+
+        # Interpolation when 0 < score < reference
+        # score=0.5, ref=1.0 -> ratio=0.5. result = 0.25 + (1.0 - 0.25) * 0.5 = 0.625
+        self.assertAlmostEqual(signal_budget_multiplier(0.5, True, 1.0, 0.25, 1.0), 0.625)
+        # score=2.0, ref=10.0 -> ratio=0.2. result = 0.5 + (2.0 - 0.5) * 0.2 = 0.8
+        self.assertAlmostEqual(signal_budget_multiplier(2.0, True, 10.0, 0.5, 2.0), 0.8)
+
+        # Edge case: reference <= 0, should use 1e-12.
+        # So any positive score will make ratio >= 1.0 (clamped to 1.0), returning max_multiplier
+        self.assertAlmostEqual(signal_budget_multiplier(1.0, True, 0.0, 0.25, 1.5), 1.5)
+        self.assertAlmostEqual(signal_budget_multiplier(1.0, True, -1.0, 0.25, 1.5), 1.5)
+
     def test_ema_and_series_share_final_value(self):
         prices = [10.0, 20.0, 30.0]
         series = calculate_ema_series(prices, 2)

@@ -7,7 +7,9 @@ import config
 
 class RunnerMixin:
     def _log_step_exception(self, symbol: str, exc: Exception):
-        is_transient = bool(getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc))
+        is_transient = bool(
+            getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc)
+        )
         self._log_event(
             "WARNING" if is_transient else "FAULT",
             f"Step failed for {symbol}: {exc}",
@@ -39,7 +41,12 @@ class RunnerMixin:
         return open_orders
 
     def setup(self):
-        self._log_event("INFO", "Initializing HTX futures bot", event="futures_setup", reason="startup")
+        self._log_event(
+            "INFO",
+            "Initializing HTX futures bot",
+            event="futures_setup",
+            reason="startup",
+        )
         self._load_markets_with_retry()
 
         self.benchmark_symbol = self._find_futures_symbol("btc")
@@ -107,11 +114,17 @@ class RunnerMixin:
         for symbol, state in list(self.states.items()):
             if symbol in seen or symbol not in self.exchange.markets:
                 continue
-            has_local_exposure = bool(state.position_size > 0 or state.entry_orders or state.sell_ladder_orders)
+            has_local_exposure = bool(
+                state.position_size > 0
+                or state.entry_orders
+                or state.sell_ladder_orders
+            )
             if not has_local_exposure:
                 continue
             market = self._market(symbol)
-            if not (market.get("linear") and (market.get("swap") or market.get("future"))):
+            if not (
+                market.get("linear") and (market.get("swap") or market.get("future"))
+            ):
                 continue
             seen.add(symbol)
             self.symbols.append(symbol)
@@ -153,7 +166,9 @@ class RunnerMixin:
 
     def step_symbol(self, symbol: str):
         state = self._get_state(symbol)
-        had_tracked_exit_orders = bool(state.sell_ladder_orders or state.hard_stop_order)
+        had_tracked_exit_orders = bool(
+            state.sell_ladder_orders or state.hard_stop_order
+        )
         snapshot = self._fetch_position_snapshot(symbol)
         if not snapshot.get("ok", False):
             return
@@ -168,38 +183,17 @@ class RunnerMixin:
                 reason="open_orders_unavailable_skip",
             )
             return
-        sync_status = self._sync_state_with_position(symbol, snapshot, open_orders=open_orders)
-        if sync_status in {"disabled", "reserved"}:
-            return
-        if sync_status == "position_changed":
-            if not had_tracked_exit_orders:
-                post_sync_open_orders = self._post_sync_order_hygiene(symbol, reason="post_position_change")
-                if post_sync_open_orders is None:
-                    return
-                open_orders = post_sync_open_orders
-                post_sync_state = self._get_state(symbol)
-                if post_sync_state.sell_ladder_orders or post_sync_state.hard_stop_order:
-                    return
-            else:
-                return
-        elif sync_status == "closed":
-            self._post_sync_order_hygiene(symbol, reason="post_position_closed")
-            return
-        if self._maybe_close_dust_position(symbol, open_orders):
+
+        open_orders, sync_should_return = self._sync_symbol_state(
+            symbol, snapshot, open_orders, had_tracked_exit_orders
+        )
+        if sync_should_return:
             return
 
-        state = self._get_state(symbol)
-        external_reserved_symbols = getattr(self, "external_reserved_symbols", set())
-        if symbol in external_reserved_symbols and state.position_size <= 0:
-            if state.entry_orders:
-                self._cancel_entry_orders(symbol, reason="reserved_by_other_profile")
-            if state.sell_ladder_orders:
-                self._cancel_sell_orders(symbol, reason="reserved_by_other_profile")
-            self._log_reserved_by_other_profile(symbol)
+        if self._handle_external_reserve(symbol):
             return
 
         signal = self.signal_cache.get("symbols", {}).get(symbol)
-        signal_valid = bool(signal and signal.get("valid") and self.signal_cache.get("benchmark_ok"))
 
         if not self._validate_sell_orders(symbol, open_orders):
             return
@@ -209,62 +203,126 @@ class RunnerMixin:
 
         state = self._get_state(symbol)
         if state.position_size > 0:
-            if not signal_valid:
-                self._freeze_no_more_buys(symbol, reason="signal_invalid_or_missing")
-            if self._maybe_apply_absolute_force_exit(symbol, reason="absolute_force_exit_elapsed"):
-                return
-            self._ensure_hard_stop_loss(symbol, signal=signal)
-            state = self._get_state(symbol)
-            if state.sell_ladder_mode == "hard_stop_loss":
-                return
-            if self._maybe_apply_soft_defensive_exit(symbol, signal):
-                return
-            if self._maybe_apply_controlled_loss_exit(symbol, signal):
-                return
-            if self._maybe_apply_urgent_time_exit(symbol, signal):
-                return
-            if self._maybe_apply_account_pnl_trailing(symbol, signal):
-                return
-            if self._maybe_apply_account_profit_unload(symbol, signal):
-                return
-            time_exit_applied = self._maybe_apply_time_based_exit(symbol, signal)
-            if not time_exit_applied:
-                self._maybe_manage_exit_runner(symbol, signal)
-            self._ensure_sell_ladder(symbol)
-            state = self._get_state(symbol)
-            self._maybe_place_average_buy(symbol, signal)
-            return
+            self._manage_active_position(symbol, signal)
+        elif state.position_size <= 0:
+            self._manage_flat_position(symbol, signal)
 
-        if state.position_size <= 0:
-            exit_side = config.EXIT_SIDE
+    def _sync_symbol_state(
+        self,
+        symbol: str,
+        snapshot: dict,
+        open_orders: list[dict],
+        had_tracked_exit_orders: bool,
+    ) -> tuple[list[dict], bool]:
+        sync_status = self._sync_state_with_position(
+            symbol, snapshot, open_orders=open_orders
+        )
+        if sync_status in {"disabled", "reserved"}:
+            return open_orders, True
+
+        if sync_status == "position_changed":
+            if not had_tracked_exit_orders:
+                post_sync_open_orders = self._post_sync_order_hygiene(
+                    symbol, reason="post_position_change"
+                )
+                if post_sync_open_orders is None:
+                    return open_orders, True
+                open_orders = post_sync_open_orders
+                post_sync_state = self._get_state(symbol)
+                if (
+                    post_sync_state.sell_ladder_orders
+                    or post_sync_state.hard_stop_order
+                ):
+                    return open_orders, True
+            else:
+                return open_orders, True
+        elif sync_status == "closed":
+            self._post_sync_order_hygiene(symbol, reason="post_position_closed")
+            return open_orders, True
+
+        if self._maybe_close_dust_position(symbol, open_orders):
+            return open_orders, True
+
+        return open_orders, False
+
+    def _handle_external_reserve(self, symbol: str) -> bool:
+        state = self._get_state(symbol)
+        external_reserved_symbols = getattr(self, "external_reserved_symbols", set())
+        if symbol in external_reserved_symbols and state.position_size <= 0:
+            if state.entry_orders:
+                self._cancel_entry_orders(symbol, reason="reserved_by_other_profile")
             if state.sell_ladder_orders:
-                self._log_event(
-                    "WARNING",
-                    f"Tracked {exit_side} exit orders remain on flat {symbol}; canceling tracked bot orders",
-                    event="reduce_only_violation_prevented",
-                    symbol=symbol,
-                    side=exit_side,
-                    reason="flat_symbol_exit_order",
-                )
-                self._cancel_sell_orders(symbol, reason="flat_symbol_exit_order")
-            if state.hard_stop_order:
-                self._log_event(
-                    "WARNING",
-                    f"Tracked {exit_side} hard stop remains on flat {symbol}; canceling tracked bot order",
-                    event="reduce_only_violation_prevented",
-                    symbol=symbol,
-                    side=exit_side,
-                    reason="flat_symbol_hard_stop_order",
-                )
-                self._cancel_hard_stop_order(symbol, reason="flat_symbol_hard_stop_order")
-            if not state.entry_orders:
-                self._maybe_place_initial_buy(symbol, signal)
+                self._cancel_sell_orders(symbol, reason="reserved_by_other_profile")
+            self._log_reserved_by_other_profile(symbol)
+            return True
+        return False
+
+    def _manage_active_position(self, symbol: str, signal: dict):
+        signal_valid = bool(
+            signal and signal.get("valid") and self.signal_cache.get("benchmark_ok")
+        )
+        if not signal_valid:
+            self._freeze_no_more_buys(symbol, reason="signal_invalid_or_missing")
+        if self._maybe_apply_absolute_force_exit(
+            symbol, reason="absolute_force_exit_elapsed"
+        ):
+            return
+        self._ensure_hard_stop_loss(symbol, signal=signal)
+        state = self._get_state(symbol)
+        if state.sell_ladder_mode == "hard_stop_loss":
+            return
+        if self._maybe_apply_soft_defensive_exit(symbol, signal):
+            return
+        if self._maybe_apply_controlled_loss_exit(symbol, signal):
+            return
+        if self._maybe_apply_urgent_time_exit(symbol, signal):
+            return
+        if self._maybe_apply_account_pnl_trailing(symbol, signal):
+            return
+        if self._maybe_apply_account_profit_unload(symbol, signal):
+            return
+        time_exit_applied = self._maybe_apply_time_based_exit(symbol, signal)
+        if not time_exit_applied:
+            self._maybe_manage_exit_runner(symbol, signal)
+        self._ensure_sell_ladder(symbol)
+        self._maybe_place_average_buy(symbol, signal)
+
+    def _manage_flat_position(self, symbol: str, signal: dict):
+        state = self._get_state(symbol)
+        exit_side = config.EXIT_SIDE
+        if state.sell_ladder_orders:
+            self._log_event(
+                "WARNING",
+                f"Tracked {exit_side} exit orders remain on flat {symbol}; canceling tracked bot orders",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=exit_side,
+                reason="flat_symbol_exit_order",
+            )
+            self._cancel_sell_orders(symbol, reason="flat_symbol_exit_order")
+        if state.hard_stop_order:
+            self._log_event(
+                "WARNING",
+                f"Tracked {exit_side} hard stop remains on flat {symbol}; canceling tracked bot order",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=exit_side,
+                reason="flat_symbol_hard_stop_order",
+            )
+            self._cancel_hard_stop_order(symbol, reason="flat_symbol_hard_stop_order")
+        if not state.entry_orders:
+            self._maybe_place_initial_buy(symbol, signal)
 
     def run(self):
         self._acquire_runtime_lock()
         try:
             self.setup()
-            self._log_event("INFO", "HTX futures bot loop started", event="futures_setup", reason="bot_started")
+            self._log_event(
+                "INFO",
+                "HTX futures bot loop started",
+                event="futures_setup",
+                reason="bot_started",
+            )
 
             while True:
                 started_at = time.time()
@@ -275,7 +333,9 @@ class RunnerMixin:
                     reset_market_data()
                 self._update_signal_cache_if_needed()
                 self._prepare_new_entry_gate()
-                prefetch_market_data = getattr(self, "_prefetch_market_data_snapshots", None)
+                prefetch_market_data = getattr(
+                    self, "_prefetch_market_data_snapshots", None
+                )
                 if prefetch_market_data:
                     prefetch_market_data()
                 prefetch_private = getattr(self, "_prefetch_private_snapshots", None)
