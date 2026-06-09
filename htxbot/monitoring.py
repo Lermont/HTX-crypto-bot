@@ -132,8 +132,8 @@ class MonitoringMixin:
         except Exception as exc:
             try:
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                self.log.warning("Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc)
             self.log.warning("Could not replace CSV header for %s: %s", path, exc)
 
     def _apply_legacy_csv_aliases(self, row: Dict[str, Any]):
@@ -157,8 +157,8 @@ class MonitoringMixin:
         except Exception as exc:
             try:
                 tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                self.log.warning("Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc)
             self.log.warning("Could not add CSV header for %s: %s", path, exc)
 
     def _ensure_csv_file(self):
