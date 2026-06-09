@@ -23,7 +23,9 @@ _CSV_STREAM_COPY_CHUNK_SIZE = 1024 * 1024
 
 
 class MonitoringMixin:
-    def _monitoring_write_failed_once(self, path: Optional[Path], action: str, exc: Exception):
+    def _monitoring_write_failed_once(
+        self, path: Optional[Path], action: str, exc: Exception
+    ):
         key = (str(path or ""), action)
         logged = getattr(self, "_monitoring_write_failures", set())
         if key in logged:
@@ -35,7 +37,9 @@ class MonitoringMixin:
         logger = getattr(self, "log", logging.getLogger(__name__))
         logger.warning("Could not %s %s: %s", action, path, exc)
 
-    def _append_headered_csv_row(self, path: Optional[Path], header: Sequence[str], row: Sequence[Any]) -> bool:
+    def _append_headered_csv_row(
+        self, path: Optional[Path], header: Sequence[str], row: Sequence[Any]
+    ) -> bool:
         if not path:
             return True
         try:
@@ -49,7 +53,9 @@ class MonitoringMixin:
             self._monitoring_write_failed_once(path, "append CSV row", exc)
             return False
 
-    def _replace_path_with_retry(self, src: Path, dst: Path, attempts: int = 30, delay_sec: float = 0.05):
+    def _replace_path_with_retry(
+        self, src: Path, dst: Path, attempts: int = 30, delay_sec: float = 0.05
+    ):
         replace_path_with_retry(
             src,
             dst,
@@ -61,12 +67,16 @@ class MonitoringMixin:
 
     def _build_logger(self) -> logging.Logger:
         logger = logging.getLogger(f"htx_futures_bot.{config.BOT_NAME}")
-        logger.setLevel(getattr(logging, config.MONITORING.log_level.upper(), logging.INFO))
+        logger.setLevel(
+            getattr(logging, config.MONITORING.log_level.upper(), logging.INFO)
+        )
         logger.handlers.clear()
         logger.propagate = False
 
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+        )
         logger.addHandler(handler)
         return logger
 
@@ -104,7 +114,9 @@ class MonitoringMixin:
             normalized[0] = normalized[0].lstrip("\ufeff")
         return normalized
 
-    def _legacy_csv_row_dict(self, source_header: Sequence[str], values: Sequence[Any]) -> Dict[str, Any]:
+    def _legacy_csv_row_dict(
+        self, source_header: Sequence[str], values: Sequence[Any]
+    ) -> Dict[str, Any]:
         row = {}
         for index, name in enumerate(source_header):
             if not name:
@@ -112,12 +124,17 @@ class MonitoringMixin:
             row[str(name)] = values[index] if index < len(values) else ""
         return row
 
-    def _rewrite_headered_csv_file(self, path: Path, header: Sequence[str], normalized_first_row: Sequence[str]):
+    def _rewrite_headered_csv_file(
+        self, path: Path, header: Sequence[str], normalized_first_row: Sequence[str]
+    ):
         tmp_path = self._csv_tmp_path(path)
         header = list(header)
         source_header = list(normalized_first_row)
         try:
-            with path.open("r", newline="", encoding="utf-8") as src, tmp_path.open("w", newline="", encoding="utf-8") as dst:
+            with (
+                path.open("r", newline="", encoding="utf-8") as src,
+                tmp_path.open("w", newline="", encoding="utf-8") as dst,
+            ):
                 reader = csv.reader(src)
                 first_row = next(reader, [])
                 if first_row:
@@ -133,7 +150,9 @@ class MonitoringMixin:
             try:
                 tmp_path.unlink(missing_ok=True)
             except OSError as cleanup_exc:
-                self.log.warning("Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc)
+self.log.warning(
+                    "Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc
+                )
             self.log.warning("Could not replace CSV header for %s: %s", path, exc)
 
     def _apply_legacy_csv_aliases(self, row: Dict[str, Any]):
@@ -158,7 +177,9 @@ class MonitoringMixin:
             try:
                 tmp_path.unlink(missing_ok=True)
             except OSError as cleanup_exc:
-                self.log.warning("Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc)
+self.log.warning(
+                    "Failed to clean up temporary file %s: %s", tmp_path, cleanup_exc
+                )
             self.log.warning("Could not add CSV header for %s: %s", path, exc)
 
     def _ensure_csv_file(self):
@@ -181,6 +202,7 @@ class MonitoringMixin:
         path = getattr(self, "account_pnl_csv_path", None)
         if path:
             self._ensure_headered_csv_file(path, self.ACCOUNT_PNL_CSV_HEADER)
+
     def _ensure_jsonl_file(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(exist_ok=True)
@@ -209,7 +231,10 @@ class MonitoringMixin:
 
         timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         millis = int((time.time() % 1) * 1000)
-        return archive_dir / f"{path.stem}.{timestamp}_{millis:03d}_{os.getpid()}_{time.time_ns()}{path.suffix}"
+        return (
+            archive_dir
+            / f"{path.stem}.{timestamp}_{millis:03d}_{os.getpid()}_{time.time_ns()}{path.suffix}"
+        )
 
     def _rotate_csv_if_needed(self, path: Path, header: Sequence[str]):
         max_bytes = max(0, int(config.MONITORING.csv_rotate_max_bytes or 0))
@@ -242,7 +267,12 @@ class MonitoringMixin:
             return True
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            line = json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, sort_keys=True) + "\n"
+            line = (
+                json.dumps(
+                    self._sanitize_for_log(payload), ensure_ascii=False, sort_keys=True
+                )
+                + "\n"
+            )
             with _monitoring_global_lock:
                 with instance_rlock(self, "_monitoring_lock"):
                     self._rotate_jsonl_if_needed(path)
@@ -256,7 +286,9 @@ class MonitoringMixin:
                             last_exc = exc
                             time.sleep(0.05 * (attempt + 1))
                     if last_exc is not None:
-                        self._monitoring_write_failed_once(path, "append JSONL log", last_exc)
+                        self._monitoring_write_failed_once(
+                            path, "append JSONL log", last_exc
+                        )
                         return False
         except Exception as exc:
             self._monitoring_write_failed_once(path, "append JSONL log", exc)
@@ -271,13 +303,25 @@ class MonitoringMixin:
             for key, item in value.items():
                 key_text = str(key)
                 lowered = key_text.lower()
-                if any(secret in lowered for secret in ("apikey", "api_key", "secret", "password", "token", "signature")):
+                if any(
+                    secret in lowered
+                    for secret in (
+                        "apikey",
+                        "api_key",
+                        "secret",
+                        "password",
+                        "token",
+                        "signature",
+                    )
+                ):
                     clean[key_text] = "<redacted>"
                 else:
                     clean[key_text] = self._sanitize_for_log(item, depth + 1)
             return clean
         if isinstance(value, (list, tuple, set)):
-            return [self._sanitize_for_log(item, depth + 1) for item in list(value)[:200]]
+            return [
+                self._sanitize_for_log(item, depth + 1) for item in list(value)[:200]
+            ]
         if isinstance(value, (str, int, float, bool)) or value is None:
             if isinstance(value, str):
                 value = self._redact_sensitive_text(value)
@@ -301,7 +345,18 @@ class MonitoringMixin:
                 changed = False
                 for key, item in parse_qsl(parsed.query, keep_blank_values=True):
                     lowered = key.lower()
-                    if any(secret in lowered for secret in ("accesskeyid", "api_key", "apikey", "secret", "password", "token", "signature")):
+                    if any(
+                        secret in lowered
+                        for secret in (
+                            "accesskeyid",
+                            "api_key",
+                            "apikey",
+                            "secret",
+                            "password",
+                            "token",
+                            "signature",
+                        )
+                    ):
                         pairs.append((key, "<redacted>"))
                         changed = True
                     else:
@@ -371,10 +426,18 @@ class MonitoringMixin:
     ) -> str:
         signal_ts = (signal or {}).get("ts") or ""
         millis = int(time.time() * 1000)
-        parts = [self._current_profile_name(), event, symbol, order_id or str(signal_ts), str(millis)]
+        parts = [
+            self._current_profile_name(),
+            event,
+            symbol,
+            order_id or str(signal_ts),
+            str(millis),
+        ]
         if suffix:
             parts.append(str(suffix))
-        return ":".join(str(part).replace(":", "_") for part in parts if part not in (None, ""))
+        return ":".join(
+            str(part).replace(":", "_") for part in parts if part not in (None, "")
+        )
 
     def _new_cycle_id(self, symbol: str, signal: Optional[dict] = None) -> str:
         return self._operation_id("cycle", symbol=symbol, signal=signal)
@@ -443,7 +506,11 @@ class MonitoringMixin:
     ):
         signal = signal or {}
         symbol = symbol or str(signal.get("symbol") or "")
-        external_context = external_context if isinstance(external_context, dict) else self._external_context_from_cache(symbol)
+        external_context = (
+            external_context
+            if isinstance(external_context, dict)
+            else self._external_context_from_cache(symbol)
+        )
         signal_id = self._signal_id(symbol, signal)
         signal_ts = signal.get("ts") or ""
         strategy_name = signal.get("strategy_name") or "ema_pullback"
@@ -471,12 +538,24 @@ class MonitoringMixin:
             self._fmt_monitoring_float(signal.get("score"), 8),
             self._fmt_monitoring_float(signal.get("rs30"), 8),
             self._fmt_monitoring_float(signal.get("rs60"), 8),
-            self._fmt_monitoring_float(signal.get("ema50", signal.get("ema_trigger_fast")), 12),
-            self._fmt_monitoring_float(signal.get("ema100", signal.get("ema_trigger_slow")), 12),
-            self._fmt_monitoring_float(signal.get("ema1d", signal.get("ema_pullback_fast")), 12),
-            self._fmt_monitoring_float(signal.get("ema2d", signal.get("ema_pullback_slow")), 12),
-            self._fmt_monitoring_float(signal.get("ema25d", signal.get("ema_macro_fast")), 12),
-            self._fmt_monitoring_float(signal.get("ema50d", signal.get("ema_macro_slow")), 12),
+            self._fmt_monitoring_float(
+                signal.get("ema50", signal.get("ema_trigger_fast")), 12
+            ),
+            self._fmt_monitoring_float(
+                signal.get("ema100", signal.get("ema_trigger_slow")), 12
+            ),
+            self._fmt_monitoring_float(
+                signal.get("ema1d", signal.get("ema_pullback_fast")), 12
+            ),
+            self._fmt_monitoring_float(
+                signal.get("ema2d", signal.get("ema_pullback_slow")), 12
+            ),
+            self._fmt_monitoring_float(
+                signal.get("ema25d", signal.get("ema_macro_fast")), 12
+            ),
+            self._fmt_monitoring_float(
+                signal.get("ema50d", signal.get("ema_macro_slow")), 12
+            ),
             self._fmt_monitoring_float(signal.get("macro_gap"), 8),
             self._fmt_monitoring_float(signal.get("trigger_gap"), 8),
             self._fmt_monitoring_float(signal.get("pullback_depth"), 8),
@@ -484,20 +563,30 @@ class MonitoringMixin:
             self._fmt_monitoring_float(signal.get("volatility"), 8),
             self._fmt_monitoring_float(signal.get("budget_multiplier"), 8),
             self._fmt_monitoring_float(signal.get("ladder_multiplier"), 8),
-            int(bool(signal.get("volume_valid", False))) if "volume_valid" in signal else "",
+            int(bool(signal.get("volume_valid", False)))
+            if "volume_valid" in signal
+            else "",
             self._fmt_monitoring_float(signal.get("volume_ratio"), 8),
             self._fmt_monitoring_float(signal.get("volume_spike_ratio"), 8),
             signal.get("volume_spike_direction", ""),
-            int(bool(signal.get("volume_profile_valid", False))) if "volume_profile_valid" in signal else "",
-            int(bool(signal.get("volume_profile_break", False))) if "volume_profile_break" in signal else "",
+            int(bool(signal.get("volume_profile_valid", False)))
+            if "volume_profile_valid" in signal
+            else "",
+            int(bool(signal.get("volume_profile_break", False)))
+            if "volume_profile_break" in signal
+            else "",
             self._fmt_monitoring_float(signal.get("volume_profile_poc"), 12),
             self._fmt_monitoring_float(signal.get("volume_profile_value_area_low"), 12),
-            self._fmt_monitoring_float(signal.get("volume_profile_value_area_high"), 12),
+            self._fmt_monitoring_float(
+                signal.get("volume_profile_value_area_high"), 12
+            ),
             signal.get("volume_reason", ""),
             signal.get("macro_regime", ""),
             int(bool(external_context.get("valid", False))) if external_context else "",
             int(bool(external_context.get("stale", False))) if external_context else "",
-            self._fmt_monitoring_float(external_context.get("spread_bps"), 8) if external_context else "",
+            self._fmt_monitoring_float(external_context.get("spread_bps"), 8)
+            if external_context
+            else "",
             self._fmt_monitoring_float(planned_budget, 8),
             int(planned_orders or 0),
             self._fmt_monitoring_float(planned_notional, 8),
@@ -508,7 +597,9 @@ class MonitoringMixin:
 
         csv_path = getattr(self, "signal_analytics_csv_path", None)
         if csv_path:
-            self._append_headered_csv_row(csv_path, self.SIGNAL_ANALYTICS_CSV_HEADER, row)
+            self._append_headered_csv_row(
+                csv_path, self.SIGNAL_ANALYTICS_CSV_HEADER, row
+            )
 
         payload = {
             "ts": int(time.time()),
@@ -769,7 +860,10 @@ class MonitoringMixin:
                 context.get("reason", ""),
             ],
         )
-    def _diagnostic_error_code(self, exc: Optional[Exception], message: str = "") -> str:
+
+    def _diagnostic_error_code(
+        self, exc: Optional[Exception], message: str = ""
+    ) -> str:
         text = f"{message} {exc or ''}"
         for pattern in (
             r'"(?:err[_-]?code|error[_-]?code|code)"\s*:\s*"?([0-9A-Za-z_-]+)"?',
@@ -790,23 +884,56 @@ class MonitoringMixin:
     ) -> str:
         if category:
             return category
-        is_transient = bool(getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exception)) if exception else False
+        is_transient = (
+            bool(
+                getattr(self, "_is_transient_exchange_error", lambda _exc: False)(
+                    exception
+                )
+            )
+            if exception
+            else False
+        )
         text = f"{event} {reason} {message} {exception or ''}".lower()
-        if is_transient or any(item in text for item in ("timeout", "network", "connection", "rate limit")):
+        if is_transient or any(
+            item in text for item in ("timeout", "network", "connection", "rate limit")
+        ):
             return "network"
         if "config" in text or "credential" in text:
             return "config"
-        if any(item in text for item in ("csv", "file", "cache", "lock", "read", "write", "json")):
+        if any(
+            item in text
+            for item in ("csv", "file", "cache", "lock", "read", "write", "json")
+        ):
             return "io"
         if "state" in text or "position" in text or "sync" in text:
             return "state"
-        if any(item in text for item in ("htx", "exchange", "api", "fetch", "order", "leverage", "balance", "ticker")):
+        if any(
+            item in text
+            for item in (
+                "htx",
+                "exchange",
+                "api",
+                "fetch",
+                "order",
+                "leverage",
+                "balance",
+                "ticker",
+            )
+        ):
             return "api"
-        if any(item in text for item in ("signal", "ema", "strategy", "macro", "external_price")):
+        if any(
+            item in text
+            for item in ("signal", "ema", "strategy", "macro", "external_price")
+        ):
             return "strategy"
         return "environment"
 
-    def _diagnostic_from_exception(self, exc: Optional[Exception], message: str = "", retryable: Optional[bool] = None) -> dict:
+    def _diagnostic_from_exception(
+        self,
+        exc: Optional[Exception],
+        message: str = "",
+        retryable: Optional[bool] = None,
+    ) -> dict:
         if exc is None:
             return {
                 "exception_type": "",
@@ -814,7 +941,9 @@ class MonitoringMixin:
                 "retryable": bool(retryable) if retryable is not None else False,
             }
         if retryable is None:
-            retryable = bool(getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc))
+            retryable = bool(
+                getattr(self, "_is_transient_exchange_error", lambda _exc: False)(exc)
+            )
         return {
             "exception_type": type(exc).__name__,
             "error_code": self._diagnostic_error_code(exc, message),
@@ -842,8 +971,16 @@ class MonitoringMixin:
         severity = str(severity or "").lower()
         if severity == "critical":
             severity = "fault"
-        category = self._diagnostic_category(event, reason=reason, message=message, exception=exception, category=category)
-        exception_info = self._diagnostic_from_exception(exception, message=message, retryable=retryable)
+        category = self._diagnostic_category(
+            event,
+            reason=reason,
+            message=message,
+            exception=exception,
+            category=category,
+        )
+        exception_info = self._diagnostic_from_exception(
+            exception, message=message, retryable=retryable
+        )
         retryable_value = bool(exception_info.get("retryable", False))
         row = [
             int(time.time()),
@@ -908,12 +1045,16 @@ class MonitoringMixin:
     def _compact_log_message(self, message: str) -> str:
         text = self._redact_sensitive_text(message)
         html_markers = ("<!DOCTYPE html", "<html", "<head", "<body")
-        marker_positions = [text.find(marker) for marker in html_markers if marker in text]
+        marker_positions = [
+            text.find(marker) for marker in html_markers if marker in text
+        ]
         if marker_positions:
             head = text[: min(marker_positions)].strip()
             if len(head) > 500:
                 head = f"{head[:500]}..."
-            return f"{head} [html response omitted]" if head else "[html response omitted]"
+            return (
+                f"{head} [html response omitted]" if head else "[html response omitted]"
+            )
         if len(text) > 2000:
             return f"{text[:2000]}... [truncated]"
         return text
@@ -947,7 +1088,9 @@ class MonitoringMixin:
                 message=message,
                 exception_type=str(exception_info.get("exception_type", "")),
                 error_code=str(exception_info.get("error_code", "")),
-                retryable=int(bool(exception_info.get("retryable", False))) if diagnostic_exception or diagnostic_retryable is not None else "",
+                retryable=int(bool(exception_info.get("retryable", False)))
+                if diagnostic_exception or diagnostic_retryable is not None
+                else "",
                 **kwargs,
             )
         except Exception as exc:
@@ -955,7 +1098,9 @@ class MonitoringMixin:
                 self._csv_log_failed_once = True
                 self.log.warning("Could not append CSV event log: %s", exc)
         if level_upper in {"WARNING", "ERROR", "FAULT", "CRITICAL"}:
-            severity = "fault" if level_upper in {"FAULT", "CRITICAL"} else level_upper.lower()
+            severity = (
+                "fault" if level_upper in {"FAULT", "CRITICAL"} else level_upper.lower()
+            )
             self._record_diagnostic(
                 severity,
                 diagnostic_category,

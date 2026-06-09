@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import time
+import concurrent.futures
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -347,37 +348,61 @@ class MultiAccountExchange:
         return deduped
 
     def fetch_positions(self, symbols=None, params=None):
-        if symbols:
-            positions = []
-            for account, account_symbols in self._group_symbols_by_account(
-                symbols
-            ).items():
-                positions.extend(
-                    self._account(account).fetch_positions(
-                        account_symbols, params or {}
-                    )
-                )
-            return positions
+        safe_params = params or {}
         positions = []
-        for exchange in self._accounts.values():
-            positions.extend(exchange.fetch_positions(symbols, params or {}))
+        if symbols:
+            groups = self._group_symbols_by_account(symbols)
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(groups) or 1
+            ) as executor:
+                futures = [
+                    executor.submit(
+                        self._account(account).fetch_positions,
+                        account_symbols,
+                        safe_params,
+                    )
+                    for account, account_symbols in groups.items()
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    positions.extend(future.result())
+            return positions
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(self._accounts) or 1
+        ) as executor:
+            futures = [
+                executor.submit(exchange.fetch_positions, symbols, safe_params)
+                for exchange in self._accounts.values()
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                positions.extend(future.result())
         return self._dedupe_payloads(positions)
 
     def fetch_open_orders(self, symbol=None, params=None):
+        safe_params = params or {}
         if symbol:
             return self._call_optional_params(
                 self._account_for_symbol(symbol),
                 "fetch_open_orders",
                 symbol,
-                params=params or {},
+                params=safe_params,
             )
         orders = []
-        for exchange in self._accounts.values():
-            orders.extend(
-                self._call_optional_params(
-                    exchange, "fetch_open_orders", None, params=params or {}
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(self._accounts) or 1
+        ) as executor:
+            futures = [
+                executor.submit(
+                    self._call_optional_params,
+                    exchange,
+                    "fetch_open_orders",
+                    None,
+                    params=safe_params,
                 )
-            )
+                for exchange in self._accounts.values()
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                orders.extend(future.result())
         return self._dedupe_payloads(orders)
 
     def fetch_order(self, order_id, symbol=None, params=None):
@@ -416,23 +441,47 @@ class MultiAccountExchange:
         )
 
     def set_leverage(self, leverage, symbol=None, params=None):
+        safe_params = params or {}
         if symbol:
             return self._account_for_symbol(symbol).set_leverage(
-                leverage, symbol, params=params or {}
+                leverage, symbol, params=safe_params
             )
         result = None
-        for exchange in self._accounts.values():
-            result = exchange.set_leverage(leverage, symbol, params=params or {})
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(self._accounts) or 1
+        ) as executor:
+            futures = [
+                executor.submit(
+                    exchange.set_leverage, leverage, symbol, params=safe_params
+                )
+                for exchange in self._accounts.values()
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                res = future.result()
+                if res is not None:
+                    result = res
         return result
 
     def set_position_mode(self, hedged, symbol=None, params=None):
+        safe_params = params or {}
         if symbol:
             return self._account_for_symbol(symbol).set_position_mode(
-                hedged, symbol, params=params or {}
+                hedged, symbol, params=safe_params
             )
         result = None
-        for exchange in self._accounts.values():
-            result = exchange.set_position_mode(hedged, symbol, params=params or {})
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(self._accounts) or 1
+        ) as executor:
+            futures = [
+                executor.submit(
+                    exchange.set_position_mode, hedged, symbol, params=safe_params
+                )
+                for exchange in self._accounts.values()
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                res = future.result()
+                if res is not None:
+                    result = res
         return result
 
     def fetch_balance_for_symbol(self, symbol: str, params=None):
