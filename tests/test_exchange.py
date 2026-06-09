@@ -90,9 +90,9 @@ if __name__ == "__main__":
 class TestFetchOrderBookSafe(unittest.TestCase):
     """
     Tests the logic of the `fetch_order_book_safe` inner function located inside
-    ExchangeMixin._prefetch_market_data_snapshots(). Since it's an inner function,
-    we test it indirectly via the outer function's execution and observing the side effects
-    (i.e., cached calls and log events) as recommended by testing guidelines.
+    ExchangeMixin._prefetch_market_data_snapshots(). We test it indirectly via the
+    outer function's execution, and directly by capturing the function reference
+    during a ThreadPoolExecutor patch.
     """
 
     def setUp(self):
@@ -155,3 +155,52 @@ class TestFetchOrderBookSafe(unittest.TestCase):
         self.assertEqual(kwargs.get("symbol"), "ETH-USDT")
         self.assertIsInstance(kwargs.get("exception"), ValueError)
         self.assertEqual(str(kwargs.get("exception")), "Simulated fetch error")
+
+    def test_fetch_order_book_safe_direct_capture(self):
+        from unittest import mock
+        from tests.config_overrides import override_frozen_config_fields
+        from htxbot import config
+
+        inner_func = None
+
+        class MockExecutor:
+            def __init__(self, max_workers):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+            def map(self, func, iterables):
+                nonlocal inner_func
+                inner_func = func
+                return []
+
+        # Ensure max_workers > 1 so ThreadPoolExecutor is used
+        self.exchange._market_data_max_workers = lambda: 2
+
+        with mock.patch("concurrent.futures.ThreadPoolExecutor", MockExecutor):
+            with override_frozen_config_fields(
+                config.STRATEGY,
+                entry_spread_filter_enabled=True,
+                entry_spread_filter_max_bps=10.0,
+            ):
+                self.exchange._prefetch_market_data_snapshots()
+
+        self.assertIsNotNone(inner_func, "Inner function was not captured")
+
+        # Test success path
+        self.exchange._cached_calls = []
+        result = inner_func("BTC-USDT")
+        self.assertEqual(result, ("BTC-USDT", None))
+        self.assertIn(("BTC-USDT", 5), self.exchange._cached_calls)
+
+        # Test error path
+        self.exchange._cached_calls = []
+        result = inner_func("ETH-USDT")
+        self.assertEqual(result[0], "ETH-USDT")
+        self.assertIsInstance(result[1], ValueError)
+        self.assertEqual(str(result[1]), "Simulated fetch error")
+        self.assertIn(("ETH-USDT", 5), self.exchange._cached_calls)
