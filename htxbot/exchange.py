@@ -442,74 +442,33 @@ class ExchangeMixin:
         if not isinstance(payload, dict):
             return False
 
-        # Fast path: check exact common keys first without allocating/looping everything
-        status = payload.get("status")
-        if status is not None:
-            if str(status).strip().lower() in {"error", "err", "failed", "fail"}:
-                return True
+        for k, v in payload.items():
+            if not isinstance(k, str):
+                k = str(k)
 
-        if payload.get("success") is False:
-            return True
+            k_lower = k.lower()
+            if "-" in k_lower:
+                k_lower = k_lower.replace("-", "_")
 
-        for k in (
-            "err_code",
-            "err-code",
-            "err_msg",
-            "err-msg",
-            "error_code",
-            "error-code",
-            "error_msg",
-            "error-msg",
-        ):
-            if k in payload:
-                return True
-
-        error = payload.get("error")
-        if error is not None:
-            if isinstance(error, dict):
-                if error:
+            if k_lower == "status":
+                if v and isinstance(v, str):
+                    status = v.strip().lower()
+                    if status in {"error", "err", "failed", "fail"}:
+                        return True
+            elif k_lower == "success":
+                if v is False:
                     return True
-            elif isinstance(error, str):
-                if error.strip():
-                    return True
-            elif error:
+            elif k_lower in {"err_code", "err_msg", "error_code", "error_msg"}:
                 return True
-
-        # Fallback for keys with weird casing or hyphens (e.g., "Status", "err-Code")
-        has_error_key = False
-        error_val = None
-
-        for k in payload:
-            if isinstance(k, str) and k.islower() and "-" not in k:
-                continue  # Already checked exact lowercase matches
-
-            k_str = str(k) if not isinstance(k, str) else k
-            k_normalized = k_str.lower().replace("-", "_")
-
-            if k_normalized == "status":
-                status_val = str(payload[k]).strip().lower()
-                if status_val in {"error", "err", "failed", "fail"}:
+            elif k_lower == "error":
+                if isinstance(v, dict):
+                    if v:
+                        return True
+                elif isinstance(v, str):
+                    if v.strip():
+                        return True
+                elif v:
                     return True
-            elif k_normalized == "success":
-                if payload[k] is False:
-                    return True
-            elif k_normalized in {
-                "err_code",
-                "err_msg",
-                "error_code",
-                "error_msg",
-            }:
-                return True
-            elif k_normalized == "error":
-                has_error_key = True
-                error_val = payload[k]
-
-        if has_error_key:
-            if isinstance(error_val, dict):
-                return bool(error_val)
-            if isinstance(error_val, str):
-                return bool(error_val.strip())
-            return bool(error_val)
 
         return False
 
@@ -2080,6 +2039,131 @@ class ExchangeMixin:
                 params=params,
             )
 
+    def _fetch_positions_for_symbol(self, symbol: str) -> Optional[List[dict]]:
+        bulk_positions = self._bulk_positions_by_symbol()
+        if bulk_positions is not None:
+            return bulk_positions.get(symbol, [])
+        if getattr(self, "_private_api_network_failed", False):
+            return None
+        try:
+            positions = self._private_fetch_with_retry(
+                symbol,
+                "position_fetch_failed",
+                f"position for {symbol}",
+                lambda: self.exchange.fetch_positions(
+                    [symbol], self._position_params()
+                ),
+            )
+            return self._expect_ccxt_list_response(
+                positions,
+                "fetch_positions",
+                symbol=symbol,
+                item_types=(dict,),
+            )
+        except Exception as exc:
+            network_failed = self._is_transient_exchange_error(exc)
+            if network_failed:
+                self._private_api_network_failed = True
+            level = "WARNING" if network_failed else "ERROR"
+            self._log_event(
+                level,
+                f"Could not fetch position for {symbol}: {exc}",
+                event="state_exchange_mismatch",
+                symbol=symbol,
+                reason="position_fetch_failed",
+                exception=exc,
+            )
+            return None
+
+    def _extract_position_field(
+        self, position: dict, info: dict, keys: Tuple[str, ...]
+    ) -> Optional[float]:
+        for source in (position, info):
+            if not isinstance(source, dict):
+                continue
+            for key in keys:
+                if key in source and source.get(key) is not None:
+                    return self._safe_float(source.get(key), 0.0)
+        return None
+
+    def _extract_available_and_frozen(
+        self, position: dict, contracts: float
+    ) -> Tuple[float, float]:
+        info = position.get("info") if isinstance(position.get("info"), dict) else {}
+
+        available_keys = (
+            "available",
+            "availablePosition",
+            "available_position",
+            "avail_position",
+            "canCloseVolume",
+            "close_available",
+            "volume_available",
+            "available_volume",
+        )
+        available = self._extract_position_field(position, info, available_keys)
+        if available is None:
+            available = contracts
+
+        frozen_keys = (
+            "frozen",
+            "frozenPosition",
+            "frozen_position",
+            "frozen_volume",
+        )
+        frozen = self._extract_position_field(position, info, frozen_keys)
+        if frozen is None:
+            frozen = max(0.0, contracts - available)
+
+        return max(0.0, min(contracts, available)), max(0.0, frozen)
+
+    def _update_snapshot_from_position(
+        self, snapshot: dict, position: dict, symbol: str
+    ) -> None:
+        contracts = self._safe_float(position.get("contracts"), 0.0)
+        if contracts <= 0:
+            return
+
+        position_margin_mode = self._extract_margin_mode(position)
+        if position_margin_mode and position_margin_mode != config.RISK.margin_mode:
+            self._log_event(
+                "ERROR",
+                f"Skipping non-cross position returned for {symbol}",
+                event="state_exchange_mismatch",
+                symbol=symbol,
+                reason="position_margin_mode_mismatch",
+            )
+            return
+
+        side = (position.get("side") or "").lower()
+        if side not in {"long", "short"}:
+            return
+
+        old_size = snapshot[f"{side}_size"]
+        old_entry_notional = self._contracts_to_notional(
+            symbol, old_size, snapshot[f"{side}_entry_price"]
+        )
+        add_entry = self._safe_float(position.get("entryPrice"), 0.0)
+        add_notional = self._contracts_to_notional(symbol, contracts, add_entry)
+        available, frozen = self._extract_available_and_frozen(position, contracts)
+        snapshot[f"{side}_size"] += contracts
+        snapshot[f"{side}_available"] += available
+        snapshot[f"{side}_frozen"] += frozen
+        snapshot[f"{side}_entry_price"] = self._average_price_from_notional(
+            symbol,
+            snapshot[f"{side}_size"],
+            old_entry_notional + add_notional,
+        )
+        snapshot[f"{side}_unrealized_pnl"] += self._safe_float(
+            position.get("unrealizedPnl"), 0.0
+        )
+
+        if side == config.POSITION_SIDE:
+            snapshot["entry_price"] = snapshot[f"{side}_entry_price"]
+            snapshot["unrealized_pnl"] = snapshot[f"{side}_unrealized_pnl"]
+            snapshot["margin_mode"] = position.get("marginMode") or ""
+            snapshot["leverage"] = self._safe_float(position.get("leverage"), 0.0)
+
     def _fetch_position_snapshot(self, symbol: str) -> dict:
         snapshot = {
             "ok": True,
@@ -2098,134 +2182,14 @@ class ExchangeMixin:
             "margin_mode": "",
             "leverage": 0.0,
         }
-        bulk_positions = self._bulk_positions_by_symbol()
-        if bulk_positions is not None:
-            positions = bulk_positions.get(symbol, [])
-        elif getattr(self, "_private_api_network_failed", False):
+
+        positions = self._fetch_positions_for_symbol(symbol)
+        if positions is None:
             snapshot["ok"] = False
             return snapshot
-        else:
-            try:
-                positions = self._private_fetch_with_retry(
-                    symbol,
-                    "position_fetch_failed",
-                    f"position for {symbol}",
-                    lambda: self.exchange.fetch_positions(
-                        [symbol], self._position_params()
-                    ),
-                )
-                positions = self._expect_ccxt_list_response(
-                    positions,
-                    "fetch_positions",
-                    symbol=symbol,
-                    item_types=(dict,),
-                )
-            except Exception as exc:
-                network_failed = self._is_transient_exchange_error(exc)
-                if network_failed:
-                    self._private_api_network_failed = True
-                level = "WARNING" if network_failed else "ERROR"
-                self._log_event(
-                    level,
-                    f"Could not fetch position for {symbol}: {exc}",
-                    event="state_exchange_mismatch",
-                    symbol=symbol,
-                    reason="position_fetch_failed",
-                    exception=exc,
-                )
-                snapshot["ok"] = False
-                return snapshot
 
-        def available_and_frozen(
-            position: dict, contracts: float
-        ) -> Tuple[float, float]:
-            info = (
-                position.get("info") if isinstance(position.get("info"), dict) else {}
-            )
-            available = None
-            for source in (position, info):
-                if not isinstance(source, dict):
-                    continue
-                for key in (
-                    "available",
-                    "availablePosition",
-                    "available_position",
-                    "avail_position",
-                    "canCloseVolume",
-                    "close_available",
-                    "volume_available",
-                    "available_volume",
-                ):
-                    if key in source and source.get(key) is not None:
-                        available = self._safe_float(source.get(key), 0.0)
-                        break
-                if available is not None:
-                    break
-            if available is None:
-                available = contracts
-
-            frozen = None
-            for source in (position, info):
-                if not isinstance(source, dict):
-                    continue
-                for key in (
-                    "frozen",
-                    "frozenPosition",
-                    "frozen_position",
-                    "frozen_volume",
-                ):
-                    if key in source and source.get(key) is not None:
-                        frozen = self._safe_float(source.get(key), 0.0)
-                        break
-                if frozen is not None:
-                    break
-            if frozen is None:
-                frozen = max(0.0, contracts - available)
-
-            return max(0.0, min(contracts, available)), max(0.0, frozen)
-
-        for position in positions or []:
-            contracts = self._safe_float(position.get("contracts"), 0.0)
-            if contracts <= 0:
-                continue
-            position_margin_mode = self._extract_margin_mode(position)
-            if position_margin_mode and position_margin_mode != config.RISK.margin_mode:
-                self._log_event(
-                    "ERROR",
-                    f"Skipping non-cross position returned for {symbol}",
-                    event="state_exchange_mismatch",
-                    symbol=symbol,
-                    reason="position_margin_mode_mismatch",
-                )
-                continue
-            side = (position.get("side") or "").lower()
-            if side not in {"long", "short"}:
-                continue
-
-            old_size = snapshot[f"{side}_size"]
-            old_entry_notional = self._contracts_to_notional(
-                symbol, old_size, snapshot[f"{side}_entry_price"]
-            )
-            add_entry = self._safe_float(position.get("entryPrice"), 0.0)
-            add_notional = self._contracts_to_notional(symbol, contracts, add_entry)
-            available, frozen = available_and_frozen(position, contracts)
-            snapshot[f"{side}_size"] += contracts
-            snapshot[f"{side}_available"] += available
-            snapshot[f"{side}_frozen"] += frozen
-            snapshot[f"{side}_entry_price"] = self._average_price_from_notional(
-                symbol,
-                snapshot[f"{side}_size"],
-                old_entry_notional + add_notional,
-            )
-            snapshot[f"{side}_unrealized_pnl"] += self._safe_float(
-                position.get("unrealizedPnl"), 0.0
-            )
-
-            if side == config.POSITION_SIDE:
-                snapshot["entry_price"] = snapshot[f"{side}_entry_price"]
-                snapshot["unrealized_pnl"] = snapshot[f"{side}_unrealized_pnl"]
-                snapshot["margin_mode"] = position.get("marginMode") or ""
-                snapshot["leverage"] = self._safe_float(position.get("leverage"), 0.0)
+        for position in positions:
+            self._update_snapshot_from_position(snapshot, position, symbol)
 
         return snapshot
 
