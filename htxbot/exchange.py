@@ -1943,8 +1943,15 @@ class ExchangeMixin:
             tiers = self.exchange.fetch_leverage_tiers([symbol])
             if symbol in tiers and tiers[symbol]:
                 return max(tier.get("maxLeverage", 0.0) for tier in tiers[symbol])
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log_event(
+                "WARNING",
+                f"Could not fetch max leverage for {symbol}: {exc}",
+                event="futures_setup",
+                symbol=symbol,
+                reason="max_leverage_fetch_failed",
+                exception=exc,
+            )
         return 0.0
 
     def _set_leverage_safe(
