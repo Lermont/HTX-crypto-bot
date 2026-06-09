@@ -489,7 +489,7 @@ class MonitoringMixin:
 
     def _record_signal_analytics(
         self,
-        decision: str,
+        decision,
         symbol: str = "",
         signal: Optional[dict] = None,
         block_reason: str = "",
@@ -505,11 +505,31 @@ class MonitoringMixin:
         cycle_id: str = "",
         context: Optional[dict] = None,
     ):
-        signal = signal or {}
-        symbol = symbol or str(signal.get("symbol") or "")
+        if hasattr(decision, 'decision'):
+            event = decision
+        else:
+            event = SignalAnalyticsEvent(
+                decision=decision,
+                symbol=symbol,
+                signal=signal,
+                block_reason=block_reason,
+                external_context=external_context,
+                planned_budget=planned_budget,
+                planned_orders=planned_orders,
+                planned_notional=planned_notional,
+                placed_orders=placed_orders,
+                filled_notional=filled_notional,
+                realized_pnl_quote=realized_pnl_quote,
+                operation_id=operation_id,
+                order_id=order_id,
+                cycle_id=cycle_id,
+                context=context
+            )
+        signal = event.signal or {}
+        symbol = event.symbol or str(signal.get("symbol") or "")
         external_context = (
-            external_context
-            if isinstance(external_context, dict)
+            event.external_context
+            if isinstance(event.external_context, dict)
             else self._external_context_from_cache(symbol)
         )
         signal_id = self._signal_id(symbol, signal)
@@ -614,7 +634,7 @@ class MonitoringMixin:
             "event.order_id": event.order_id,
             "event.cycle_id": event.cycle_id,
             "signal": signal,
-            "external_event.context": external_event.context,
+            "external_context": external_context,
             "macro_event.context": (getattr(self, "signal_cache", {}) or {}).get("macro", {}),
             "config": self._selected_config_snapshot(),
             "metrics": {

@@ -873,7 +873,7 @@ class UnifiedBotTests(unittest.TestCase):
                     symbol=SYMBOL,
                     signal=self.entry_signal(),
                     context={"note": "monitoring failure must not stop trading"},
-                )))
+                ))
 
             failures = getattr(bot, "_monitoring_write_failures", set())
             self.assertTrue(any("signal_analytics" in item[0] for item in failures))
@@ -1499,7 +1499,7 @@ class UnifiedBotTests(unittest.TestCase):
                 symbol=SYMBOL,
                 signal=signal,
                 context={"token": "hidden", "note": "kept"},
-            )))
+            ))
 
             with bot.signal_analytics_csv_path.open(
                 newline="", encoding="utf-8"
@@ -1537,8 +1537,8 @@ class UnifiedBotTests(unittest.TestCase):
                 if line.strip()
             ]
             self.assertEqual(payloads[-1]["signal"]["api_secret"], "<redacted>")
-            self.assertEqual(payloads[-1]["context"]["token"], "<redacted>")
-            self.assertEqual(payloads[-1]["context"]["note"], "kept")
+            self.assertEqual(payloads[-1]["event.context"]["token"], "<redacted>")
+            self.assertEqual(payloads[-1]["event.context"]["note"], "kept")
 
     def test_diagnostics_warning_error_and_fault_rows_are_structured(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -4780,7 +4780,7 @@ class UnifiedBotTests(unittest.TestCase):
 
             bot._record_signal_analytics(SignalAnalyticsEvent(
                 "entry_gate_checked", symbol=SYMBOL, signal=signal
-            )))
+            ))
             with (Path(raw_tmp) / "signal_analytics.csv").open(
                 newline="", encoding="utf-8"
             ) as handle:
