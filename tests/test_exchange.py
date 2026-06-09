@@ -203,3 +203,28 @@ class TestFetchOrderBookSafe(unittest.TestCase):
         self.assertIsInstance(exc, ValueError)
         self.assertEqual(str(exc), "Simulated fetch error")
         self.assertIn(("ETH-USDT", 5), self.exchange._cached_calls)
+
+    def test_fetch_order_book_safe_direct_single_worker(self):
+        from tests.config_overrides import override_frozen_config_fields
+        from htxbot import config
+
+        # Intercept the exact execution of fetch_order_book_safe inside the comprehension
+        original_symbols = self.exchange.symbols
+        try:
+            # Change to single symbol to hit `len(symbols) <= 1` and `max_workers <= 1` path naturally
+            self.exchange.symbols = ["BTC-USDT"]
+
+            # We force max_workers to 1
+            with override_frozen_config_fields(
+                config.RUNTIME, market_data_max_workers=1
+            ), override_frozen_config_fields(
+                config.STRATEGY,
+                entry_spread_filter_enabled=True,
+                entry_spread_filter_max_bps=10.0,
+            ):
+                self.exchange._prefetch_market_data_snapshots()
+
+            # The loop runs successfully over 1 item directly
+            self.assertIn(("BTC-USDT", 5), self.exchange._cached_calls)
+        finally:
+            self.exchange.symbols = original_symbols
