@@ -1,3 +1,4 @@
+from .models import SignalAnalyticsEvent
 # -*- coding: utf-8 -*-
 
 import math
@@ -2465,6 +2466,408 @@ class ExitStrategy:
 
         return ladder_config
 
+    def _populate_controlled_loss_sell_context(self, plan_context: dict, sell_context: dict) -> None:
+        for key in (
+            "controlled_loss_macro_intensity",
+            "controlled_loss_signal_intensity",
+            "controlled_loss_overlay_intensity",
+            "controlled_loss_speed_multiplier",
+            "controlled_loss_macro_speed_multiplier",
+            "controlled_loss_volatility_intensity",
+            "controlled_loss_volatility_speed_multiplier",
+            "controlled_loss_volatility_exponential_curve",
+            "controlled_loss_volatility_ratio",
+            "controlled_loss_local_volatility",
+            "controlled_loss_atr_rate",
+            "controlled_loss_daily_volatility_multiplier",
+            "controlled_loss_volatility_reference",
+            "controlled_loss_volatility_trigger_multiplier",
+            "controlled_loss_linear_progress",
+            "controlled_loss_effective_progress",
+            "controlled_loss_directional_gap",
+            "controlled_loss_elapsed_minutes",
+            "controlled_loss_ramp_minutes",
+        ):
+            sell_context[key] = self._safe_float(
+                plan_context.get(key), self._safe_float(sell_context.get(key), 0.0)
+            )
+        sell_context["controlled_loss_macro_regime"] = str(
+            plan_context.get("controlled_loss_macro_regime")
+            or sell_context.get("controlled_loss_macro_regime")
+            or "neutral"
+        )
+        sell_context["controlled_loss_macro_reason"] = str(
+            plan_context.get("controlled_loss_macro_reason")
+            or sell_context.get("controlled_loss_macro_reason")
+            or "neutral"
+        )
+        sell_context["controlled_loss_volatility_reason"] = str(
+            plan_context.get("controlled_loss_volatility_reason")
+            or sell_context.get("controlled_loss_volatility_reason")
+            or "neutral"
+        )
+        sell_context["controlled_loss_ramp_profile"] = str(
+            plan_context.get("controlled_loss_ramp_profile")
+            or sell_context.get("controlled_loss_ramp_profile")
+            or "linear"
+        )
+
+    def _enrich_controlled_loss_order_ref(self, ref: dict, sell_context: dict, markup: float) -> None:
+        ref["loss_move_fraction"] = markup
+        ref["loss_budget_at_placement"] = self._safe_float(
+            sell_context.get("controlled_loss_budget"), 0.0
+        )
+        ref["reference_price_at_placement"] = self._safe_float(
+            sell_context.get("controlled_reference_price"), 0.0
+        )
+        ref["loss_macro_intensity"] = self._safe_float(
+            sell_context.get("controlled_loss_macro_intensity"), 0.0
+        )
+        ref["loss_speed_multiplier"] = self._safe_float(
+            sell_context.get("controlled_loss_speed_multiplier"), 1.0
+        )
+        ref["loss_macro_speed_multiplier"] = self._safe_float(
+            sell_context.get("controlled_loss_macro_speed_multiplier"), 1.0
+        )
+        ref["loss_volatility_intensity"] = self._safe_float(
+            sell_context.get("controlled_loss_volatility_intensity"), 0.0
+        )
+        ref["loss_volatility_speed_multiplier"] = self._safe_float(
+            sell_context.get("controlled_loss_volatility_speed_multiplier"), 1.0
+        )
+        ref["loss_volatility_ratio"] = self._safe_float(
+            sell_context.get("controlled_loss_volatility_ratio"), 0.0
+        )
+        ref["loss_atr_rate"] = self._safe_float(
+            sell_context.get("controlled_loss_atr_rate"), 0.0
+        )
+        ref["loss_ramp_profile"] = str(
+            sell_context.get("controlled_loss_ramp_profile") or "linear"
+        )
+        ref["loss_directional_macro_gap"] = self._safe_float(
+            sell_context.get("controlled_loss_directional_gap"), 0.0
+        )
+        ref["loss_macro_regime"] = str(
+            sell_context.get("controlled_loss_macro_regime") or "neutral"
+        )
+
+    def _place_sell_ladder_single_order(
+        self,
+        symbol: str,
+        price: float,
+        contracts: float,
+        exit_side: str,
+        exit_label: str,
+        mode: str,
+        rebuild: bool,
+        allocated: float,
+    ) -> tuple[bool, str, float]:
+        try:
+            order = self._create_one_way_order(
+                symbol=symbol,
+                order_type="limit",
+                side=exit_side,
+                amount=contracts,
+                price=price,
+                reduce_only=True,
+            )
+            return True, str(order.get("id")), price
+        except Exception as exc:
+            band_limit = self._price_band_limit_from_error(exc, side=exit_side)
+            if band_limit > 0:
+                adjusted_price = self._price_inside_htx_band(
+                    symbol, price, side=exit_side, limit=band_limit
+                )
+                try:
+                    order = self._create_one_way_order(
+                        symbol=symbol,
+                        order_type="limit",
+                        side=exit_side,
+                        amount=contracts,
+                        price=adjusted_price,
+                        reduce_only=True,
+                    )
+                    self._log_event(
+                        "WARNING",
+                        f"{exit_label} reduce-only price adjusted for HTX band {symbol}: {adjusted_price}",
+                        event="exit_ladder_rebuilt" if rebuild else "exit_ladder_placed",
+                        symbol=symbol,
+                        side=exit_side,
+                        price=adjusted_price,
+                        amount=contracts,
+                        reason=f"htx_price_band_adjusted;limit={band_limit:.12f};mode={mode}",
+                    )
+                    return True, str(order.get("id")), adjusted_price
+                except Exception as retry_exc:
+                    if self._is_reduce_only_amount_exceeds_closeable_error(retry_exc):
+                        if allocated <= 0:
+                            self._mark_exit_ladder_waiting_for_closeable(
+                                symbol, mode, "closeable_amount_reserved_by_existing_exit_orders", amount=contracts, exception=retry_exc
+                            )
+                            return False, "wait", adjusted_price
+                        self._log_event(
+                            "WARNING",
+                            f"{exit_label} reduce-only ladder stopped for {symbol}: remaining closeable amount is unavailable",
+                            event="reduce_only_violation_prevented",
+                            symbol=symbol,
+                            side=exit_side,
+                            price=adjusted_price,
+                            amount=contracts,
+                            reason="partial_exit_ladder_closeable_unavailable",
+                            exception=retry_exc,
+                        )
+                        return False, "break", adjusted_price
+                    self._log_event(
+                        "ERROR",
+                        f"{exit_label} reduce-only order failed for {symbol} after HTX band adjustment: {retry_exc}",
+                        event="reduce_only_violation_prevented",
+                        symbol=symbol,
+                        side=exit_side,
+                        price=adjusted_price,
+                        amount=contracts,
+                        reason="price_band_retry_rejected",
+                        exception=retry_exc,
+                    )
+                    return False, "continue", adjusted_price
+            else:
+                if self._is_reduce_only_amount_exceeds_closeable_error(exc):
+                    if allocated <= 0:
+                        self._mark_exit_ladder_waiting_for_closeable(
+                            symbol, mode, "closeable_amount_reserved_by_existing_exit_orders", amount=contracts, exception=exc
+                        )
+                        return False, "wait", price
+                    self._log_event(
+                        "WARNING",
+                        f"{exit_label} reduce-only ladder stopped for {symbol}: remaining closeable amount is unavailable",
+                        event="reduce_only_violation_prevented",
+                        symbol=symbol,
+                        side=exit_side,
+                        price=price,
+                        amount=contracts,
+                        reason="partial_exit_ladder_closeable_unavailable",
+                        exception=exc,
+                    )
+                    return False, "break", price
+                self._log_event(
+                    "ERROR",
+                    f"{exit_label} reduce-only order failed for {symbol}: {exc}",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=exit_side,
+                    price=price,
+                    amount=contracts,
+                    reason="exit_order_rejected",
+                    exception=exc,
+                )
+                return False, "continue", price
+
+    def _place_sell_ladder_allocations(
+        self,
+        symbol: str,
+        avg_entry_price: float,
+        allocations: list,
+        sell_context: dict,
+        plan_context: dict,
+        state: "TradeState",
+        mode: str,
+        exit_side: str,
+        exit_label: str,
+        rebuild: bool,
+        ref_exit_scope: str,
+        operation_id: str,
+        signal: dict,
+    ) -> tuple[float, float, bool]:
+        allocated = 0.0
+        exit_planned_orders = 0
+        exit_planned_notional = 0.0
+        import time
+        created_at = time.time()
+
+        for index, step, contracts in allocations:
+            markup = self._safe_float(step.get("markup"), 0.0)
+
+            adaptive_markup = markup * self._safe_float(
+                sell_context.get("markup_multiplier"), 1.0
+            )
+            if mode == "controlled_loss_exit":
+                price = self._controlled_loss_exit_price(
+                    symbol, avg_entry_price, markup, context=sell_context
+                )
+            else:
+                price = self._sell_price_floor(
+                    symbol, avg_entry_price, adaptive_markup, context=sell_context
+                )
+
+            success, action, price = self._place_sell_ladder_single_order(
+                symbol, price, contracts, exit_side, exit_label, mode, rebuild, allocated
+            )
+            if not success:
+                if action == "wait":
+                    return allocated, 0.0, True
+                elif action == "break":
+                    break
+                else:
+                    continue
+            order_id = action
+
+            allocated += contracts
+            ref = {
+                "id": order_id,
+                "side": exit_side,
+                "price": price,
+                "amount": contracts,
+                "created_at": created_at,
+                "stage": index,
+                "mode": mode,
+                "markup": markup,
+                "ladder_name": plan_context.get("ladder_name", mode),
+                "exit_scope": ref_exit_scope,
+                "external_spread_bps": self._safe_float(
+                    plan_context.get("external_spread_bps"), 0.0
+                ),
+                "operation_id": operation_id,
+                "cycle_id": state.cycle_id,
+            }
+            if mode == "controlled_loss_exit":
+                self._enrich_controlled_loss_order_ref(ref, sell_context, markup)
+            state.sell_ladder_orders.append(ref)
+            event = "exit_ladder_rebuilt" if rebuild else "exit_ladder_placed"
+            action = "rebuilt" if rebuild else "placed"
+            stage_notional = self._contracts_to_notional(symbol, contracts, price)
+            exit_planned_orders += 1
+            exit_planned_notional += stage_notional
+            self._record_signal_analytics(SignalAnalyticsEvent(
+                event,
+                symbol=symbol,
+                signal=signal or {},
+                planned_orders=exit_planned_orders,
+                planned_notional=exit_planned_notional,
+                placed_orders=exit_planned_orders,
+                operation_id=operation_id,
+                order_id=order_id,
+                cycle_id=state.cycle_id,
+                context={
+                    "stage": index,
+                    "mode": mode,
+                    "price": price,
+                    "contracts": contracts,
+                    "stage_notional": stage_notional,
+                    "markup": markup,
+                    "adaptive_markup": adaptive_markup,
+                    "exit_scope": ref_exit_scope,
+                    "plan_context": plan_context,
+                    "sell_context": sell_context,
+                },
+            ))
+            self._log_event(
+                "INFO",
+                f"{exit_label} exit ladder {action} for {symbol}: stage={index} contracts={contracts} price={price}",
+                event=event,
+                symbol=symbol,
+                side=exit_side,
+                order_id=order_id,
+                price=price,
+                amount=contracts,
+                reason=(
+                    f"reduce_only_close;markup_multiplier={sell_context.get('markup_multiplier', 1.0):.3f};"
+                    f"base_profit_floor={sell_context.get('base_profit_floor', 0.0):.6f};"
+                    f"profit_floor={sell_context.get('profit_floor', 0.0):.6f};"
+                    f"profit_floor_mult={sell_context.get('profit_floor_multiplier', 1.0):.3f};"
+                    f"profit_floor_reason={sell_context.get('profit_floor_reason', 'neutral')};"
+                    f"fee_floor={sell_context.get('fee_floor', 0.0):.6f};"
+                    f"spread={sell_context.get('spread_rate', 0.0):.6f};"
+                    f"spread_floor={sell_context.get('spread_floor', 0.0):.6f};"
+                    f"vol_floor={sell_context.get('volatility_floor', 0.0):.6f};"
+                    f"funding={sell_context.get('funding_rate', 0.0):.6f};"
+                    f"mode={mode};"
+                    f"exit_scope={ref_exit_scope};"
+                    f"ladder={plan_context.get('ladder_name', mode)};"
+                    f"position_ratio={plan_context.get('position_ratio', 1.0):.4f};"
+                    f"position_age_hours={plan_context.get('position_age_hours', 0.0):.2f};"
+                    f"runner_contracts={state.exit_runner_contracts:.12f};"
+                    f"controlled_loss_move={plan_context.get('controlled_loss_move_fraction', 0.0):.4f};"
+                    f"controlled_loss_macro_intensity={sell_context.get('controlled_loss_macro_intensity', 0.0):.3f};"
+                    f"controlled_loss_speed={sell_context.get('controlled_loss_speed_multiplier', 1.0):.3f};"
+                    f"controlled_loss_vol_intensity={sell_context.get('controlled_loss_volatility_intensity', 0.0):.3f};"
+                    f"controlled_loss_vol_ratio={sell_context.get('controlled_loss_volatility_ratio', 0.0):.3f};"
+                    f"controlled_loss_atr_rate={sell_context.get('controlled_loss_atr_rate', 0.0):.6f};"
+                    f"controlled_loss_ramp_profile={sell_context.get('controlled_loss_ramp_profile', 'linear')};"
+                    f"controlled_loss_gap={sell_context.get('controlled_loss_directional_gap', 0.0):.6f};"
+                    f"controlled_loss_macro_regime={sell_context.get('controlled_loss_macro_regime', 'neutral')};"
+                    f"external_spread_bps={sell_context.get('external_spread_bps', 0.0):.4f};"
+                    f"external_reason={sell_context.get('external_reason', 'unavailable')};"
+                    f"{sell_context.get('funding_reason', 'neutral')}"
+                ),
+            )
+
+        return allocated, sum(self._safe_float(c, 0.0) for _, _, c in allocations), False
+
+    def _evaluate_exit_ladder_preflight(
+        self,
+        symbol: str,
+        total_contracts: float,
+        closeable_contracts: float,
+        rebuild: bool,
+        signature_override: str,
+        mode: str,
+        exit_label: str,
+        exit_side: str,
+        state: "TradeState",
+    ) -> tuple[bool, float]:
+        preflight = self._exit_ladder_preflight(
+            symbol,
+            total_contracts,
+            closeable_contracts,
+            rebuild=rebuild,
+            signature_override=signature_override,
+        )
+        if not preflight.ok:
+            if preflight.reason == "existing_exit_ladder_not_canceled":
+                self._log_event(
+                    "WARNING",
+                    f"{exit_label} exit ladder blocked for {symbol}: existing tracked exits must be canceled first",
+                    event="reduce_only_violation_prevented",
+                    symbol=symbol,
+                    side=exit_side,
+                    amount=preflight.existing_tracked_contracts,
+                    position_size=state.position_size,
+                    reason=preflight.reason,
+                )
+                return False, 0.0
+            self._mark_exit_ladder_waiting_for_closeable(
+                symbol,
+                mode,
+                preflight.reason,
+            )
+            return False, 0.0
+        return True, preflight.planned_contracts
+
+
+    def _validate_sell_ladder_basic(self, symbol: str, total_contracts: float, avg_entry_price: float, exit_label: str, exit_side: str) -> bool:
+        import config
+        if total_contracts <= 0 or avg_entry_price <= 0:
+            self._log_event(
+                "WARNING",
+                f"{exit_label} exit ladder blocked for {symbol}: no {config.POSITION_SIDE} position",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=exit_side,
+                reason=f"{exit_side}_without_{config.POSITION_SIDE}_position",
+            )
+            return False
+
+        if not config.RUNTIME.reduce_only_enabled:
+            self._log_event(
+                "ERROR",
+                f"{exit_label} exit ladder blocked for {symbol}: reduce-only disabled",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=exit_side,
+                reason="reduce_only_disabled",
+            )
+            return False
+        return True
+
     def _place_sell_ladder(
         self,
         ladder_config: Optional[ExitLadderConfig | SellLadderParams | str] = None,
@@ -2486,55 +2889,22 @@ class ExitStrategy:
         state = self._get_state(symbol)
         exit_side = config.EXIT_SIDE
         exit_label = "Buy" if exit_side == "buy" else "Sell"
-        if total_contracts <= 0 or avg_entry_price <= 0:
-            self._log_event(
-                "WARNING",
-                f"{exit_label} exit ladder blocked for {symbol}: no {config.POSITION_SIDE} position",
-                event="reduce_only_violation_prevented",
-                symbol=symbol,
-                side=exit_side,
-                reason=f"{exit_side}_without_{config.POSITION_SIDE}_position",
-            )
+        if not self._validate_sell_ladder_basic(symbol, total_contracts, avg_entry_price, exit_label, exit_side):
             return
 
-        if not config.RUNTIME.reduce_only_enabled:
-            self._log_event(
-                "ERROR",
-                f"{exit_label} exit ladder blocked for {symbol}: reduce-only disabled",
-                event="reduce_only_violation_prevented",
-                symbol=symbol,
-                side=exit_side,
-                reason="reduce_only_disabled",
-            )
-            return
-
-        preflight = self._exit_ladder_preflight(
+        preflight_ok, ladder_contracts = self._evaluate_exit_ladder_preflight(
             symbol,
             total_contracts,
             closeable_contracts,
-            rebuild=rebuild,
-            signature_override=signature_override,
+            rebuild,
+            signature_override,
+            mode,
+            exit_label,
+            exit_side,
+            state,
         )
-        if not preflight.ok:
-            if preflight.reason == "existing_exit_ladder_not_canceled":
-                self._log_event(
-                    "WARNING",
-                    f"{exit_label} exit ladder blocked for {symbol}: existing tracked exits must be canceled first",
-                    event="reduce_only_violation_prevented",
-                    symbol=symbol,
-                    side=exit_side,
-                    amount=preflight.existing_tracked_contracts,
-                    position_size=state.position_size,
-                    reason=preflight.reason,
-                )
-                return
-            self._mark_exit_ladder_waiting_for_closeable(
-                symbol,
-                mode,
-                preflight.reason,
-            )
+        if not preflight_ok:
             return
-        ladder_contracts = preflight.planned_contracts
 
         if (
             ladder_contracts + max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
@@ -2580,11 +2950,7 @@ class ExitStrategy:
             state.exit_runner_contracts = runner_contracts
         else:
             self._reset_exit_runner_state(state)
-        allocated = 0.0
-        created_at = time.time()
         operation_id = self._operation_id("exit_ladder", symbol=symbol)
-        exit_planned_orders = 0
-        exit_planned_notional = 0.0
         sell_context = self._sell_ladder_context(symbol, mode=mode)
         sell_context["external_spread_bps"] = self._safe_float(
             plan_context.get("external_spread_bps"), 0.0
@@ -2595,305 +2961,24 @@ class ExitStrategy:
             or "unavailable"
         )
         if mode == "controlled_loss_exit":
-            for key in (
-                "controlled_loss_macro_intensity",
-                "controlled_loss_signal_intensity",
-                "controlled_loss_overlay_intensity",
-                "controlled_loss_speed_multiplier",
-                "controlled_loss_macro_speed_multiplier",
-                "controlled_loss_volatility_intensity",
-                "controlled_loss_volatility_speed_multiplier",
-                "controlled_loss_volatility_exponential_curve",
-                "controlled_loss_volatility_ratio",
-                "controlled_loss_local_volatility",
-                "controlled_loss_atr_rate",
-                "controlled_loss_daily_volatility_multiplier",
-                "controlled_loss_volatility_reference",
-                "controlled_loss_volatility_trigger_multiplier",
-                "controlled_loss_linear_progress",
-                "controlled_loss_effective_progress",
-                "controlled_loss_directional_gap",
-                "controlled_loss_elapsed_minutes",
-                "controlled_loss_ramp_minutes",
-            ):
-                sell_context[key] = self._safe_float(
-                    plan_context.get(key), self._safe_float(sell_context.get(key), 0.0)
-                )
-            sell_context["controlled_loss_macro_regime"] = str(
-                plan_context.get("controlled_loss_macro_regime")
-                or sell_context.get("controlled_loss_macro_regime")
-                or "neutral"
-            )
-            sell_context["controlled_loss_macro_reason"] = str(
-                plan_context.get("controlled_loss_macro_reason")
-                or sell_context.get("controlled_loss_macro_reason")
-                or "neutral"
-            )
-            sell_context["controlled_loss_volatility_reason"] = str(
-                plan_context.get("controlled_loss_volatility_reason")
-                or sell_context.get("controlled_loss_volatility_reason")
-                or "neutral"
-            )
-            sell_context["controlled_loss_ramp_profile"] = str(
-                plan_context.get("controlled_loss_ramp_profile")
-                or sell_context.get("controlled_loss_ramp_profile")
-                or "linear"
-            )
-        for index, step, contracts in allocations:
-            markup = self._safe_float(step.get("markup"), 0.0)
-
-            adaptive_markup = markup * self._safe_float(
-                sell_context.get("markup_multiplier"), 1.0
-            )
-            if mode == "controlled_loss_exit":
-                price = self._controlled_loss_exit_price(
-                    symbol, avg_entry_price, markup, context=sell_context
-                )
-            else:
-                price = self._sell_price_floor(
-                    symbol, avg_entry_price, adaptive_markup, context=sell_context
-                )
-            try:
-                order = self._create_one_way_order(
-                    symbol=symbol,
-                    order_type="limit",
-                    side=exit_side,
-                    amount=contracts,
-                    price=price,
-                    reduce_only=True,
-                )
-                order_id = str(order.get("id"))
-            except Exception as exc:
-                band_limit = self._price_band_limit_from_error(exc, side=exit_side)
-                if band_limit > 0:
-                    adjusted_price = self._price_inside_htx_band(
-                        symbol, price, side=exit_side, limit=band_limit
-                    )
-                    try:
-                        order = self._create_one_way_order(
-                            symbol=symbol,
-                            order_type="limit",
-                            side=exit_side,
-                            amount=contracts,
-                            price=adjusted_price,
-                            reduce_only=True,
-                        )
-                        price = adjusted_price
-                        order_id = str(order.get("id"))
-                        self._log_event(
-                            "WARNING",
-                            f"{exit_label} reduce-only price adjusted for HTX band {symbol}: {price}",
-                            event="exit_ladder_rebuilt"
-                            if rebuild
-                            else "exit_ladder_placed",
-                            symbol=symbol,
-                            side=exit_side,
-                            price=price,
-                            amount=contracts,
-                            reason=f"htx_price_band_adjusted;limit={band_limit:.12f};mode={mode}",
-                        )
-                    except Exception as retry_exc:
-                        if self._is_reduce_only_amount_exceeds_closeable_error(
-                            retry_exc
-                        ):
-                            if allocated <= 0:
-                                self._mark_exit_ladder_waiting_for_closeable(
-                                    symbol,
-                                    mode,
-                                    "closeable_amount_reserved_by_existing_exit_orders",
-                                    amount=contracts,
-                                    exception=retry_exc,
-                                )
-                                return
-                            self._log_event(
-                                "WARNING",
-                                f"{exit_label} reduce-only ladder stopped for {symbol}: remaining closeable amount is unavailable",
-                                event="reduce_only_violation_prevented",
-                                symbol=symbol,
-                                side=exit_side,
-                                price=adjusted_price,
-                                amount=contracts,
-                                reason="partial_exit_ladder_closeable_unavailable",
-                                exception=retry_exc,
-                            )
-                            break
-                        self._log_event(
-                            "ERROR",
-                            f"{exit_label} reduce-only order failed for {symbol} after HTX band adjustment: {retry_exc}",
-                            event="reduce_only_violation_prevented",
-                            symbol=symbol,
-                            side=exit_side,
-                            price=adjusted_price,
-                            amount=contracts,
-                            reason="price_band_retry_rejected",
-                            exception=retry_exc,
-                        )
-                        continue
-                else:
-                    if self._is_reduce_only_amount_exceeds_closeable_error(exc):
-                        if allocated <= 0:
-                            self._mark_exit_ladder_waiting_for_closeable(
-                                symbol,
-                                mode,
-                                "closeable_amount_reserved_by_existing_exit_orders",
-                                amount=contracts,
-                                exception=exc,
-                            )
-                            return
-                        self._log_event(
-                            "WARNING",
-                            f"{exit_label} reduce-only ladder stopped for {symbol}: remaining closeable amount is unavailable",
-                            event="reduce_only_violation_prevented",
-                            symbol=symbol,
-                            side=exit_side,
-                            price=price,
-                            amount=contracts,
-                            reason="partial_exit_ladder_closeable_unavailable",
-                            exception=exc,
-                        )
-                        break
-                    self._log_event(
-                        "ERROR",
-                        f"{exit_label} reduce-only order failed for {symbol}: {exc}",
-                        event="reduce_only_violation_prevented",
-                        symbol=symbol,
-                        side=exit_side,
-                        price=price,
-                        amount=contracts,
-                        reason="exit_order_rejected",
-                        exception=exc,
-                    )
-                    continue
-
-            allocated += contracts
-            ref = {
-                "id": order_id,
-                "side": exit_side,
-                "price": price,
-                "amount": contracts,
-                "created_at": created_at,
-                "stage": index,
-                "mode": mode,
-                "markup": markup,
-                "ladder_name": plan_context.get("ladder_name", mode),
-                "exit_scope": ref_exit_scope,
-                "external_spread_bps": self._safe_float(
-                    plan_context.get("external_spread_bps"), 0.0
-                ),
-                "operation_id": operation_id,
-                "cycle_id": state.cycle_id,
-            }
-            if mode == "controlled_loss_exit":
-                ref["loss_move_fraction"] = markup
-                ref["loss_budget_at_placement"] = self._safe_float(
-                    sell_context.get("controlled_loss_budget"), 0.0
-                )
-                ref["reference_price_at_placement"] = self._safe_float(
-                    sell_context.get("controlled_reference_price"), 0.0
-                )
-                ref["loss_macro_intensity"] = self._safe_float(
-                    sell_context.get("controlled_loss_macro_intensity"), 0.0
-                )
-                ref["loss_speed_multiplier"] = self._safe_float(
-                    sell_context.get("controlled_loss_speed_multiplier"), 1.0
-                )
-                ref["loss_macro_speed_multiplier"] = self._safe_float(
-                    sell_context.get("controlled_loss_macro_speed_multiplier"), 1.0
-                )
-                ref["loss_volatility_intensity"] = self._safe_float(
-                    sell_context.get("controlled_loss_volatility_intensity"), 0.0
-                )
-                ref["loss_volatility_speed_multiplier"] = self._safe_float(
-                    sell_context.get("controlled_loss_volatility_speed_multiplier"), 1.0
-                )
-                ref["loss_volatility_ratio"] = self._safe_float(
-                    sell_context.get("controlled_loss_volatility_ratio"), 0.0
-                )
-                ref["loss_atr_rate"] = self._safe_float(
-                    sell_context.get("controlled_loss_atr_rate"), 0.0
-                )
-                ref["loss_ramp_profile"] = str(
-                    sell_context.get("controlled_loss_ramp_profile") or "linear"
-                )
-                ref["loss_directional_macro_gap"] = self._safe_float(
-                    sell_context.get("controlled_loss_directional_gap"), 0.0
-                )
-                ref["loss_macro_regime"] = str(
-                    sell_context.get("controlled_loss_macro_regime") or "neutral"
-                )
-            state.sell_ladder_orders.append(ref)
-            event = "exit_ladder_rebuilt" if rebuild else "exit_ladder_placed"
-            action = "rebuilt" if rebuild else "placed"
-            stage_notional = self._contracts_to_notional(symbol, contracts, price)
-            exit_planned_orders += 1
-            exit_planned_notional += stage_notional
-            self._record_signal_analytics(
-                event,
-                symbol=symbol,
-                signal=signal or {},
-                planned_orders=exit_planned_orders,
-                planned_notional=exit_planned_notional,
-                placed_orders=exit_planned_orders,
-                operation_id=operation_id,
-                order_id=order_id,
-                cycle_id=state.cycle_id,
-                context={
-                    "stage": index,
-                    "mode": mode,
-                    "price": price,
-                    "contracts": contracts,
-                    "stage_notional": stage_notional,
-                    "markup": markup,
-                    "adaptive_markup": adaptive_markup,
-                    "exit_scope": ref_exit_scope,
-                    "plan_context": plan_context,
-                    "sell_context": sell_context,
-                },
-            )
-            self._log_event(
-                "INFO",
-                f"{exit_label} exit ladder {action} for {symbol}: stage={index} contracts={contracts} price={price}",
-                event=event,
-                symbol=symbol,
-                side=exit_side,
-                order_id=order_id,
-                price=price,
-                amount=contracts,
-                reason=(
-                    f"reduce_only_close;markup_multiplier={sell_context.get('markup_multiplier', 1.0):.3f};"
-                    f"base_profit_floor={sell_context.get('base_profit_floor', 0.0):.6f};"
-                    f"profit_floor={sell_context.get('profit_floor', 0.0):.6f};"
-                    f"profit_floor_mult={sell_context.get('profit_floor_multiplier', 1.0):.3f};"
-                    f"profit_floor_reason={sell_context.get('profit_floor_reason', 'neutral')};"
-                    f"fee_floor={sell_context.get('fee_floor', 0.0):.6f};"
-                    f"spread={sell_context.get('spread_rate', 0.0):.6f};"
-                    f"spread_floor={sell_context.get('spread_floor', 0.0):.6f};"
-                    f"vol_floor={sell_context.get('volatility_floor', 0.0):.6f};"
-                    f"funding={sell_context.get('funding_rate', 0.0):.6f};"
-                    f"mode={mode};"
-                    f"exit_scope={ref_exit_scope};"
-                    f"ladder={plan_context.get('ladder_name', mode)};"
-                    f"position_ratio={plan_context.get('position_ratio', 1.0):.4f};"
-                    f"position_age_hours={plan_context.get('position_age_hours', 0.0):.2f};"
-                    f"runner_contracts={runner_contracts:.12f};"
-                    f"controlled_loss_move={plan_context.get('controlled_loss_move_fraction', 0.0):.4f};"
-                    f"controlled_loss_macro_intensity={sell_context.get('controlled_loss_macro_intensity', 0.0):.3f};"
-                    f"controlled_loss_speed={sell_context.get('controlled_loss_speed_multiplier', 1.0):.3f};"
-                    f"controlled_loss_vol_intensity={sell_context.get('controlled_loss_volatility_intensity', 0.0):.3f};"
-                    f"controlled_loss_vol_ratio={sell_context.get('controlled_loss_volatility_ratio', 0.0):.3f};"
-                    f"controlled_loss_atr_rate={sell_context.get('controlled_loss_atr_rate', 0.0):.6f};"
-                    f"controlled_loss_ramp_profile={sell_context.get('controlled_loss_ramp_profile', 'linear')};"
-                    f"controlled_loss_gap={sell_context.get('controlled_loss_directional_gap', 0.0):.6f};"
-                    f"controlled_loss_macro_regime={sell_context.get('controlled_loss_macro_regime', 'neutral')};"
-                    f"external_spread_bps={sell_context.get('external_spread_bps', 0.0):.4f};"
-                    f"external_reason={sell_context.get('external_reason', 'unavailable')};"
-                    f"{sell_context.get('funding_reason', 'neutral')}"
-                ),
-            )
-
-        planned_fixed_contracts = sum(
-            self._safe_float(contracts, 0.0) for _, _, contracts in allocations
+            self._populate_controlled_loss_sell_context(plan_context, sell_context)
+        allocated, planned_fixed_contracts, aborted = self._place_sell_ladder_allocations(
+            symbol=symbol,
+            avg_entry_price=avg_entry_price,
+            allocations=allocations,
+            sell_context=sell_context,
+            plan_context=plan_context,
+            state=state,
+            mode=mode,
+            exit_side=exit_side,
+            exit_label=exit_label,
+            rebuild=rebuild,
+            ref_exit_scope=ref_exit_scope,
+            operation_id=operation_id,
+            signal=signal,
         )
+        if aborted:
+            return
         sell_total = sum(
             self._safe_float(ref.get("amount"), 0.0) for ref in state.sell_ladder_orders
         )
@@ -3042,7 +3127,7 @@ class ExitStrategy:
 
         event = "exit_ladder_rebuilt" if rebuild else "exit_ladder_placed"
         stage_notional = self._contracts_to_notional(symbol, contracts, price)
-        self._record_signal_analytics(
+        self._record_signal_analytics(SignalAnalyticsEvent(
             event,
             symbol=symbol,
             signal={},
@@ -3061,7 +3146,7 @@ class ExitStrategy:
                 "markup": 0.0,
                 "exit_scope": "average_recovery",
             },
-        )
+        ))
         action = "rebuilt" if rebuild else "placed"
         self._log_event(
             "INFO",
