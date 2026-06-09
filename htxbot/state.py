@@ -182,12 +182,14 @@ class StateMixin:
             record_diagnostic = getattr(self, "_record_diagnostic", None)
             if record_diagnostic:
                 record_diagnostic(
-                    "fault",
-                    "state",
-                    "state_load_failed",
-                    f"Could not read futures state; starting with empty state: {exc}",
-                    reason="state_load_failed",
-                    exception=exc,
+                    DiagnosticEvent(
+                        severity="fault",
+                        category="state",
+                        event="state_load_failed",
+                        message=f"Could not read futures state; starting with empty state: {exc}",
+                        reason="state_load_failed",
+                        exception=exc,
+                    )
                 )
             return {}
 
