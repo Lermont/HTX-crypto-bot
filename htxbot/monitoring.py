@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
 from typing import Sequence
 from typing import Any, Dict, Optional
+from .models import CsvEventData
 
 import config
 
@@ -651,78 +652,51 @@ class MonitoringMixin:
         }
         self._append_jsonl(getattr(self, "signal_analytics_jsonl_path", None), payload)
 
-    def _append_csv(
-        self,
-        level: str,
-        event: str,
-        message: str = "",
-        symbol: str = "",
-        side: str = "",
-        order_id: str = "",
-        price: float = 0.0,
-        amount: float = 0.0,
-        filled: float = 0.0,
-        remaining: float = 0.0,
-        position_size: float = 0.0,
-        entry_price: float = 0.0,
-        notional: float = 0.0,
-        fee_quote: float = 0.0,
-        fee_currency: str = "",
-        fill_source: str = "",
-        rs30: float = 0.0,
-        rs60: float = 0.0,
-        ema30: float = 0.0,
-        ema60: float = 0.0,
-        reason: str = "",
-        exception_type: str = "",
-        error_code: str = "",
-        retryable: Any = "",
-        **_ignored,
-    ):
-        if symbol and hasattr(self, "states") and symbol in self.states:
-            state = self.states[symbol]
-            if not position_size:
-                position_size = state.position_size
-            if not entry_price:
-                entry_price = state.entry_price
-            if not rs30:
-                rs30 = state.last_rs30
-            if not rs60:
-                rs60 = state.last_rs60
-            if not ema30:
-                ema30 = state.last_ema30
-            if not ema60:
-                ema60 = state.last_ema60
+    def _append_csv(self, data: CsvEventData):
+        if data.symbol and hasattr(self, "states") and data.symbol in self.states:
+            state = self.states[data.symbol]
+            if not data.position_size:
+                data.position_size = state.position_size
+            if not data.entry_price:
+                data.entry_price = state.entry_price
+            if not data.rs30:
+                data.rs30 = state.last_rs30
+            if not data.rs60:
+                data.rs60 = state.last_rs60
+            if not data.ema30:
+                data.ema30 = state.last_ema30
+            if not data.ema60:
+                data.ema60 = state.last_ema60
 
         if not self._append_headered_csv_row(
             self.csv_path,
             self.CSV_HEADER,
             [
                 int(time.time()),
-                level,
-                event,
-                symbol,
-                side,
-                order_id,
-                f"{price:.12f}" if price else "",
-                f"{amount:.12f}" if amount else "",
-                f"{filled:.12f}" if filled else "",
-                f"{remaining:.12f}" if remaining else "",
-                f"{position_size:.12f}" if position_size else "",
-                f"{entry_price:.12f}" if entry_price else "",
-                f"{notional:.12f}" if notional else "",
-                f"{fee_quote:.12f}" if fee_quote else "",
-                fee_currency,
-                fill_source,
-                f"{rs30:.8f}" if rs30 else "",
-                f"{rs60:.8f}" if rs60 else "",
-                f"{ema30:.12f}" if ema30 else "",
-                f"{ema60:.12f}" if ema60 else "",
-                reason,
-                message,
-                exception_type,
-                error_code,
-                retryable,
+                data.level,
+                data.event,
+                data.symbol,
+                data.side,
+                data.order_id,
+                f"{data.price:.12f}" if data.price else "",
+                f"{data.amount:.12f}" if data.amount else "",
+                f"{data.filled:.12f}" if data.filled else "",
+                f"{data.remaining:.12f}" if data.remaining else "",
+                f"{data.position_size:.12f}" if data.position_size else "",
+                f"{data.entry_price:.12f}" if data.entry_price else "",
+                f"{data.notional:.12f}" if data.notional else "",
+                f"{data.fee_quote:.12f}" if data.fee_quote else "",
+                data.fee_currency,
+                data.fill_source,
+                f"{data.rs30:.8f}" if data.rs30 else "",
+                f"{data.rs60:.8f}" if data.rs60 else "",
+                f"{data.ema30:.12f}" if data.ema30 else "",
+                f"{data.ema60:.12f}" if data.ema60 else "",
+                data.reason,
+                data.message,
+                data.exception_type,
+                data.error_code,
+                data.retryable,
             ],
         ):
             raise OSError(f"Could not append CSV event log {self.csv_path}")
@@ -1093,7 +1067,14 @@ class MonitoringMixin:
             log_method = getattr(self.log, str(level).lower(), self.log.info)
         log_method(message)
         try:
-            self._append_csv(
+
+            def _safe_float(v):
+                try:
+                    return float(v) if v is not None else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
+
+            csv_data = CsvEventData(
                 level=level_upper,
                 event=event,
                 message=message,
@@ -1104,6 +1085,7 @@ class MonitoringMixin:
                 else "",
                 **kwargs,
             )
+            self._append_csv(csv_data)
         except Exception as exc:
             if not getattr(self, "_csv_log_failed_once", False):
                 self._csv_log_failed_once = True
