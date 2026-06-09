@@ -157,6 +157,7 @@ class TestFetchOrderBookSafe(unittest.TestCase):
         self.assertEqual(str(kwargs.get("exception")), "Simulated fetch error")
 
     def test_fetch_order_book_safe_direct(self):
+        """Tests direct execution paths for order book fetching."""
         from tests.config_overrides import override_frozen_config_fields
         from htxbot import config
         from unittest.mock import patch
