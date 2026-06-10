@@ -1,11 +1,9 @@
-<<<<<<< Updated upstream
-import unittest.mock as mock
-=======
->>>>>>> Stashed changes
 # -*- coding: utf-8 -*-
 
 import math
 import unittest
+import unittest.mock as mock
+
 import pytest
 
 from htxbot.indicators import (

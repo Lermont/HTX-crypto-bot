@@ -1,17 +1,11 @@
 # -*- coding: utf-8 -*-
 
-import csv
-import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import config
 
-<<<<<<< Updated upstream
-from .models import ExitLadderConfig, ExitLadderPreflight, SellLadderParams, TradeState
-=======
-from .models import SignalAnalyticsEvent, TradeState
->>>>>>> Stashed changes
+from .models import TradeState
 
 
 class EntryStrategy:

@@ -8,7 +8,6 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import config
 
 from .app import HtxFuturesBot
-from .models import BtcHedgeLogContext
 from .shared_exchange import CachedMarketDataExchange
 
 

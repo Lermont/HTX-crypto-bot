@@ -10,7 +10,6 @@ from .models import (
     ExitLadderConfig,
     ExitLadderPreflight,
     SellLadderParams,
-    SignalAnalyticsEvent,
     TradeState,
 )
 
