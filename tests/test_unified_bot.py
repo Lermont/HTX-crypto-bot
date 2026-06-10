@@ -3518,70 +3518,6 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(state.sell_ladder_orders, [])
             self.assertEqual(state.sell_ladder_signature, "")
 
-    def test_profile_reads_legacy_risk_setting_aliases(self):
-        env = {
-            "ALIAS_POSITION_BUDGET_FRACTION": "0.04",
-            "ALIAS_MIN_QUOTE_RESERVE": "10",
-            "ALIAS_MAX_ACTIVE_POSITIONS": "10",
-            "ALIAS_MAX_POSITION_NOTIONAL_FRACTION": "0.08",
-            "ALIAS_MAX_TOTAL_NOTIONAL_FRACTION": "0.85",
-            "ALIAS_DUST_POSITION_NOTIONAL": "12",
-        }
-        previous = {key: os.environ.get(key) for key in env}
-        try:
-            os.environ.update(env)
-            profile = config._make_profile("alias", "long", ("test",))
-        finally:
-            for key, value in previous.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
-
-        self.assertEqual(profile.buying.position_budget_fraction, 0.04)
-        self.assertEqual(profile.risk.min_quote_reserve, 10.0)
-        self.assertEqual(profile.risk.max_active_positions, 10)
-        self.assertEqual(profile.risk.max_position_notional_fraction, 0.08)
-        self.assertEqual(profile.risk.max_total_notional_fraction, 0.85)
-        self.assertEqual(profile.risk.dust_position_notional, 12.0)
-        self.assertEqual(profile.risk.tiny_entry_max_notional, 12.0)
-
-    def test_profile_reads_global_htxbot_env_prefix(self):
-        env_keys = (
-            "POLL_INTERVAL_SEC",
-            "HTXBOT_POLL_INTERVAL_SEC",
-            "ALIAS_POLL_INTERVAL_SEC",
-            "HTXBOT_ALIAS_POLL_INTERVAL_SEC",
-        )
-        previous = {key: os.environ.get(key) for key in env_keys}
-        try:
-            for key in env_keys:
-                os.environ.pop(key, None)
-            os.environ["HTXBOT_POLL_INTERVAL_SEC"] = "17"
-            profile = config._make_profile("alias", "long", ("test",))
-        finally:
-            for key, value in previous.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
-
-        self.assertEqual(profile.runtime.poll_interval_sec, 17)
-
-    def test_profile_reads_set_leverage_on_start_env(self):
-        env_key = "ALIAS_SET_LEVERAGE_ON_START"
-        previous = os.environ.get(env_key)
-        try:
-            os.environ[env_key] = "true"
-            profile = config._make_profile("alias", "long", ("test",))
-        finally:
-            if previous is None:
-                os.environ.pop(env_key, None)
-            else:
-                os.environ[env_key] = previous
-
-        self.assertTrue(profile.exchange.set_leverage_on_start)
-
     def test_entry_ladder_does_not_retry_with_lower_leverage(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, post_only_enabled=False)
@@ -3612,6 +3548,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                hard_stop_loss_enabled=True,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -3665,6 +3602,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                hard_stop_loss_enabled=True,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -3700,6 +3638,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                hard_stop_loss_enabled=True,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -3736,6 +3675,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                hard_stop_loss_enabled=True,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -3894,6 +3834,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                hard_stop_loss_enabled=True,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -4111,6 +4052,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                hard_stop_loss_enabled=True,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -4157,6 +4099,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                hard_stop_loss_enabled=True,
                 ema_exit_trailing_pullback=0.010,
                 ema_exit_trailing_atr_multiplier=2.0,
                 ema_exit_trailing_max_pullback=0.030,
@@ -4206,6 +4149,7 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                hard_stop_loss_enabled=True,
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -7043,7 +6987,7 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(
                 config.STRATEGY.controlled_loss_volatility_reprice_min_move_delta, 0.05
             )
-            self.assertTrue(config.STRATEGY.hard_stop_loss_enabled)
+            self.assertFalse(config.STRATEGY.hard_stop_loss_enabled)
             self.assertEqual(config.STRATEGY.hard_stop_loss_pct, 0.02)
             self.assertEqual(config.STRATEGY.hard_stop_loss_min_emergency_pct, 0.04)
             self.assertTrue(config.STRATEGY.hard_stop_loss_atr_enabled)

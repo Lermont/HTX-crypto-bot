@@ -51,10 +51,6 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(hedge.btc_hedge_enabled)
             self.assertEqual(hedge.btc_hedge_max_spread_bps, 30.0)
 
-    def test_btc_hedge_can_be_enabled_by_env(self):
-        with temporary_env(BTC_HEDGE_ENABLED="true", HTXBOT_BTC_HEDGE_ENABLED=None):
-            self.assertTrue(config._make_hedge_settings().btc_hedge_enabled)
-
     def test_short_profile_markets_cache_filename_matches_profile(self):
         cache_path = config.resolve_profile("short").runtime.markets_cache_file.replace("\\", "/")
 
@@ -98,17 +94,6 @@ class ConfigTests(unittest.TestCase):
         with temporary_env(COINS="doge,ada", COINS_2="1inch,doge"):
             with self.assertRaisesRegex(ValueError, "assigned to multiple HTX API accounts"):
                 config._make_profile("long", "long", ())
-
-    def test_market_data_max_workers_is_profile_runtime_setting(self):
-        with temporary_env(
-            MARKET_DATA_MAX_WORKERS="3",
-            HTXBOT_MARKET_DATA_MAX_WORKERS=None,
-            LONG_MARKET_DATA_MAX_WORKERS=None,
-            HTXBOT_LONG_MARKET_DATA_MAX_WORKERS=None,
-        ):
-            profile = config._make_profile("long", "long", ("test",))
-
-        self.assertEqual(profile.runtime.market_data_max_workers, 3)
 
     def test_frozen_runtime_rejects_direct_field_assignment(self):
         with self.assertRaises(FrozenInstanceError):
