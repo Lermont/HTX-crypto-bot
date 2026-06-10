@@ -422,6 +422,7 @@ class StrategySettings:
     entry_spread_filter_enabled: bool
     entry_spread_filter_max_bps: float
     entry_spread_filter_block_if_unavailable: bool
+    entry_min_planned_notional_quote: float
     max_buy_stages: int
     averaging_drawdown_steps: Tuple[float, ...]
     averaging_budget_fractions: Tuple[float, ...]
@@ -440,6 +441,7 @@ class StrategySettings:
     hard_stop_loss_atr_enabled: bool
     hard_stop_loss_atr_multiplier: float
     hard_stop_loss_atr_max_pct: float
+    hard_stop_breakeven_after_first_exit: bool
     soft_defensive_exit_enabled: bool
     soft_defensive_exit_min_drawdown: float
     soft_defensive_exit_btc_against_return: float
@@ -1632,6 +1634,9 @@ def _make_strategy_settings(
         entry_spread_filter_block_if_unavailable=_env_bool(
             "ENTRY_SPREAD_FILTER_BLOCK_IF_UNAVAILABLE", False, profile=name
         ),
+        entry_min_planned_notional_quote=max(
+            0.0, _env_float("ENTRY_MIN_PLANNED_NOTIONAL_QUOTE", 0.0, profile=name)
+        ),
         max_buy_stages=_env_int(
             "MAX_BUY_STAGES",
             strategy_context.ema_max_averaging_stages + 1,
@@ -1700,6 +1705,9 @@ def _make_strategy_settings(
         ),
         hard_stop_loss_atr_max_pct=_env_float(
             "HARD_STOP_LOSS_ATR_MAX_PCT", 0.03, profile=name
+        ),
+        hard_stop_breakeven_after_first_exit=_env_bool(
+            "HARD_STOP_BREAKEVEN_AFTER_FIRST_EXIT", True, profile=name
         ),
         soft_defensive_exit_enabled=_env_bool(
             "SOFT_DEFENSIVE_EXIT_ENABLED", True, profile=name

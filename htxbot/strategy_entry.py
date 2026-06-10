@@ -1122,6 +1122,19 @@ class EntryStrategy:
             budget_context.get("planned_notional"),
             budget * max(float(config.RISK.leverage), 1.0),
         )
+        min_planned_notional = max(
+            0.0,
+            self._safe_float(
+                getattr(config.STRATEGY, "entry_min_planned_notional_quote", 0.0), 0.0
+            ),
+        )
+        if budget > 0 and min_planned_notional > 0 and planned_notional < min_planned_notional:
+            budget = 0.0
+            budget_reason = (
+                "entry_planned_notional_below_min;"
+                f"planned_notional={planned_notional:.8f};"
+                f"min_notional={min_planned_notional:.8f};{budget_reason}"
+            )
         self._record_signal_analytics(
             "entry_budget_calculated" if budget > 0 else "entry_budget_blocked",
             symbol=symbol,

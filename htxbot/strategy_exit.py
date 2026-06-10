@@ -69,27 +69,59 @@ class ExitStrategy:
             return self._price_at_or_above(symbol, state.entry_price * (1.0 + pct))
         return self._price_at_or_below(symbol, state.entry_price * (1.0 - pct))
 
+    def _cycle_exit_fill_totals(self, state: TradeState) -> Tuple[float, float]:
+        if config.POSITION_SIDE == "short":
+            return (
+                self._safe_float(state.total_bought_amount, 0.0),
+                self._safe_float(state.total_bought_quote, 0.0),
+            )
+        return (
+            self._safe_float(state.total_sold_amount, 0.0),
+            self._safe_float(state.total_sold_quote, 0.0),
+        )
+
+    def _profitable_exit_fill_lock_active(self, state: TradeState) -> bool:
+        strategy = config.STRATEGY
+        if not getattr(strategy, "hard_stop_breakeven_after_first_exit", False):
+            return False
+        if state.entry_price <= 0:
+            return False
+        exit_amount, exit_quote = self._cycle_exit_fill_totals(state)
+        if exit_amount <= 0 or exit_quote <= 0:
+            return False
+        breakeven = self._breakeven_exit_price(state.entry_price)
+        if breakeven <= 0:
+            return False
+        avg_exit = exit_quote / exit_amount
+        if config.POSITION_SIDE == "short":
+            return avg_exit <= breakeven
+        return avg_exit >= breakeven
+
     def _runner_profit_lock_stop_price(
         self, symbol: str, state: TradeState
     ) -> Tuple[float, str]:
         strategy = config.STRATEGY
-        if not getattr(strategy, "ema_exit_runner_profit_lock_enabled", False):
-            return 0.0, "runner_profit_lock_disabled"
-        if not (state.exit_runner_active or state.exit_runner_activated_at):
-            return 0.0, "runner_profit_lock_inactive"
         if state.entry_price <= 0:
             return 0.0, "runner_profit_lock_entry_missing"
+        runner_lock = bool(
+            getattr(strategy, "ema_exit_runner_profit_lock_enabled", False)
+            and (state.exit_runner_active or state.exit_runner_activated_at)
+        )
+        exit_fill_lock = self._profitable_exit_fill_lock_active(state)
+        if not runner_lock and not exit_fill_lock:
+            return 0.0, "runner_profit_lock_inactive"
 
         breakeven = self._breakeven_exit_price(state.entry_price)
         if breakeven <= 0:
             return 0.0, "runner_profit_lock_price_unavailable"
+        reason = (
+            "runner_profit_lock_breakeven"
+            if runner_lock
+            else "exit_fill_profit_lock_breakeven"
+        )
         if config.POSITION_SIDE == "short":
-            return self._price_at_or_below(
-                symbol, breakeven
-            ), "runner_profit_lock_breakeven"
-        return self._price_at_or_above(
-            symbol, breakeven
-        ), "runner_profit_lock_breakeven"
+            return self._price_at_or_below(symbol, breakeven), reason
+        return self._price_at_or_above(symbol, breakeven), reason
 
     def _hard_stop_loss_signature(
         self, symbol: str, state: TradeState, amount: float, trigger_price: float

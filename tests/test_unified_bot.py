@@ -2121,6 +2121,28 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(rows[-1]["decision"], "entry_budget_blocked")
             self.assertEqual(rows[-1]["block_reason"], "free_margin_below_reserve")
 
+    def test_entry_below_min_planned_notional_is_blocked(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = config.RUNTIME
+            strategy = replace(
+                config.STRATEGY,
+                entry_min_planned_notional_quote=10.0**9,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+
+                bot._maybe_place_initial_buy(SYMBOL, self.entry_signal(ts=1003))
+
+                self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
+                    rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[-1]["decision"], "entry_budget_blocked")
+            self.assertIn(
+                "entry_planned_notional_below_min", rows[-1]["block_reason"]
+            )
+
     def test_external_price_stale_is_ignored_by_default_for_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = config.RUNTIME
@@ -6219,6 +6241,113 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(
                     state.hard_stop_order["cancel_params"], {"stopLossTakeProfit": True}
                 )
+
+    def test_hard_stop_moves_to_breakeven_after_profitable_partial_exit_long(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.05,
+                hard_stop_loss_min_emergency_pct=0.0,
+                hard_stop_loss_atr_enabled=False,
+                hard_stop_breakeven_after_first_exit=True,
+                ema_exit_runner_profit_lock_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 7.0
+                state.position_available = 7.0
+                state.entry_price = 100.0
+                state.total_sold_amount = 3.0
+                state.total_sold_quote = 302.4
+
+                placed = bot._ensure_hard_stop_loss(SYMBOL)
+
+                self.assertTrue(placed)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["side"], "sell")
+                self.assertEqual(order["params"].get("stopLossPrice"), 100.04)
+
+    def test_hard_stop_stays_at_loss_rate_after_lossy_partial_exit_long(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.05,
+                hard_stop_loss_min_emergency_pct=0.0,
+                hard_stop_loss_atr_enabled=False,
+                hard_stop_breakeven_after_first_exit=True,
+                ema_exit_runner_profit_lock_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 7.0
+                state.position_available = 7.0
+                state.entry_price = 100.0
+                state.total_sold_amount = 3.0
+                state.total_sold_quote = 291.0
+
+                bot._ensure_hard_stop_loss(SYMBOL)
+
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["params"].get("stopLossPrice"), 95.0)
+
+    def test_hard_stop_ignores_partial_exit_when_breakeven_lock_disabled(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.05,
+                hard_stop_loss_min_emergency_pct=0.0,
+                hard_stop_loss_atr_enabled=False,
+                hard_stop_breakeven_after_first_exit=False,
+                ema_exit_runner_profit_lock_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 7.0
+                state.position_available = 7.0
+                state.entry_price = 100.0
+                state.total_sold_amount = 3.0
+                state.total_sold_quote = 302.4
+
+                bot._ensure_hard_stop_loss(SYMBOL)
+
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["params"].get("stopLossPrice"), 95.0)
+
+    def test_hard_stop_moves_to_breakeven_after_profitable_partial_exit_short(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                hard_stop_loss_enabled=True,
+                hard_stop_loss_pct=0.05,
+                hard_stop_loss_min_emergency_pct=0.0,
+                hard_stop_loss_atr_enabled=False,
+                hard_stop_breakeven_after_first_exit=True,
+                ema_exit_runner_profit_lock_enabled=False,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 7.0
+                state.position_available = 7.0
+                state.entry_price = 100.0
+                state.total_bought_amount = 3.0
+                state.total_bought_quote = 297.0
+
+                bot._ensure_hard_stop_loss(SYMBOL)
+
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["side"], "buy")
+                self.assertEqual(order["params"].get("stopLossPrice"), 99.96)
 
     def test_hard_stop_loss_uses_atr_cap_when_signal_volatility_is_wider(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
