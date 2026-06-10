@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 
 import config
 
-from .models import TradeState
+from .models import TradeState, SignalAnalyticsEvent
 
 
 class EntryStrategy:
