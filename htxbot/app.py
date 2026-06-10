@@ -87,10 +87,6 @@ class HtxFuturesBot(
     ]
 
     def __init__(self, profile=None, exchange=None, external_price_feed=None):
-        import threading
-        self._funding_lock = threading.Lock()
-        self._account_pnl_lock = threading.Lock()
-        self._signal_lock = threading.Lock()
         self.profile = config.resolve_profile(profile)
         with config.use_profile(self.profile):
             self.profile_name = self.profile.name
@@ -137,7 +133,6 @@ class HtxFuturesBot(
             self.skip_futures_account_setup = False
             self.funding_cache: Dict[str, dict] = {}
             self.order_leverage_cache: Dict[str, float] = {}
-            self._account_pnl_lock = threading.RLock()
             self._funding_cache_lock = threading.RLock()
             self._private_cache_lock = threading.RLock()
             self._reset_private_caches()

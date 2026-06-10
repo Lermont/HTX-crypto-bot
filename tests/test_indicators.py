@@ -1,4 +1,7 @@
+<<<<<<< Updated upstream
 import unittest.mock as mock
+=======
+>>>>>>> Stashed changes
 # -*- coding: utf-8 -*-
 
 import math

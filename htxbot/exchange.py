@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import concurrent.futures
+import functools
 import json
 import math
 import re
@@ -11,9 +12,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import ccxt
 
 import config
-from .models import OrderRequest
 
 from .concurrency import instance_rlock
+from .models import OrderRequest, SignalAnalyticsEvent
 from .shared_exchange import MultiAccountExchange, ThreadSafeExchange
 
 

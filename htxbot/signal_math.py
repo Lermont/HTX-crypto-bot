@@ -17,10 +17,8 @@ def signal_score(
 ) -> float:
     if str(position_side).lower() == "short":
         rs_direction = rs30 - rs60
-        rs_edge = max(0.0, rs_direction)
     else:
         rs_direction = rs60 - rs30
-        rs_edge = max(0.0, rs_direction)
 
     ema_edge = 0.0
     if price > 0:

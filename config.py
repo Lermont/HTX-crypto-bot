@@ -12,6 +12,15 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_WARNINGS = []
 _DOTENV_VARS: Dict[str, str] = {}
 
+# Tests set HTXBOT_DISABLE_DOTENV=1 so the suite is hermetic and does not
+# depend on the operator's local .env overrides.
+_DOTENV_DISABLED = os.environ.get("HTXBOT_DISABLE_DOTENV", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 
 def _load_dotenv_if_present(path: Path, profile: str = "") -> None:
     if not path.exists():
@@ -36,7 +45,8 @@ def _load_dotenv_if_present(path: Path, profile: str = "") -> None:
                     _DOTENV_VARS[key] = clean_value
 
 
-_load_dotenv_if_present(BASE_DIR / ".env")
+if not _DOTENV_DISABLED:
+    _load_dotenv_if_present(BASE_DIR / ".env")
 
 
 def _env(name: str, profile: str = "") -> str:
@@ -46,7 +56,6 @@ def _env(name: str, profile: str = "") -> str:
         candidates.extend((f"{prefix}_{name}", f"HTXBOT_{prefix}_{name}"))
     candidates.append(f"HTXBOT_{name}")
     candidates.append(name)
-    candidates.append(f"HTXBOT_{name}")
     for candidate in candidates:
         value = os.environ.get(candidate, _DOTENV_VARS.get(candidate, "")).strip()
         if value:
@@ -1718,6 +1727,7 @@ def _make_strategy_settings(
         ),
         enable_absolute_force_exit=False,
         absolute_force_exit_after_minutes=0.0,
+<<<<<<< Updated upstream
         enable_controlled_loss_exit=False,
         controlled_loss_after_zombie_minutes=0.0,
         controlled_loss_min_drawdown=0.0,
@@ -1726,6 +1736,16 @@ def _make_strategy_settings(
         controlled_loss_profit_bank_today_fraction=0.0,
         controlled_loss_profit_bank_7d_fraction=0.0,
         controlled_loss_min_bank_usdt=0.0,
+=======
+        enable_controlled_loss_exit=_env_bool("ENABLE_CONTROLLED_LOSS_EXIT", True, profile=name),
+        controlled_loss_after_zombie_minutes=_env_float("CONTROLLED_LOSS_AFTER_ZOMBIE_MINUTES", 180.0, profile=name),
+        controlled_loss_min_drawdown=_env_float("CONTROLLED_LOSS_MIN_DRAWDOWN", 0.025, profile=name),
+        controlled_loss_max_loss_on_notional=_env_float("CONTROLLED_LOSS_MAX_LOSS_ON_NOTIONAL", 0.06, profile=name),
+        controlled_loss_max_position_fraction=_env_float("CONTROLLED_LOSS_MAX_POSITION_FRACTION", 0.20, profile=name),
+        controlled_loss_profit_bank_today_fraction=_env_float("CONTROLLED_LOSS_PROFIT_BANK_TODAY_FRACTION", 0.75, profile=name),
+        controlled_loss_profit_bank_7d_fraction=_env_float("CONTROLLED_LOSS_PROFIT_BANK_7D_FRACTION", 0.12, profile=name),
+        controlled_loss_min_bank_usdt=_env_float("CONTROLLED_LOSS_MIN_BANK_USDT", 5.0, profile=name),
+>>>>>>> Stashed changes
         controlled_loss_min_move_fraction=_env_float(
             "CONTROLLED_LOSS_MIN_MOVE_FRACTION", 0.10, profile=name
         ),
@@ -1959,7 +1979,14 @@ def _make_external_price_feed_settings(name: str) -> ExternalPriceFeedSettings:
             "EXTERNAL_PRICE_MAX_INTERNAL_SPREAD_BPS", 30.0, profile=name
         ),
         entry_filter_enabled=_env_bool(
+<<<<<<< Updated upstream
             "EXTERNAL_PRICE_ENTRY_FILTER_ENABLED", True, profile=name
+=======
+            "EXTERNAL_PRICE_ENTRY_FILTER_ENABLED", False, profile=name
+        ),
+        score_penalty_multiplier=_env_float(
+            "EXTERNAL_PRICE_SCORE_PENALTY_MULTIPLIER", 0.5, profile=name
+>>>>>>> Stashed changes
         ),
         max_htx_premium_for_long_bps=_env_float(
             "EXTERNAL_PRICE_MAX_HTX_PREMIUM_FOR_LONG_BPS", 15.0, profile=name

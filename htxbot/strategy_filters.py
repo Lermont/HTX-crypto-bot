@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 
 import csv
-import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import config
-
-from .models import ExitLadderConfig, ExitLadderPreflight, SellLadderParams, TradeState
 
 
 class SignalFilters:

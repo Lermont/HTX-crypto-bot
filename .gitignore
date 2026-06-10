@@ -52,6 +52,7 @@ short/bot_futures_state*.json
 short/bot_futures_trades.csv
 short/bot_futures_cycle_stats.csv
 short/bot_futures_markets_cache.json
+short/bot_futures_short_markets_cache.json
 short/bot_futures_short_state*.json
 short/bot_futures_short_trades.csv
 short/bot_futures_short_cycle_stats.csv

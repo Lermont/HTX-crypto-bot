@@ -234,7 +234,7 @@ python -m pytest -q
 Текущий локальный baseline:
 
 ```text
-82 passed, 4 subtests passed
+411 passed, 34 subtests passed
 ```
 
 ## Структура Проекта
