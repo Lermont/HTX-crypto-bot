@@ -1,4 +1,3 @@
-from .models import SignalAnalyticsEvent
 # -*- coding: utf-8 -*-
 
 import atexit
@@ -10,6 +9,8 @@ import threading
 import time
 from dataclasses import asdict, fields
 from typing import Dict, List, Optional, Tuple
+
+from .models import DiagnosticEvent, SignalAnalyticsEvent
 
 import config
 

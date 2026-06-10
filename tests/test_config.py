@@ -7,7 +7,7 @@ from dataclasses import FrozenInstanceError
 
 import config
 import htxbot.config as package_config
-from htxbot.config import CONFIG_WARNINGS, _add_config_warning
+from config import CONFIG_WARNINGS, _add_config_warning
 from tests.config_overrides import override_frozen_config_fields
 
 

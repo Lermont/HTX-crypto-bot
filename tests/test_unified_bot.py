@@ -326,7 +326,7 @@ class FakeExchange:
     def fetch_funding_rate(self, symbol, params=None):
         self.fetch_funding_rate_calls += 1
         if isinstance(self.funding_rate_response, Exception):
-            raise self.funding_rate_response
+            raise self.funding_rate_response  # pylint: disable=raising-bad-type
         return dict(self.funding_rate_response)
 
     def fetch_ohlcv(self, symbol, timeframe="1m", since=None, limit=None, params=None):
