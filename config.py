@@ -427,6 +427,7 @@ class StrategySettings:
     short_entry_btc_max_return_30m: float
     entry_net_exposure_cap_equity_ratio: float
     exit_order_reject_retry_sec: float
+    pending_exit_ladder_alert_minutes: float
     max_buy_stages: int
     averaging_drawdown_steps: Tuple[float, ...]
     averaging_budget_fractions: Tuple[float, ...]
@@ -1652,6 +1653,9 @@ def _make_strategy_settings(
         ),
         exit_order_reject_retry_sec=max(
             0.0, _env_float("EXIT_ORDER_REJECT_RETRY_SEC", 900.0, profile=name)
+        ),
+        pending_exit_ladder_alert_minutes=max(
+            0.0, _env_float("PENDING_EXIT_LADDER_ALERT_MINUTES", 30.0, profile=name)
         ),
         max_buy_stages=_env_int(
             "MAX_BUY_STAGES",

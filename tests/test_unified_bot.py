@@ -2892,6 +2892,84 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertTrue(bot.exchange.created_orders)
                 for order in bot.exchange.created_orders:
                     self.assertEqual(float(order["params"].get("leverRate")), 50.0)
+                # the accepted leverage must be persisted so later orders skip
+                # the failing attempt entirely
+                self.assertEqual(state.leverage, 50.0)
+                self.assertEqual(bot.order_leverage_cache.get(SYMBOL), 50.0)
+
+    def test_stale_pending_exit_ladder_emits_alert(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY, pending_exit_ladder_alert_minutes=30.0
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 2.0
+                state.position_available = 0.0
+                state.position_frozen = 2.0
+                state.entry_price = 100.0
+                state.hard_stop_order = {"id": "hs1", "amount": 2.0, "side": "buy"}
+                state.pending_exit_ladder_reason = (
+                    "closeable_amount_reserved_by_existing_exit_orders"
+                )
+                state.pending_exit_ladder_since = time.time() - 45.0 * 60.0
+                state.sell_ladder_mode = "normal"
+                state.sell_ladder_signature = bot._pending_exit_ladder_signature(
+                    "normal", SYMBOL, state
+                )
+
+                self.assertTrue(
+                    bot._is_exit_ladder_waiting_for_closeable(SYMBOL, "normal")
+                )
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = [
+                        row
+                        for row in csv.DictReader(handle)
+                        if row["event"] == "exit_ladder_pending_stale"
+                    ]
+                self.assertEqual(len(rows), 1)
+                self.assertIn("pending_minutes=45.0", rows[0]["reason"])
+
+                # Same pending episode and alert bucket: no duplicate alert.
+                self.assertTrue(
+                    bot._is_exit_ladder_waiting_for_closeable(SYMBOL, "normal")
+                )
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = [
+                        row
+                        for row in csv.DictReader(handle)
+                        if row["event"] == "exit_ladder_pending_stale"
+                    ]
+                self.assertEqual(len(rows), 1)
+
+    def test_entry_high_leverage_risk_falls_back_to_sizing_leverage(self):
+        # HTX 1206 (high leverage risk): the entry order is retried once with the
+        # sizing leverage and the downgrade is remembered for the next rungs.
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = config.RUNTIME
+            risk = replace(config.RISK, account_leverage=50, leverage=30)
+            with override_config(RUNTIME=runtime, RISK=risk):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.reject_leverage_above = 30
+
+                bot._maybe_place_initial_buy(SYMBOL, self.entry_signal(ts=1001))
+
+                state = bot._get_state(SYMBOL)
+                self.assertTrue(state.entry_orders)
+                self.assertTrue(bot.exchange.created_orders)
+                for order in bot.exchange.created_orders:
+                    self.assertEqual(float(order["params"].get("leverRate")), 30.0)
+                self.assertEqual(
+                    bot._symbol_leverage_downgrades().get(SYMBOL), 30.0
+                )
+                # exactly one rejected attempt at leverage 50, the rest placed
+                # directly at the downgraded leverage
+                self.assertEqual(
+                    bot.exchange.create_order_calls,
+                    len(bot.exchange.created_orders) + 1,
+                )
 
     def test_persistent_leverage_mismatch_marks_exit_ladder_waiting(self):
         # AVAX regression: a dust position whose reduce-only orders are rejected
@@ -3848,7 +3926,11 @@ class UnifiedBotTests(unittest.TestCase):
 
         self.assertTrue(profile.exchange.set_leverage_on_start)
 
-    def test_entry_ladder_does_not_retry_with_lower_leverage(self):
+    def test_entry_ladder_leverage_fallback_is_bounded(self):
+        # HTX 1206 allows exactly one retry with the operator-configured sizing
+        # leverage (RISK.leverage) and never anything lower: when the exchange
+        # rejects both leverages the ladder stops instead of looping or placing
+        # orders with an arbitrary leverage.
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, post_only_enabled=False)
             risk = replace(config.RISK, leverage=30, account_leverage=50)
@@ -3867,9 +3949,10 @@ class UnifiedBotTests(unittest.TestCase):
                     reason="ema_initial_signal",
                 )
 
-                self.assertEqual(bot.exchange.create_order_calls, 1)
+                self.assertEqual(bot.exchange.create_order_calls, 2)
                 self.assertEqual(bot.exchange.created_orders, [])
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
+                self.assertNotIn(SYMBOL, bot._symbol_leverage_downgrades())
 
     def test_normal_exit_ladder_uses_fixed_take_profit_and_trailing_runner(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7398,6 +7481,7 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.short_entry_btc_max_return_30m, 0.0005)
             self.assertEqual(config.STRATEGY.entry_net_exposure_cap_equity_ratio, 1.0)
             self.assertEqual(config.STRATEGY.exit_order_reject_retry_sec, 900.0)
+            self.assertEqual(config.STRATEGY.pending_exit_ladder_alert_minutes, 30.0)
             self.assertTrue(config.STRATEGY.hard_stop_loss_atr_enabled)
             self.assertEqual(config.STRATEGY.hard_stop_loss_atr_multiplier, 2.0)
             self.assertEqual(config.STRATEGY.hard_stop_loss_atr_max_pct, 0.03)

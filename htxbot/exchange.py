@@ -1959,6 +1959,38 @@ class ExchangeMixin:
                 return candidate
         return 0.0
 
+    def _remember_position_order_leverage(self, symbol: str, leverage: float):
+        """Persist the leverage HTX actually accepted so later orders skip the 1349 retry."""
+        leverage = self._safe_float(leverage, 0.0)
+        if leverage <= 0:
+            return
+        if not hasattr(self, "order_leverage_cache"):
+            self.order_leverage_cache = {}
+        self.order_leverage_cache[symbol] = leverage
+        state = self._get_state(symbol)
+        if (
+            self._safe_float(state.position_size, 0.0) > 0
+            and abs(self._safe_float(state.leverage, 0.0) - leverage) > 1e-9
+        ):
+            state.leverage = leverage
+            save_state = getattr(self, "_save_state", None)
+            if save_state:
+                save_state()
+
+    def _symbol_leverage_downgrades(self) -> dict:
+        cache = getattr(self, "_symbol_leverage_downgrade_cache", None)
+        if cache is None:
+            cache = {}
+            self._symbol_leverage_downgrade_cache = cache
+        return cache
+
+    def _entry_leverage_fallback(self, symbol: str, rejected_leverage: float) -> float:
+        """Lower leverage to retry with after HTX 1206 (high leverage risk) on entries."""
+        sizing = self._safe_float(getattr(config.RISK, "leverage", 0.0), 0.0)
+        if sizing > 0 and sizing < self._safe_float(rejected_leverage, 0.0) - 1e-9:
+            return sizing
+        return 0.0
+
     def _create_one_way_order(
         self,
         req: Optional[OrderRequest] = None,
@@ -2024,7 +2056,7 @@ class ExchangeMixin:
                 )
                 if req.extra_params:
                     retry_params.update(dict(req.extra_params))
-                return self.exchange.create_order(
+                order = self.exchange.create_order(
                     symbol=req.symbol,
                     type=req.order_type,
                     side=req.side,
@@ -2032,6 +2064,8 @@ class ExchangeMixin:
                     price=req.price,
                     params=retry_params,
                 )
+                self._remember_position_order_leverage(req.symbol, retry_leverage)
+                return order
 
             if not self._is_hedge_mode_error(exc):
                 raise

@@ -2123,6 +2123,7 @@ class ExitStrategy:
                 ),
             )
         elapsed = now - pending_since
+        self._maybe_alert_stale_pending_exit_ladder(symbol, state, pending_since, now)
         if elapsed < retry_after:
             return True
 
@@ -2171,6 +2172,48 @@ class ExitStrategy:
             reason="pending_closeable_retry",
         )
         return False
+
+    def _maybe_alert_stale_pending_exit_ladder(
+        self, symbol: str, state: TradeState, pending_since: float, now: float
+    ):
+        """Operational alert: a position whose exit ladder has been pending for too
+        long (closeable reserved by close/hard-stop orders, persistent order
+        rejections, ...) must not hang silently."""
+        alert_minutes = max(
+            0.0,
+            self._safe_float(
+                getattr(config.STRATEGY, "pending_exit_ladder_alert_minutes", 0.0), 0.0
+            ),
+        )
+        if alert_minutes <= 0 or pending_since <= 0:
+            return
+        alert_sec = alert_minutes * 60.0
+        elapsed = now - pending_since
+        if elapsed < alert_sec:
+            return
+        bucket = int(elapsed // alert_sec)
+        alerted = getattr(self, "_pending_exit_ladder_alerted", None)
+        if alerted is None:
+            alerted = {}
+            self._pending_exit_ladder_alerted = alerted
+        pending_reason = str(state.pending_exit_ladder_reason or "")
+        key = (symbol, pending_reason)
+        if alerted.get(key) == (pending_since, bucket):
+            return
+        alerted[key] = (pending_since, bucket)
+        self._log_event(
+            "WARNING",
+            f"Exit ladder for {symbol} has been pending for {elapsed / 60.0:.0f} minutes "
+            f"({pending_reason or 'closeable unavailable'}); position is waiting without a working exit ladder",
+            event="exit_ladder_pending_stale",
+            symbol=symbol,
+            side=config.EXIT_SIDE,
+            position_size=state.position_size,
+            reason=(
+                f"{pending_reason or 'closeable_amount_reserved_by_existing_exit_orders'};"
+                f"pending_minutes={elapsed / 60.0:.1f};alert_minutes={alert_minutes:g}"
+            ),
+        )
 
     def _mark_exit_ladder_waiting_for_closeable(
         self,

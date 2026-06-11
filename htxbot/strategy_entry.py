@@ -64,6 +64,11 @@ class EntryStrategy:
             self._set_leverage_safe(symbol, int(configured_leverage))
 
         account_leverage = self._fetch_account_order_leverage(symbol)
+        downgraded_leverage = self._safe_float(
+            self._symbol_leverage_downgrades().get(symbol), 0.0
+        )
+        if 0 < downgraded_leverage < account_leverage:
+            account_leverage = downgraded_leverage
         entry_side = config.ENTRY_SIDE
         entry_label = "Sell" if entry_side == "sell" else "Buy"
         if account_leverage <= 0:
@@ -210,8 +215,71 @@ class EntryStrategy:
                         )
                         continue
                 else:
+                    reject_reason = ""
                     if self._is_high_leverage_risk_error(exc):
-                        reject_reason = "manual_account_leverage_rejected"
+                        fallback_leverage = self._entry_leverage_fallback(
+                            symbol, order_leverage
+                        )
+                        if fallback_leverage > 0:
+                            try:
+                                order = self._create_one_way_order(
+                                    symbol=symbol,
+                                    order_type="limit",
+                                    side=entry_side,
+                                    amount=contracts,
+                                    price=price,
+                                    post_only=config.RUNTIME.post_only_enabled,
+                                    leverage=fallback_leverage,
+                                )
+                                order_id = str(order.get("id"))
+                                self._symbol_leverage_downgrades()[symbol] = (
+                                    fallback_leverage
+                                )
+                                self._log_event(
+                                    "WARNING",
+                                    f"{entry_label} entry order leverage lowered for {symbol}: "
+                                    f"HTX rejected {order_leverage:g} as high risk, placed with {fallback_leverage:g}",
+                                    event="entry_ladder_placed",
+                                    symbol=symbol,
+                                    side=entry_side,
+                                    price=price,
+                                    amount=contracts,
+                                    reason=(
+                                        "high_leverage_fallback;"
+                                        f"rejected_leverage={order_leverage:g};"
+                                        f"fallback_leverage={fallback_leverage:g}"
+                                    ),
+                                    exception=exc,
+                                )
+                                order_leverage = fallback_leverage
+                                account_leverage = fallback_leverage
+                                # fall through to the success path below
+                            except Exception as fallback_exc:
+                                self._log_event(
+                                    "WARNING",
+                                    f"{entry_label} entry order rejected for {symbol} after leverage fallback: {fallback_exc}",
+                                    event="entry_order_canceled",
+                                    symbol=symbol,
+                                    side=entry_side,
+                                    price=price,
+                                    amount=contracts,
+                                    reason="manual_account_leverage_rejected",
+                                    exception=fallback_exc,
+                                )
+                                continue
+                        else:
+                            self._log_event(
+                                "WARNING",
+                                f"{entry_label} entry order rejected for {symbol}: {exc}",
+                                event="entry_order_canceled",
+                                symbol=symbol,
+                                side=entry_side,
+                                price=price,
+                                amount=contracts,
+                                reason="manual_account_leverage_rejected",
+                                exception=exc,
+                            )
+                            continue
                     elif self._is_hedge_mode_error(exc):
                         reject_reason = "hedge_mode_error"
                     elif self._is_insufficient_margin_error(exc):
@@ -225,29 +293,30 @@ class EntryStrategy:
                         self._invalidate_account_snapshot_cache(symbol)
                     else:
                         reject_reason = "entry_order_rejected"
-                    self._log_event(
-                        "WARNING",
-                        f"{entry_label} entry order rejected for {symbol}: {exc}",
-                        event="entry_order_canceled",
-                        symbol=symbol,
-                        side=entry_side,
-                        price=price,
-                        amount=contracts,
-                        reason=reject_reason,
-                        exception=exc,
-                        diagnostic_context={
-                            "stage": index,
-                            "stage_notional": notional,
-                            "stage_margin": notional / max(order_leverage, 1.0),
-                            "planned_budget": margin_budget,
-                            "account_leverage": order_leverage,
-                            "fresh_account": fresh_account,
-                            "reserve": reserve,
-                        },
-                    )
-                    if reject_reason == "entry_insufficient_margin":
-                        break
-                    continue
+                    if reject_reason:
+                        self._log_event(
+                            "WARNING",
+                            f"{entry_label} entry order rejected for {symbol}: {exc}",
+                            event="entry_order_canceled",
+                            symbol=symbol,
+                            side=entry_side,
+                            price=price,
+                            amount=contracts,
+                            reason=reject_reason,
+                            exception=exc,
+                            diagnostic_context={
+                                "stage": index,
+                                "stage_notional": notional,
+                                "stage_margin": notional / max(order_leverage, 1.0),
+                                "planned_budget": margin_budget,
+                                "account_leverage": order_leverage,
+                                "fresh_account": fresh_account,
+                                "reserve": reserve,
+                            },
+                        )
+                        if reject_reason == "entry_insufficient_margin":
+                            break
+                        continue
 
             ref = {
                 "id": order_id,
