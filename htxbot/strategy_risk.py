@@ -35,6 +35,36 @@ class RiskManager:
                     )
         return total
 
+    def _net_side_exposure_notional(self) -> float:
+        """Net open notional toward this profile's side across the shared account.
+
+        Positions and open entry orders of bots trading the same side add to the
+        exposure; the sibling profile's positions (combined long/short mode)
+        offset it. Standalone deployments only see their own side, which keeps
+        the cap conservative.
+        """
+        own_side = str(config.POSITION_SIDE or "").lower()
+        net = 0.0
+        for bot in self._account_pnl_bots():
+            profile = getattr(bot, "profile", None)
+            side = str(getattr(profile, "position_side", "") or own_side).lower()
+            sign = 1.0 if side == own_side else -1.0
+            states = getattr(bot, "states", {}) or {}
+            for symbol, state in list(states.items()):
+                if symbol not in getattr(bot, "market_by_symbol", {}):
+                    continue
+                if state.position_size > 0 and state.entry_price > 0:
+                    net += sign * bot._contracts_to_notional(
+                        symbol, state.position_size, state.entry_price
+                    )
+                for ref in state.entry_orders or []:
+                    net += sign * bot._contracts_to_notional(
+                        symbol,
+                        bot._safe_float(ref.get("amount"), 0.0),
+                        bot._safe_float(ref.get("price"), 0.0),
+                    )
+        return net
+
     def _symbol_open_notional(self, symbol: str, state: TradeState) -> float:
         total = self._contracts_to_notional(symbol, state.position_size, state.entry_price)
         for ref in state.entry_orders or []:

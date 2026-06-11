@@ -980,6 +980,26 @@ class EntryStrategy:
             state.average_stage = previous_average_stage
         self._save_state()
 
+    def _short_entry_btc_momentum_block_reason(self, signal: Optional[dict]) -> str:
+        """Hard gate: do not open new shorts while BTC 30m momentum is positive.
+
+        Unlike the score penalty driven by ``btc_entry_valid``, this cannot be
+        outweighed by a strong symbol score. Applies to new short entries only.
+        """
+        if config.POSITION_SIDE != "short":
+            return ""
+        max_return = self._safe_float(
+            getattr(config.STRATEGY, "short_entry_btc_max_return_30m", 0.0), 0.0
+        )
+        btc_return = self._safe_float((signal or {}).get("btc_return_30m"), 0.0)
+        if btc_return <= max_return:
+            return ""
+        return (
+            "short_entry_btc_momentum_block;"
+            f"btc_return_30m={btc_return:.6f};"
+            f"max_return_30m={max_return:.6f}"
+        )
+
     def _maybe_place_initial_buy(self, symbol: str, signal: Optional[dict]):
         if symbol not in self.entry_symbols:
             return
@@ -1011,6 +1031,27 @@ class EntryStrategy:
                 context={"macro_context": macro_context},
             )
             self._log_macro_action_blocked("macro_entry_blocked", symbol, signal, macro_context)
+            return
+        btc_block_reason = self._short_entry_btc_momentum_block_reason(signal)
+        if btc_block_reason:
+            self._record_signal_analytics(
+                "entry_gate_checked",
+                symbol=symbol,
+                signal=signal,
+                block_reason=btc_block_reason,
+            )
+            logged = getattr(self, "_entry_gate_skip_logged", set())
+            key = (symbol, (signal or {}).get("ts"), "short_entry_btc_momentum_block")
+            if key not in logged:
+                logged.add(key)
+                self._entry_gate_skip_logged = logged
+                self._log_event(
+                    "DEBUG",
+                    f"Signal skipped for {symbol}: BTC 30m momentum gate",
+                    event="signal_valid",
+                    symbol=symbol,
+                    reason=btc_block_reason,
+                )
             return
         gate_reason = self._entry_gate_block_reason(symbol, signal)
         if gate_reason:
@@ -1135,6 +1176,26 @@ class EntryStrategy:
                 f"planned_notional={planned_notional:.8f};"
                 f"min_notional={min_planned_notional:.8f};{budget_reason}"
             )
+        net_exposure_cap_ratio = max(
+            0.0,
+            self._safe_float(
+                getattr(config.STRATEGY, "entry_net_exposure_cap_equity_ratio", 0.0),
+                0.0,
+            ),
+        )
+        equity = self._safe_float(budget_context.get("equity"), 0.0)
+        if budget > 0 and net_exposure_cap_ratio > 0 and equity > 0:
+            net_side_notional = self._net_side_exposure_notional()
+            cap_notional = net_exposure_cap_ratio * equity
+            if net_side_notional + planned_notional > cap_notional:
+                budget = 0.0
+                budget_reason = (
+                    "entry_net_exposure_cap_exceeded;"
+                    f"net_side_notional={net_side_notional:.8f};"
+                    f"planned_notional={planned_notional:.8f};"
+                    f"cap_notional={cap_notional:.8f};"
+                    f"equity={equity:.8f};{budget_reason}"
+                )
         self._record_signal_analytics(
             "entry_budget_calculated" if budget > 0 else "entry_budget_blocked",
             symbol=symbol,

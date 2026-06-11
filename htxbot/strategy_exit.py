@@ -2086,7 +2086,12 @@ class ExitStrategy:
             state = self._get_state(symbol)
         if state.sell_ladder_orders:
             return False
-        if state.position_available > 0:
+        pending_reason = str(getattr(state, "pending_exit_ladder_reason", "") or "")
+        # Persistent exchange rejections (e.g. HTX 1349 leverage mismatch) are not
+        # solved by closeable volume becoming available; they must honor the
+        # backoff below instead of being retried on every poll.
+        persistent_reject = pending_reason.startswith("order_leverage_mismatch")
+        if state.position_available > 0 and not persistent_reject:
             return False
         current_signature = str(state.sell_ladder_signature or "")
         expected_signature = self._pending_exit_ladder_signature(mode, symbol, state)
@@ -2110,9 +2115,32 @@ class ExitStrategy:
             self._safe_float(getattr(config.RUNTIME, "order_timeout_sec", 0.0), 0.0),
             self._safe_float(getattr(config.RUNTIME, "poll_interval_sec", 0.0), 0.0),
         )
+        if persistent_reject:
+            retry_after = max(
+                retry_after,
+                self._safe_float(
+                    getattr(config.STRATEGY, "exit_order_reject_retry_sec", 0.0), 0.0
+                ),
+            )
         elapsed = now - pending_since
         if elapsed < retry_after:
             return True
+
+        if persistent_reject:
+            state.sell_ladder_signature = ""
+            self._clear_pending_exit_ladder(state)
+            self._refresh_active_side(state)
+            self._save_state()
+            self._log_event(
+                "WARNING",
+                f"Retrying delayed {config.EXIT_SIDE} exit ladder for {symbol} after persistent order rejection backoff",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=config.EXIT_SIDE,
+                position_size=state.position_size,
+                reason=f"{pending_reason};pending_reject_backoff_retry",
+            )
+            return False
 
         if state.position_available <= 0 and state.position_frozen > 0:
             state.pending_exit_ladder_since = pending_since  # Keep original start time
@@ -2696,6 +2724,28 @@ class ExitStrategy:
                                 exception=retry_exc,
                             )
                             break
+                        if self._is_order_leverage_mismatch_error(retry_exc):
+                            if allocated <= 0:
+                                self._mark_exit_ladder_waiting_for_closeable(
+                                    symbol,
+                                    mode,
+                                    "order_leverage_mismatch",
+                                    amount=contracts,
+                                    exception=retry_exc,
+                                )
+                                return
+                            self._log_event(
+                                "WARNING",
+                                f"{exit_label} reduce-only ladder stopped for {symbol}: order leverage does not match the open position",
+                                event="reduce_only_violation_prevented",
+                                symbol=symbol,
+                                side=exit_side,
+                                price=adjusted_price,
+                                amount=contracts,
+                                reason="order_leverage_mismatch_partial",
+                                exception=retry_exc,
+                            )
+                            break
                         self._log_event(
                             "ERROR",
                             f"{exit_label} reduce-only order failed for {symbol} after HTX band adjustment: {retry_exc}",
@@ -2728,6 +2778,28 @@ class ExitStrategy:
                             price=price,
                             amount=contracts,
                             reason="partial_exit_ladder_closeable_unavailable",
+                            exception=exc,
+                        )
+                        break
+                    if self._is_order_leverage_mismatch_error(exc):
+                        if allocated <= 0:
+                            self._mark_exit_ladder_waiting_for_closeable(
+                                symbol,
+                                mode,
+                                "order_leverage_mismatch",
+                                amount=contracts,
+                                exception=exc,
+                            )
+                            return
+                        self._log_event(
+                            "WARNING",
+                            f"{exit_label} reduce-only ladder stopped for {symbol}: order leverage does not match the open position",
+                            event="reduce_only_violation_prevented",
+                            symbol=symbol,
+                            side=exit_side,
+                            price=price,
+                            amount=contracts,
+                            reason="order_leverage_mismatch_partial",
                             exception=exc,
                         )
                         break

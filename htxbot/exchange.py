@@ -1699,6 +1699,13 @@ class ExchangeMixin:
             or "amount available to close" in text
         )
 
+    def _is_order_leverage_mismatch_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            '"err_code":1349' in text
+            or "leverage for new orders does not match" in text
+        )
+
     def _is_hard_stop_loss_trigger_reached_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
         has_code = bool(re.search(r'"err[_-]?code"\s*:\s*"?1407"?', text))
@@ -1930,6 +1937,28 @@ class ExchangeMixin:
             )
             return False
 
+    def _position_order_leverage(self, symbol: str) -> float:
+        """Leverage of the currently open position tracked in state (0 when flat).
+
+        HTX rejects orders whose lever_rate differs from the open position's
+        leverage (err_code 1349), so reduce-only exit orders must follow the
+        position, not the configured account leverage.
+        """
+        state = self._get_state(symbol)
+        if self._safe_float(state.position_size, 0.0) <= 0:
+            return 0.0
+        return max(0.0, self._safe_float(state.leverage, 0.0))
+
+    def _reduce_only_leverage_retry_candidate(self, symbol: str, sent: float) -> float:
+        candidates = (
+            self._position_order_leverage(symbol),
+            self._safe_float(getattr(config.RISK, "account_leverage", 0.0), 0.0),
+        )
+        for candidate in candidates:
+            if candidate > 0 and abs(candidate - self._safe_float(sent, 0.0)) > 1e-9:
+                return candidate
+        return 0.0
+
     def _create_one_way_order(
         self,
         req: Optional[OrderRequest] = None,
@@ -1947,7 +1976,12 @@ class ExchangeMixin:
             )
 
         if req.leverage is None:
-            req.leverage = self._fetch_account_order_leverage(req.symbol)
+            if req.reduce_only:
+                req.leverage = self._position_order_leverage(
+                    req.symbol
+                ) or self._fetch_account_order_leverage(req.symbol)
+            else:
+                req.leverage = self._fetch_account_order_leverage(req.symbol)
         params = self._order_params(
             reduce_only=req.reduce_only, post_only=req.post_only, leverage=req.leverage
         )
@@ -1963,6 +1997,42 @@ class ExchangeMixin:
                 params=params,
             )
         except Exception as exc:
+            if req.reduce_only and self._is_order_leverage_mismatch_error(exc):
+                retry_leverage = self._reduce_only_leverage_retry_candidate(
+                    req.symbol, self._safe_float(req.leverage, 0.0)
+                )
+                if retry_leverage <= 0:
+                    raise
+                self._log_event(
+                    "WARNING",
+                    f"HTX rejected reduce-only {req.side} {req.symbol} because order leverage "
+                    f"{req.leverage} does not match the open position; retrying with leverage {retry_leverage}",
+                    event="futures_setup",
+                    symbol=req.symbol,
+                    side=req.side,
+                    reason=(
+                        "reduce_only_leverage_realigned;"
+                        f"sent_leverage={self._safe_float(req.leverage, 0.0):.8g};"
+                        f"retry_leverage={retry_leverage:.8g}"
+                    ),
+                    exception=exc,
+                )
+                retry_params = self._order_params(
+                    reduce_only=req.reduce_only,
+                    post_only=req.post_only,
+                    leverage=retry_leverage,
+                )
+                if req.extra_params:
+                    retry_params.update(dict(req.extra_params))
+                return self.exchange.create_order(
+                    symbol=req.symbol,
+                    type=req.order_type,
+                    side=req.side,
+                    amount=req.amount,
+                    price=req.price,
+                    params=retry_params,
+                )
+
             if not self._is_hedge_mode_error(exc):
                 raise
 

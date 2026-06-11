@@ -396,6 +396,7 @@ class StrategySettings:
     signal_score_reference: float
     signal_ema_gap_weight: float
     entry_min_score: float
+    entry_min_score_counter_macro: float
     entry_min_rs60_abs: float
     entry_min_rs30_abs: float
     entry_macro_invalid_penalty: float
@@ -423,6 +424,9 @@ class StrategySettings:
     entry_spread_filter_max_bps: float
     entry_spread_filter_block_if_unavailable: bool
     entry_min_planned_notional_quote: float
+    short_entry_btc_max_return_30m: float
+    entry_net_exposure_cap_equity_ratio: float
+    exit_order_reject_retry_sec: float
     max_buy_stages: int
     averaging_drawdown_steps: Tuple[float, ...]
     averaging_budget_fractions: Tuple[float, ...]
@@ -1560,6 +1564,9 @@ def _make_strategy_settings(
         signal_score_reference=1.0,
         signal_ema_gap_weight=1.0,
         entry_min_score=_env_float("ENTRY_MIN_SCORE", 0.03, profile=name),
+        entry_min_score_counter_macro=_env_float(
+            "ENTRY_MIN_SCORE_COUNTER_MACRO", 0.06, profile=name
+        ),
         entry_min_rs60_abs=_env_float("ENTRY_MIN_RS60_ABS", 0.002, profile=name),
         entry_min_rs30_abs=_env_float("ENTRY_MIN_RS30_ABS", 0.001, profile=name),
         entry_macro_invalid_penalty=_env_float(
@@ -1637,6 +1644,15 @@ def _make_strategy_settings(
         entry_min_planned_notional_quote=max(
             0.0, _env_float("ENTRY_MIN_PLANNED_NOTIONAL_QUOTE", 0.0, profile=name)
         ),
+        short_entry_btc_max_return_30m=_env_float(
+            "SHORT_ENTRY_BTC_MAX_RETURN_30M", 0.0005, profile=name
+        ),
+        entry_net_exposure_cap_equity_ratio=max(
+            0.0, _env_float("NET_EXPOSURE_CAP_EQUITY_RATIO", 1.0, profile=name)
+        ),
+        exit_order_reject_retry_sec=max(
+            0.0, _env_float("EXIT_ORDER_REJECT_RETRY_SEC", 900.0, profile=name)
+        ),
         max_buy_stages=_env_int(
             "MAX_BUY_STAGES",
             strategy_context.ema_max_averaging_stages + 1,
@@ -1695,7 +1711,7 @@ def _make_strategy_settings(
         hard_stop_loss_enabled=_env_bool("HARD_STOP_LOSS_ENABLED", True, profile=name),
         hard_stop_loss_pct=hard_stop_loss_pct,
         hard_stop_loss_min_emergency_pct=_env_float(
-            "HARD_STOP_LOSS_MIN_EMERGENCY_PCT", 0.04, profile=name
+            "HARD_STOP_LOSS_MIN_EMERGENCY_PCT", 0.03, profile=name
         ),
         hard_stop_loss_atr_enabled=_env_bool(
             "HARD_STOP_LOSS_ATR_ENABLED", True, profile=name

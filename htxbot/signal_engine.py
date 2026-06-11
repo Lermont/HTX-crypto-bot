@@ -310,6 +310,19 @@ class SignalMixin:
     def _directional_entry_value(self, value: float) -> float:
         return -value if config.POSITION_SIDE == "short" else value
 
+    def _entry_side_counter_macro_bias(self) -> bool:
+        """True when the macro overlay scales this profile's side budget below 1."""
+        macro_getter = getattr(self, "_macro_context_for_trading", None)
+        if not macro_getter:
+            return False
+        context = macro_getter() or {}
+        key = (
+            "short_budget_multiplier"
+            if config.POSITION_SIDE == "short"
+            else "long_budget_multiplier"
+        )
+        return self._safe_float(context.get(key), 1.0) < 1.0 - 1e-9
+
     def _entry_thresholds(self, crowded: bool = False) -> dict:
         strategy = config.STRATEGY
         thresholds = {
@@ -317,6 +330,17 @@ class SignalMixin:
             "rs60": self._safe_float(strategy.entry_min_rs60_abs, 0.0),
             "rs30": self._safe_float(strategy.entry_min_rs30_abs, 0.0),
         }
+        counter_macro_min = max(
+            0.0,
+            self._safe_float(
+                getattr(strategy, "entry_min_score_counter_macro", 0.0), 0.0
+            ),
+        )
+        if (
+            counter_macro_min > thresholds["score"]
+            and self._entry_side_counter_macro_bias()
+        ):
+            thresholds["score"] = counter_macro_min
         if crowded:
             thresholds["score"] = max(
                 thresholds["score"],

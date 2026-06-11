@@ -187,6 +187,7 @@ class FakeExchange:
         self.account_leverage = 50
         self.account_position_mode = "single_side"
         self.reject_reduce_only_closeable_amount = False
+        self.reduce_only_leverage_must_match = None
         self.reject_stop_loss_trigger_crossed = False
         self.create_order_failures = []
         self.create_order_calls = 0
@@ -368,6 +369,16 @@ class FakeExchange:
                 'htx {"status":"error","err_code":1492,'
                 '"err_msg":"Amount of Reduce Only order exceeds the amount available to close."}'
             )
+        if self.reduce_only_leverage_must_match is not None and params.get(
+            "reduceOnly"
+        ):
+            leverage = float(params.get("leverRate") or 0.0)
+            if leverage != float(self.reduce_only_leverage_must_match):
+                raise RuntimeError(
+                    'htx {"status":"error","err_code":1349,'
+                    '"err_msg":"The leverage for new orders does not match current positions. '
+                    'Please change the leverage."}'
+                )
         if self.reject_leverage_above is not None:
             leverage = float(params.get("leverRate") or 0.0)
             if leverage > self.reject_leverage_above:
@@ -2143,6 +2154,165 @@ class UnifiedBotTests(unittest.TestCase):
                 "entry_planned_notional_below_min", rows[-1]["block_reason"]
             )
 
+    def test_short_entry_blocked_when_btc_momentum_positive(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = config.RUNTIME
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                signal = self.entry_signal(ts=1001, rs30=-0.002, rs60=-0.003)
+                signal["btc_return_30m"] = 0.003
+
+                bot._maybe_place_initial_buy(SYMBOL, signal)
+
+                self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertIn(
+                    "short_entry_btc_momentum_block", rows[-1]["block_reason"]
+                )
+
+                falling = self.entry_signal(ts=1002, rs30=-0.002, rs60=-0.003)
+                falling["btc_return_30m"] = -0.002
+
+                bot._maybe_place_initial_buy(SYMBOL, falling)
+
+                self.assertTrue(bot._get_state(SYMBOL).entry_orders)
+
+    def test_short_entry_btc_momentum_gate_ignores_long_profile(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signal = self.entry_signal(ts=1001)
+            signal["btc_return_30m"] = 0.003
+
+            self.assertEqual(
+                bot._short_entry_btc_momentum_block_reason(signal), ""
+            )
+
+    def test_counter_macro_bias_raises_entry_min_score(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = config.RUNTIME
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                self.set_macro_context(bot, ok=True, short_budget_multiplier=0.7)
+                signal = self.entry_signal(
+                    ts=1001, score=0.05, rs30=-0.002, rs60=-0.003
+                )
+
+                bot._maybe_place_initial_buy(SYMBOL, signal)
+
+                self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertIn(
+                    "entry_weighted_score_below_min", rows[-1]["block_reason"]
+                )
+                self.assertIn("min=0.060000", rows[-1]["block_reason"])
+
+                self.set_macro_context(bot, ok=True, short_budget_multiplier=1.0)
+                neutral_signal = self.entry_signal(
+                    ts=1002, score=0.05, rs30=-0.002, rs60=-0.003
+                )
+
+                bot._maybe_place_initial_buy(SYMBOL, neutral_signal)
+
+                self.assertTrue(bot._get_state(SYMBOL).entry_orders)
+
+    def test_net_side_exposure_nets_combined_profiles(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            short_dir = Path(raw_tmp) / "short"
+            long_dir = Path(raw_tmp) / "long"
+            short_dir.mkdir()
+            long_dir.mkdir()
+            with config.use_profile("short"):
+                bot = self.make_bot(short_dir)
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.entry_price = 100.0
+            with config.use_profile("long"):
+                sibling = self.make_bot(long_dir)
+                sibling_state = sibling._get_state(SYMBOL)
+                sibling_state.position_size = 3.0
+                sibling_state.entry_price = 100.0
+            bot.account_pnl_bots = [bot, sibling]
+            sibling.account_pnl_bots = [bot, sibling]
+
+            with config.use_profile("short"):
+                self.assertAlmostEqual(bot._net_side_exposure_notional(), 700.0)
+            with config.use_profile("long"):
+                self.assertAlmostEqual(
+                    sibling._net_side_exposure_notional(), -700.0
+                )
+
+    def test_entry_blocked_by_net_exposure_cap(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = config.RUNTIME
+            strategy = replace(
+                config.STRATEGY, entry_net_exposure_cap_equity_ratio=0.05
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+
+                bot._maybe_place_initial_buy(
+                    SYMBOL, self.entry_signal(ts=1003, rs30=-0.002, rs60=-0.003)
+                )
+
+                self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
+                    rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[-1]["decision"], "entry_budget_blocked")
+            self.assertIn(
+                "entry_net_exposure_cap_exceeded", rows[-1]["block_reason"]
+            )
+
+    def test_net_exposure_cap_respects_combined_long_offset(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = config.RUNTIME
+            strategy = replace(
+                config.STRATEGY, entry_net_exposure_cap_equity_ratio=1.0
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                short_dir = Path(raw_tmp) / "short"
+                long_dir = Path(raw_tmp) / "long"
+                short_dir.mkdir()
+                long_dir.mkdir()
+                bot = self.make_bot(short_dir)
+                bot.market_by_symbol[SECOND_SYMBOL] = SECOND_MARKET
+                existing = bot._get_state(SECOND_SYMBOL)
+                existing.position_size = 9.0
+                existing.entry_price = 100.0
+
+                bot._maybe_place_initial_buy(
+                    SYMBOL, self.entry_signal(ts=1003, rs30=-0.002, rs60=-0.003)
+                )
+
+                self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertIn(
+                    "entry_net_exposure_cap_exceeded", rows[-1]["block_reason"]
+                )
+
+                with config.use_profile("long"):
+                    sibling = self.make_bot(long_dir)
+                    sibling_state = sibling._get_state(SYMBOL)
+                    sibling_state.position_size = 9.0
+                    sibling_state.entry_price = 100.0
+                bot.account_pnl_bots = [bot, sibling]
+
+                bot._maybe_place_initial_buy(
+                    SYMBOL, self.entry_signal(ts=1004, rs30=-0.002, rs60=-0.003)
+                )
+
+                self.assertTrue(bot._get_state(SYMBOL).entry_orders)
+
     def test_external_price_stale_is_ignored_by_default_for_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = config.RUNTIME
@@ -2658,6 +2828,222 @@ class UnifiedBotTests(unittest.TestCase):
                     [order["price"] for order in bot.exchange.created_orders], [100.8]
                 )
                 self.assertEqual(state.exit_runner_contracts, 70.0)
+
+    def test_reduce_only_exit_ladder_uses_position_leverage(self):
+        # Regression for the 2026-06-11 AVAX churn: position opened at leverage 30
+        # while ACCOUNT_LEVERAGE=50; reduce-only exits must follow the position
+        # leverage, otherwise HTX rejects every order with err_code 1349.
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            risk = replace(config.RISK, account_leverage=50)
+            with override_config(RUNTIME=runtime, RISK=risk):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.reduce_only_leverage_must_match = 30
+                state = bot._get_state(SYMBOL)
+                state.position_size = 100.0
+                state.position_available = 100.0
+                state.entry_price = 100.0
+                state.leverage = 30.0
+
+                bot._place_sell_ladder(
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
+                )
+
+                self.assertTrue(state.sell_ladder_orders)
+                self.assertTrue(bot.exchange.created_orders)
+                for order in bot.exchange.created_orders:
+                    self.assertTrue(order["params"].get("reduceOnly"))
+                    self.assertEqual(float(order["params"].get("leverRate")), 30.0)
+
+    def test_reduce_only_leverage_mismatch_retries_with_account_leverage(self):
+        # State leverage can be stale; after a 1349 rejection the order is retried
+        # once with the alternate (configured account) leverage and succeeds.
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            risk = replace(config.RISK, account_leverage=50)
+            with override_config(RUNTIME=runtime, RISK=risk):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.reduce_only_leverage_must_match = 50
+                state = bot._get_state(SYMBOL)
+                state.position_size = 100.0
+                state.position_available = 100.0
+                state.entry_price = 100.0
+                state.leverage = 30.0
+
+                bot._place_sell_ladder(
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=100.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=100.0,
+                        mode="normal",
+                    )
+                )
+
+                self.assertTrue(state.sell_ladder_orders)
+                self.assertTrue(bot.exchange.created_orders)
+                for order in bot.exchange.created_orders:
+                    self.assertEqual(float(order["params"].get("leverRate")), 50.0)
+
+    def test_persistent_leverage_mismatch_marks_exit_ladder_waiting(self):
+        # AVAX regression: a dust position whose reduce-only orders are rejected
+        # no matter the leverage must park the ladder in the pending state with a
+        # long backoff instead of retrying on every poll and spamming
+        # exit_order_rejected errors.
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            risk = replace(config.RISK, account_leverage=50)
+            with override_config(RUNTIME=runtime, RISK=risk):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.reduce_only_leverage_must_match = 20
+                state = bot._get_state(SYMBOL)
+                state.position_size = 2.0
+                state.position_available = 2.0
+                state.entry_price = 100.0
+                state.leverage = 30.0
+                state.hard_stop_order = {"id": "hs1", "amount": 2.0, "side": "buy"}
+
+                bot._place_sell_ladder(
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=2.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=2.0,
+                        mode="normal",
+                    )
+                )
+
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(
+                    state.pending_exit_ladder_reason, "order_leverage_mismatch"
+                )
+                self.assertTrue(
+                    str(state.sell_ladder_signature).startswith("pending_closeable:")
+                )
+
+                calls_after_first_attempt = bot.exchange.create_order_calls
+                self.assertGreater(calls_after_first_attempt, 0)
+                # While the backoff runs, maintenance polls must not resend orders
+                # even though position_available is positive (trigger stops do not
+                # freeze volume on HTX).
+                self.assertTrue(
+                    bot._is_exit_ladder_waiting_for_closeable(SYMBOL, "normal")
+                )
+                self.assertTrue(
+                    bot._is_exit_ladder_waiting_for_closeable(SYMBOL, "normal")
+                )
+                self.assertEqual(
+                    bot.exchange.create_order_calls, calls_after_first_attempt
+                )
+
+                # No exit_order_rejected errors may be logged for this scenario.
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertFalse(
+                    [
+                        row
+                        for row in rows
+                        if "exit_order_rejected" in (row.get("reason") or "")
+                    ]
+                )
+
+                # After the backoff expires exactly one retry becomes possible.
+                state.pending_exit_ladder_since = (
+                    time.time()
+                    - config.STRATEGY.exit_order_reject_retry_sec
+                    - 1.0
+                )
+                self.assertFalse(
+                    bot._is_exit_ladder_waiting_for_closeable(SYMBOL, "normal")
+                )
+
+    def test_exit_ladder_waits_when_closeable_reserved_by_close_order(self):
+        # Hard-stop/close orders reserving the full closeable volume must park the
+        # ladder (existing 1492 path) instead of retrying every poll.
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.reject_reduce_only_closeable_amount = True
+                state = bot._get_state(SYMBOL)
+                state.position_size = 2.0
+                state.position_available = 0.0
+                state.position_frozen = 2.0
+                state.entry_price = 100.0
+                state.hard_stop_order = {"id": "hs1", "amount": 2.0, "side": "buy"}
+
+                bot._place_sell_ladder(
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=2.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=2.0,
+                        mode="normal",
+                    )
+                )
+
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertEqual(
+                    state.pending_exit_ladder_reason,
+                    "closeable_amount_reserved_by_existing_exit_orders",
+                )
+                calls_after_first_attempt = bot.exchange.create_order_calls
+                self.assertTrue(
+                    bot._is_exit_ladder_waiting_for_closeable(SYMBOL, "normal")
+                )
+                self.assertEqual(
+                    bot.exchange.create_order_calls, calls_after_first_attempt
+                )
+
+    def test_exit_ladder_total_never_exceeds_position(self):
+        # Hidden or unknown close orders must not lead to ladder totals above the
+        # position size: the guard cancels the ladder instead.
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+                state.sell_ladder_orders = [
+                    {
+                        "id": "stale-close",
+                        "side": "buy",
+                        "price": 99.0,
+                        "amount": 9.0,
+                        "created_at": time.time(),
+                        "stage": 1,
+                        "mode": "normal",
+                    }
+                ]
+
+                bot._place_sell_ladder(
+                    SellLadderParams(
+                        symbol=SYMBOL,
+                        total_contracts=10.0,
+                        avg_entry_price=100.0,
+                        rebuild=False,
+                        closeable_contracts=10.0,
+                        mode="normal",
+                    )
+                )
+
+                ladder_total = sum(
+                    float(ref.get("amount") or 0.0)
+                    for ref in state.sell_ladder_orders
+                )
+                self.assertLessEqual(ladder_total, state.position_size + 1e-9)
 
     def test_calculate_rsi_basic_shapes(self):
         rising = [float(index) for index in range(1, 40)]
@@ -7007,7 +7393,11 @@ class UnifiedBotTests(unittest.TestCase):
             )
             self.assertTrue(config.STRATEGY.hard_stop_loss_enabled)
             self.assertEqual(config.STRATEGY.hard_stop_loss_pct, 0.02)
-            self.assertEqual(config.STRATEGY.hard_stop_loss_min_emergency_pct, 0.04)
+            self.assertEqual(config.STRATEGY.hard_stop_loss_min_emergency_pct, 0.03)
+            self.assertEqual(config.STRATEGY.entry_min_score_counter_macro, 0.06)
+            self.assertEqual(config.STRATEGY.short_entry_btc_max_return_30m, 0.0005)
+            self.assertEqual(config.STRATEGY.entry_net_exposure_cap_equity_ratio, 1.0)
+            self.assertEqual(config.STRATEGY.exit_order_reject_retry_sec, 900.0)
             self.assertTrue(config.STRATEGY.hard_stop_loss_atr_enabled)
             self.assertEqual(config.STRATEGY.hard_stop_loss_atr_multiplier, 2.0)
             self.assertEqual(config.STRATEGY.hard_stop_loss_atr_max_pct, 0.03)
