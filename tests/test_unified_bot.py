@@ -2180,15 +2180,145 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertTrue(bot._get_state(SYMBOL).entry_orders)
 
-    def test_short_entry_btc_momentum_gate_ignores_long_profile(self):
+    def test_btc_momentum_gate_is_mirrored(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
             signal = self.entry_signal(ts=1001)
             signal["btc_return_30m"] = 0.003
-
-            self.assertEqual(
-                bot._short_entry_btc_momentum_block_reason(signal), ""
+            self.assertEqual(bot._entry_btc_momentum_block_reason(signal), "")
+            signal["btc_return_30m"] = -0.003
+            self.assertIn(
+                "long_entry_btc_momentum_block",
+                bot._entry_btc_momentum_block_reason(signal),
             )
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            bot = self.make_bot(Path(raw_tmp))
+            signal = self.entry_signal(ts=1001, rs30=-0.002, rs60=-0.003)
+            signal["btc_return_30m"] = -0.003
+            self.assertEqual(bot._entry_btc_momentum_block_reason(signal), "")
+            signal["btc_return_30m"] = 0.003
+            self.assertIn(
+                "short_entry_btc_momentum_block",
+                bot._entry_btc_momentum_block_reason(signal),
+            )
+
+    def test_long_entry_blocked_when_btc_momentum_negative(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = config.RUNTIME
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                signal = self.entry_signal(ts=1001)
+                signal["btc_return_30m"] = -0.003
+
+                bot._maybe_place_initial_buy(SYMBOL, signal)
+
+                self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
+                with bot.signal_analytics_csv_path.open(
+                    newline="", encoding="utf-8"
+                ) as handle:
+                    rows = list(csv.DictReader(handle))
+                self.assertIn(
+                    "long_entry_btc_momentum_block", rows[-1]["block_reason"]
+                )
+
+                rising = self.entry_signal(ts=1002)
+                rising["btc_return_30m"] = 0.002
+
+                bot._maybe_place_initial_buy(SYMBOL, rising)
+
+                self.assertTrue(bot._get_state(SYMBOL).entry_orders)
+
+    def test_absolute_force_exit_unsticks_reserved_position(self):
+        # Regression for the AVAX 29h saga: ladder/market exits stuck because the
+        # bot's own orders reserve the closeable volume. The backstop cancels
+        # everything (ladder + hard stop) and then market-closes.
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                enable_absolute_force_exit=True,
+                absolute_force_exit_after_minutes=60.0,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 2.0
+                state.position_available = 2.0
+                state.entry_price = 100.0
+                state.cycle_opened_at = time.time() - 2 * 3600
+                state.sell_ladder_mode = "controlled_loss_exit"
+                state.sell_ladder_orders = [
+                    {
+                        "id": "cl1",
+                        "side": "buy",
+                        "price": 99.0,
+                        "amount": 2.0,
+                        "created_at": time.time(),
+                        "stage": 1,
+                        "mode": "controlled_loss_exit",
+                    }
+                ]
+                state.hard_stop_order = {"id": "hs1", "amount": 2.0, "side": "buy"}
+
+                # First pass cancels the reserving orders and waits for settlement.
+                self.assertTrue(
+                    bot._maybe_apply_absolute_force_exit(
+                        SYMBOL, reason="absolute_force_exit_elapsed"
+                    )
+                )
+                state = bot._get_state(SYMBOL)
+                self.assertEqual(state.sell_ladder_orders, [])
+                self.assertFalse(state.hard_stop_order)
+                self.assertEqual(bot.exchange.created_orders, [])
+
+                # Second pass market-closes the freed volume.
+                self.assertTrue(
+                    bot._maybe_apply_absolute_force_exit(
+                        SYMBOL, reason="absolute_force_exit_elapsed"
+                    )
+                )
+                state = bot._get_state(SYMBOL)
+                self.assertEqual(state.sell_ladder_mode, "absolute_force_exit")
+                self.assertTrue(state.zombie_position)
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["type"], "market")
+                self.assertTrue(order["params"].get("reduceOnly"))
+                self.assertEqual(order["amount"], 2.0)
+
+    def test_exit_coverage_gap_alert_fires_for_uncovered_position(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            strategy = replace(
+                config.STRATEGY, pending_exit_ladder_alert_minutes=30.0
+            )
+            with override_config(STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 2.0
+                state.entry_price = 100.0
+                state.hard_stop_order = {"id": "hs1", "amount": 2.0, "side": "buy"}
+
+                bot._maybe_alert_exit_coverage_gap(SYMBOL, state)
+                bot._exit_coverage_gap_since[SYMBOL] = time.time() - 45.0 * 60.0
+
+                bot._maybe_alert_exit_coverage_gap(SYMBOL, state)
+                bot._maybe_alert_exit_coverage_gap(SYMBOL, state)
+
+                with bot.csv_path.open(newline="", encoding="utf-8") as handle:
+                    rows = [
+                        row
+                        for row in csv.DictReader(handle)
+                        if row["event"] == "exit_ladder_pending_stale"
+                    ]
+                self.assertEqual(len(rows), 1)
+                self.assertIn("exit_ladder_missing", rows[0]["reason"])
+
+                # A working ladder resets the tracker.
+                state.sell_ladder_orders = [
+                    {"id": "x", "amount": 2.0, "price": 99.0, "side": "buy"}
+                ]
+                bot._maybe_alert_exit_coverage_gap(SYMBOL, state)
+                self.assertNotIn(SYMBOL, bot._exit_coverage_gap_since)
 
     def test_counter_macro_bias_raises_entry_min_score(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
@@ -2799,7 +2929,12 @@ class UnifiedBotTests(unittest.TestCase):
     def test_external_price_stale_keeps_normal_exit_ladder(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            with override_config(RUNTIME=runtime):
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_normal_ladder_fractions=(0.35, 0.25, 0.25, 0.15),
+                ema_exit_normal_ladder_markups=(0.008, 0.016, 0.030, 0.050),
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 bot.external_price_feed = StaticExternalPriceFeed(
                     self.external_context(valid=False, stale=True, spread_bps=25.0)
@@ -3961,6 +4096,8 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                ema_exit_normal_ladder_fractions=(0.35, 0.25, 0.25, 0.15),
+                ema_exit_normal_ladder_markups=(0.008, 0.016, 0.030, 0.050),
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -4154,7 +4291,12 @@ class UnifiedBotTests(unittest.TestCase):
     def test_split_exit_keeps_base_ladder_on_base_average_and_adds_recovery(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            with override_config(RUNTIME=runtime):
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_normal_ladder_fractions=(0.35, 0.25, 0.25, 0.15),
+                ema_exit_normal_ladder_markups=(0.008, 0.016, 0.030, 0.050),
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 145.0
@@ -4279,7 +4421,12 @@ class UnifiedBotTests(unittest.TestCase):
     def test_split_exit_ladder_recovery_failure_clears_signature_for_retry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            with override_config(RUNTIME=runtime):
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_normal_ladder_fractions=(0.35, 0.25, 0.25, 0.15),
+                ema_exit_normal_ladder_markups=(0.008, 0.016, 0.030, 0.050),
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
                 state.position_size = 145.0
@@ -4422,7 +4569,12 @@ class UnifiedBotTests(unittest.TestCase):
     def test_exit_ladder_time_decay_removes_runner_after_six_hours(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, reduce_only_enabled=True)
-            strategy = replace(config.STRATEGY, ema_exit_runner_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_normal_ladder_fractions=(0.35, 0.25, 0.25, 0.15),
+                ema_exit_normal_ladder_markups=(0.008, 0.016, 0.030, 0.050),
+            )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
                 state = bot._get_state(SYMBOL)
@@ -4555,6 +4707,8 @@ class UnifiedBotTests(unittest.TestCase):
                 config.STRATEGY,
                 ema_exit_runner_enabled=True,
                 ema_exit_trailing_enabled=True,
+                ema_exit_normal_ladder_fractions=(0.35, 0.25, 0.25, 0.15),
+                ema_exit_normal_ladder_markups=(0.008, 0.016, 0.030, 0.050),
             )
             with override_config(RUNTIME=runtime, STRATEGY=strategy):
                 bot = self.make_bot(Path(raw_tmp))
@@ -7482,6 +7636,19 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.entry_net_exposure_cap_equity_ratio, 1.0)
             self.assertEqual(config.STRATEGY.exit_order_reject_retry_sec, 900.0)
             self.assertEqual(config.STRATEGY.pending_exit_ladder_alert_minutes, 30.0)
+            self.assertEqual(config.STRATEGY.long_entry_btc_min_return_30m, -0.0005)
+            self.assertTrue(config.STRATEGY.enable_absolute_force_exit)
+            self.assertEqual(
+                config.STRATEGY.absolute_force_exit_after_minutes, 96.0 * 60.0 + 120.0
+            )
+            self.assertEqual(
+                config.STRATEGY.ema_exit_normal_ladder_fractions,
+                (0.25, 0.25, 0.25, 0.15),
+            )
+            self.assertEqual(
+                config.STRATEGY.ema_exit_normal_ladder_markups,
+                (0.012, 0.020, 0.032, 0.050),
+            )
             self.assertTrue(config.STRATEGY.hard_stop_loss_atr_enabled)
             self.assertEqual(config.STRATEGY.hard_stop_loss_atr_multiplier, 2.0)
             self.assertEqual(config.STRATEGY.hard_stop_loss_atr_max_pct, 0.03)

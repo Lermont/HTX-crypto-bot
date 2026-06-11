@@ -425,6 +425,7 @@ class StrategySettings:
     entry_spread_filter_block_if_unavailable: bool
     entry_min_planned_notional_quote: float
     short_entry_btc_max_return_30m: float
+    long_entry_btc_min_return_30m: float
     entry_net_exposure_cap_equity_ratio: float
     exit_order_reject_retry_sec: float
     pending_exit_ladder_alert_minutes: float
@@ -1212,14 +1213,16 @@ def _make_strategy_settings(
         "EMA_EXIT_LADDER_FRACTIONS", (1.0,), profile=name
     )
     ema_take_profit_markup = _env_float("EMA_TAKE_PROFIT_MARKUP", 0.01, profile=name)
+    # TP1 raised 0.8%->1.2% and trimmed 35%->25%; the freed 10% trails as the
+    # runner (2026-06-11 review: winners' MFE +1.2..+2.8% vs +0.2..+0.7% taken).
     ema_exit_normal_fractions = _env_float_tuple(
         "EMA_EXIT_NORMAL_LADDER_FRACTIONS",
-        (0.35, 0.25, 0.25, 0.15),
+        (0.25, 0.25, 0.25, 0.15),
         profile=name,
     )
     ema_exit_normal_markups = _env_float_tuple(
         "EMA_EXIT_NORMAL_LADDER_MARKUPS",
-        (0.008, 0.016, 0.030, 0.050),
+        (0.012, 0.020, 0.032, 0.050),
         profile=name,
     )
     ema_exit_medium_fractions = _env_float_tuple(
@@ -1258,6 +1261,19 @@ def _make_strategy_settings(
     ema_averaging_power = _env_float("EMA_AVERAGING_POWER", 1.0, profile=name)
     averaging_stage_count = max(0, strategy_context.ema_max_averaging_stages)
     hard_stop_loss_pct = _env_float("HARD_STOP_LOSS_PCT", 0.02, profile=name)
+    hard_time_exit_after_minutes = _env_float(
+        "HARD_TIME_EXIT_AFTER_MINUTES",
+        _env_float("HARD_TIME_EXIT_AFTER_HOURS", 96.0, profile=name) * 60.0,
+        profile=name,
+    )
+    # Backstop for positions whose ladder/market exits get stuck (e.g. volume
+    # reserved by the bot's own close orders): cancel everything and market
+    # close once the hard time exit is overdue by a grace window.
+    absolute_force_exit_default_minutes = (
+        hard_time_exit_after_minutes + 120.0
+        if hard_time_exit_after_minutes > 0
+        else 0.0
+    )
 
     return StrategySettings(
         ema_strategy_enabled=_env_bool("EMA_STRATEGY_ENABLED", True, profile=name),
@@ -1648,6 +1664,9 @@ def _make_strategy_settings(
         short_entry_btc_max_return_30m=_env_float(
             "SHORT_ENTRY_BTC_MAX_RETURN_30M", 0.0005, profile=name
         ),
+        long_entry_btc_min_return_30m=_env_float(
+            "LONG_ENTRY_BTC_MIN_RETURN_30M", -0.0005, profile=name
+        ),
         entry_net_exposure_cap_equity_ratio=max(
             0.0, _env_float("NET_EXPOSURE_CAP_EQUITY_RATIO", 1.0, profile=name)
         ),
@@ -1692,11 +1711,7 @@ def _make_strategy_settings(
         urgent_time_exit_after_minutes=_env_float(
             "URGENT_TIME_EXIT_AFTER_MINUTES", 0.0, profile=name
         ),
-        hard_time_exit_after_minutes=_env_float(
-            "HARD_TIME_EXIT_AFTER_MINUTES",
-            _env_float("HARD_TIME_EXIT_AFTER_HOURS", 96.0, profile=name) * 60.0,
-            profile=name,
-        ),
+        hard_time_exit_after_minutes=hard_time_exit_after_minutes,
         hard_time_exit_close_fraction=_env_float(
             "HARD_TIME_EXIT_CLOSE_FRACTION", 0.25, profile=name
         ),
@@ -1753,8 +1768,17 @@ def _make_strategy_settings(
         soft_defensive_exit_reprice_minutes=_env_float(
             "SOFT_DEFENSIVE_EXIT_REPRICE_MINUTES", 6.0, profile=name
         ),
-        enable_absolute_force_exit=False,
-        absolute_force_exit_after_minutes=0.0,
+        enable_absolute_force_exit=_env_bool(
+            "ENABLE_ABSOLUTE_FORCE_EXIT", True, profile=name
+        ),
+        absolute_force_exit_after_minutes=max(
+            0.0,
+            _env_float(
+                "ABSOLUTE_FORCE_EXIT_AFTER_MINUTES",
+                absolute_force_exit_default_minutes,
+                profile=name,
+            ),
+        ),
         enable_controlled_loss_exit=_env_bool("ENABLE_CONTROLLED_LOSS_EXIT", True, profile=name),
         controlled_loss_after_zombie_minutes=_env_float("CONTROLLED_LOSS_AFTER_ZOMBIE_MINUTES", 180.0, profile=name),
         controlled_loss_min_drawdown=_env_float("CONTROLLED_LOSS_MIN_DRAWDOWN", 0.025, profile=name),

@@ -209,6 +209,7 @@ class RunnerMixin:
 
         state = self._get_state(symbol)
         if state.position_size > 0:
+            self._maybe_alert_exit_coverage_gap(symbol, state)
             if not signal_valid:
                 self._freeze_no_more_buys(symbol, reason="signal_invalid_or_missing")
             if self._maybe_apply_absolute_force_exit(symbol, reason="absolute_force_exit_elapsed"):

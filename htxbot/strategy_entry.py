@@ -1049,24 +1049,34 @@ class EntryStrategy:
             state.average_stage = previous_average_stage
         self._save_state()
 
-    def _short_entry_btc_momentum_block_reason(self, signal: Optional[dict]) -> str:
-        """Hard gate: do not open new shorts while BTC 30m momentum is positive.
+    def _entry_btc_momentum_block_reason(self, signal: Optional[dict]) -> str:
+        """Hard gate, mirrored for both sides: no new shorts while BTC 30m momentum
+        is positive, no new longs while it is negative.
 
         Unlike the score penalty driven by ``btc_entry_valid``, this cannot be
-        outweighed by a strong symbol score. Applies to new short entries only.
+        outweighed by a strong symbol score. Applies to new entries only.
         """
-        if config.POSITION_SIDE != "short":
-            return ""
-        max_return = self._safe_float(
-            getattr(config.STRATEGY, "short_entry_btc_max_return_30m", 0.0), 0.0
-        )
         btc_return = self._safe_float((signal or {}).get("btc_return_30m"), 0.0)
-        if btc_return <= max_return:
+        if config.POSITION_SIDE == "short":
+            max_return = self._safe_float(
+                getattr(config.STRATEGY, "short_entry_btc_max_return_30m", 0.0), 0.0
+            )
+            if btc_return <= max_return:
+                return ""
+            return (
+                "short_entry_btc_momentum_block;"
+                f"btc_return_30m={btc_return:.6f};"
+                f"max_return_30m={max_return:.6f}"
+            )
+        min_return = self._safe_float(
+            getattr(config.STRATEGY, "long_entry_btc_min_return_30m", 0.0), 0.0
+        )
+        if btc_return >= min_return:
             return ""
         return (
-            "short_entry_btc_momentum_block;"
+            "long_entry_btc_momentum_block;"
             f"btc_return_30m={btc_return:.6f};"
-            f"max_return_30m={max_return:.6f}"
+            f"min_return_30m={min_return:.6f}"
         )
 
     def _maybe_place_initial_buy(self, symbol: str, signal: Optional[dict]):
@@ -1101,7 +1111,7 @@ class EntryStrategy:
             )
             self._log_macro_action_blocked("macro_entry_blocked", symbol, signal, macro_context)
             return
-        btc_block_reason = self._short_entry_btc_momentum_block_reason(signal)
+        btc_block_reason = self._entry_btc_momentum_block_reason(signal)
         if btc_block_reason:
             self._record_signal_analytics(
                 "entry_gate_checked",
@@ -1110,7 +1120,7 @@ class EntryStrategy:
                 block_reason=btc_block_reason,
             )
             logged = getattr(self, "_entry_gate_skip_logged", set())
-            key = (symbol, (signal or {}).get("ts"), "short_entry_btc_momentum_block")
+            key = (symbol, (signal or {}).get("ts"), btc_block_reason.split(";", 1)[0])
             if key not in logged:
                 logged.add(key)
                 self._entry_gate_skip_logged = logged

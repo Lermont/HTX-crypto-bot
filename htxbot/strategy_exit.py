@@ -2215,6 +2215,70 @@ class ExitStrategy:
             ),
         )
 
+    def _maybe_alert_exit_coverage_gap(
+        self, symbol: str, state: Optional[TradeState] = None
+    ):
+        """Operational alert: an open position has had no working exit ladder,
+        trailing runner or pending close for too long. A standing hard stop
+        alone does not count as coverage — it only caps the loss. This catches
+        stuck positions the pending-flag alert misses (e.g. cancel/reject
+        reprice loops that never enter the waiting state)."""
+        if state is None:
+            state = self._get_state(symbol)
+        tracker = getattr(self, "_exit_coverage_gap_since", None)
+        if tracker is None:
+            tracker = {}
+            self._exit_coverage_gap_since = tracker
+        covered = bool(
+            state.position_size <= 0
+            or state.sell_ladder_orders
+            or state.pending_close_order
+            or self._safe_float(getattr(state, "exit_runner_contracts", 0.0), 0.0) > 0
+        )
+        if covered:
+            tracker.pop(symbol, None)
+            return
+        now = time.time()
+        since = tracker.setdefault(symbol, now)
+        alert_minutes = max(
+            0.0,
+            self._safe_float(
+                getattr(config.STRATEGY, "pending_exit_ladder_alert_minutes", 0.0), 0.0
+            ),
+        )
+        if alert_minutes <= 0:
+            return
+        elapsed = now - since
+        alert_sec = alert_minutes * 60.0
+        if elapsed < alert_sec:
+            return
+        bucket = int(elapsed // alert_sec)
+        alerted = getattr(self, "_pending_exit_ladder_alerted", None)
+        if alerted is None:
+            alerted = {}
+            self._pending_exit_ladder_alerted = alerted
+        key = (symbol, "exit_ladder_missing")
+        if alerted.get(key) == (since, bucket):
+            return
+        alerted[key] = (since, bucket)
+        self._log_event(
+            "WARNING",
+            f"Position {symbol} has had no working exit ladder for {elapsed / 60.0:.0f} minutes "
+            f"(mode={state.sell_ladder_mode or 'none'}); only a hard stop is in place",
+            event="exit_ladder_pending_stale",
+            symbol=symbol,
+            side=config.EXIT_SIDE,
+            position_size=state.position_size,
+            reason=(
+                "exit_ladder_missing;"
+                f"gap_minutes={elapsed / 60.0:.1f};"
+                f"alert_minutes={alert_minutes:g};"
+                f"mode={state.sell_ladder_mode or 'none'};"
+                f"hard_stop={int(bool(state.hard_stop_order))};"
+                f"pending_reason={state.pending_exit_ladder_reason or '-'}"
+            ),
+        )
+
     def _mark_exit_ladder_waiting_for_closeable(
         self,
         symbol: str,
