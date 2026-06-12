@@ -22,7 +22,11 @@ from htxbot.app import HtxFuturesBot
 from htxbot.combined import CombinedHtxFuturesBot
 from htxbot.exchange import UnexpectedExchangeResponse
 from unittest.mock import patch
-from htxbot.external_price import BookTicker, ExternalPriceFeed
+from htxbot.external_price import (
+    BookTicker,
+    ExternalPriceFeed,
+    MexcBookTickerClient,
+)
 from htxbot.indicators import (
     average_true_range,
     calculate_rsi,
@@ -2442,6 +2446,42 @@ class UnifiedBotTests(unittest.TestCase):
                 )
 
                 self.assertTrue(bot._get_state(SYMBOL).entry_orders)
+
+    def test_mexc_client_fetch_parses_book(self):
+        class StubResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return (
+                    b'{"bidPrice":"1.5","askPrice":"1.6","bidQty":"10","askQty":"20"}'
+                )
+
+        client = MexcBookTickerClient(
+            timeout_sec=1.0, opener=lambda url, timeout: StubResponse()
+        )
+        book = client.fetch("TESTUSDT")
+        self.assertEqual(book.bid, 1.5)
+        self.assertEqual(book.ask, 1.6)
+        self.assertGreater(book.ts, 0)
+
+    def test_mexc_client_fetch_hard_deadline_survives_hung_resolver(self):
+        # Regression for 2026-06-12: urlopen's timeout does not cover DNS
+        # resolution; a hung getaddrinfo froze the whole trading loop for hours.
+        # The hard deadline must abandon the worker and raise instead.
+        hang_forever = threading.Event()
+
+        def hung_opener(url, timeout):
+            hang_forever.wait()  # never set
+
+        client = MexcBookTickerClient(timeout_sec=0.2, opener=hung_opener)
+        started = time.time()
+        with self.assertRaises(TimeoutError):
+            client.fetch("TESTUSDT")
+        self.assertLess(time.time() - started, 5.0)
 
     def test_external_price_stale_is_ignored_by_default_for_entry(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

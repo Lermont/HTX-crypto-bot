@@ -2,6 +2,7 @@
 
 import json
 import math
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -40,8 +41,31 @@ class MexcBookTickerClient:
     def fetch(self, symbol: str) -> BookTicker:
         query = urllib.parse.urlencode({"symbol": symbol})
         url = f"https://api.mexc.com/api/v3/ticker/bookTicker?{query}"
-        with self.opener(url, timeout=self.timeout_sec) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        # The urlopen timeout does not cover DNS resolution (getaddrinfo): a hung
+        # system resolver froze the whole trading loop for hours on 2026-06-12.
+        # Run the request in a daemon worker with a hard deadline instead.
+        result: dict = {}
+
+        def _worker():
+            try:
+                with self.opener(url, timeout=self.timeout_sec) as response:
+                    result["payload"] = json.loads(response.read().decode("utf-8"))
+            except Exception as exc:  # delivered to the caller below
+                result["error"] = exc
+
+        thread = threading.Thread(
+            target=_worker, daemon=True, name=f"mexc-fetch-{symbol}"
+        )
+        thread.start()
+        thread.join(self.timeout_sec + 2.0)
+        if thread.is_alive():
+            raise TimeoutError(
+                f"MEXC bookTicker request hard-timed out for {symbol} "
+                f"(deadline {self.timeout_sec + 2.0:.1f}s incl. DNS)"
+            )
+        if "error" in result:
+            raise result["error"]
+        payload = result.get("payload") or {}
         return BookTicker(
             bid=_safe_float(payload.get("bidPrice")),
             ask=_safe_float(payload.get("askPrice")),
