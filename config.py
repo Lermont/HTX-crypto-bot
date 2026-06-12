@@ -427,6 +427,7 @@ class StrategySettings:
     short_entry_btc_max_return_30m: float
     long_entry_btc_min_return_30m: float
     entry_net_exposure_cap_equity_ratio: float
+    entry_leverage_fallback_ladder: Tuple[float, ...]
     exit_order_reject_retry_sec: float
     pending_exit_ladder_alert_minutes: float
     max_buy_stages: int
@@ -1669,6 +1670,9 @@ def _make_strategy_settings(
         ),
         entry_net_exposure_cap_equity_ratio=max(
             0.0, _env_float("NET_EXPOSURE_CAP_EQUITY_RATIO", 1.0, profile=name)
+        ),
+        entry_leverage_fallback_ladder=_env_float_tuple(
+            "ENTRY_LEVERAGE_FALLBACK_LADDER", (20.0, 10.0), profile=name
         ),
         exit_order_reject_retry_sec=max(
             0.0, _env_float("EXIT_ORDER_REJECT_RETRY_SEC", 900.0, profile=name)

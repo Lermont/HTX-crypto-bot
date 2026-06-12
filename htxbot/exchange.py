@@ -1985,11 +1985,19 @@ class ExchangeMixin:
         return cache
 
     def _entry_leverage_fallback(self, symbol: str, rejected_leverage: float) -> float:
-        """Lower leverage to retry with after HTX 1206 (high leverage risk) on entries."""
-        sizing = self._safe_float(getattr(config.RISK, "leverage", 0.0), 0.0)
-        if sizing > 0 and sizing < self._safe_float(rejected_leverage, 0.0) - 1e-9:
-            return sizing
-        return 0.0
+        """Next lower leverage to retry with after HTX 1206 (high leverage risk).
+
+        HTX caps leverage per contract tier (e.g. INJ rejects even 30) but the
+        market metadata reports a useless max of 1.0, so the only way to find
+        the allowed tier is stepping down: sizing leverage first, then the
+        configured fallback ladder.
+        """
+        rejected = self._safe_float(rejected_leverage, 0.0)
+        candidates = [self._safe_float(getattr(config.RISK, "leverage", 0.0), 0.0)]
+        for lev in getattr(config.STRATEGY, "entry_leverage_fallback_ladder", ()) or ():
+            candidates.append(self._safe_float(lev, 0.0))
+        viable = [lev for lev in candidates if 0 < lev < rejected - 1e-9]
+        return max(viable) if viable else 0.0
 
     def _create_one_way_order(
         self,

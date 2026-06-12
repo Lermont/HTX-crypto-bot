@@ -217,10 +217,18 @@ class EntryStrategy:
                 else:
                     reject_reason = ""
                     if self._is_high_leverage_risk_error(exc):
-                        fallback_leverage = self._entry_leverage_fallback(
-                            symbol, order_leverage
-                        )
-                        if fallback_leverage > 0:
+                        # HTX caps leverage per contract tier but does not expose
+                        # the cap in market metadata, so step down through the
+                        # fallback ladder until one is accepted.
+                        placed_with_fallback = False
+                        last_exc = exc
+                        attempt_leverage = order_leverage
+                        for _ in range(4):
+                            fallback_leverage = self._entry_leverage_fallback(
+                                symbol, attempt_leverage
+                            )
+                            if fallback_leverage <= 0:
+                                break
                             try:
                                 order = self._create_one_way_order(
                                     symbol=symbol,
@@ -253,33 +261,27 @@ class EntryStrategy:
                                 )
                                 order_leverage = fallback_leverage
                                 account_leverage = fallback_leverage
-                                # fall through to the success path below
+                                placed_with_fallback = True
+                                break
                             except Exception as fallback_exc:
-                                self._log_event(
-                                    "WARNING",
-                                    f"{entry_label} entry order rejected for {symbol} after leverage fallback: {fallback_exc}",
-                                    event="entry_order_canceled",
-                                    symbol=symbol,
-                                    side=entry_side,
-                                    price=price,
-                                    amount=contracts,
-                                    reason="manual_account_leverage_rejected",
-                                    exception=fallback_exc,
-                                )
-                                continue
-                        else:
+                                last_exc = fallback_exc
+                                if not self._is_high_leverage_risk_error(fallback_exc):
+                                    break
+                                attempt_leverage = fallback_leverage
+                        if not placed_with_fallback:
                             self._log_event(
                                 "WARNING",
-                                f"{entry_label} entry order rejected for {symbol}: {exc}",
+                                f"{entry_label} entry order rejected for {symbol} after leverage fallback: {last_exc}",
                                 event="entry_order_canceled",
                                 symbol=symbol,
                                 side=entry_side,
                                 price=price,
                                 amount=contracts,
                                 reason="manual_account_leverage_rejected",
-                                exception=exc,
+                                exception=last_exc,
                             )
                             continue
+                        # fall through to the success path below
                     elif self._is_hedge_mode_error(exc):
                         reject_reason = "hedge_mode_error"
                     elif self._is_insufficient_margin_error(exc):

@@ -4062,10 +4062,10 @@ class UnifiedBotTests(unittest.TestCase):
         self.assertTrue(profile.exchange.set_leverage_on_start)
 
     def test_entry_ladder_leverage_fallback_is_bounded(self):
-        # HTX 1206 allows exactly one retry with the operator-configured sizing
-        # leverage (RISK.leverage) and never anything lower: when the exchange
-        # rejects both leverages the ladder stops instead of looping or placing
-        # orders with an arbitrary leverage.
+        # HTX 1206 steps down through sizing leverage and the configured ladder
+        # (30 -> 20 -> 10 by default) and never lower: when the exchange rejects
+        # every candidate the ladder stops instead of looping or placing orders
+        # with an arbitrary leverage.
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             runtime = replace(config.RUNTIME, post_only_enabled=False)
             risk = replace(config.RISK, leverage=30, account_leverage=50)
@@ -4074,7 +4074,7 @@ class UnifiedBotTests(unittest.TestCase):
             )
             with override_config(RUNTIME=runtime, RISK=risk, BUYING=buying):
                 bot = self.make_bot(Path(raw_tmp))
-                bot.exchange.reject_leverage_above = 20
+                bot.exchange.reject_leverage_above = 5
 
                 bot._place_buy_ladder(
                     SYMBOL,
@@ -4084,10 +4084,35 @@ class UnifiedBotTests(unittest.TestCase):
                     reason="ema_initial_signal",
                 )
 
-                self.assertEqual(bot.exchange.create_order_calls, 2)
+                # initial 50 + fallbacks 30, 20, 10 - all rejected, then stop
+                self.assertEqual(bot.exchange.create_order_calls, 4)
                 self.assertEqual(bot.exchange.created_orders, [])
                 self.assertEqual(bot._get_state(SYMBOL).entry_orders, [])
                 self.assertNotIn(SYMBOL, bot._symbol_leverage_downgrades())
+
+    def test_entry_leverage_fallback_ladder_finds_low_tier(self):
+        # Regression for INJ 2026-06-12: the contract tier allowed less than the
+        # sizing leverage 30, so the single-step fallback failed. The ladder must
+        # walk 50 -> 30 -> 20 -> 10 and remember the accepted tier.
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, post_only_enabled=False)
+            risk = replace(config.RISK, leverage=30, account_leverage=50)
+            with override_config(RUNTIME=runtime, RISK=risk):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.exchange.reject_leverage_above = 15
+
+                bot._maybe_place_initial_buy(
+                    SYMBOL, self.entry_signal(ts=1001, rs30=-0.002, rs60=-0.003)
+                )
+
+                state = bot._get_state(SYMBOL)
+                self.assertTrue(state.entry_orders)
+                self.assertTrue(bot.exchange.created_orders)
+                for order in bot.exchange.created_orders:
+                    self.assertEqual(float(order["params"].get("leverRate")), 10.0)
+                self.assertEqual(
+                    bot._symbol_leverage_downgrades().get(SYMBOL), 10.0
+                )
 
     def test_normal_exit_ladder_uses_fixed_take_profit_and_trailing_runner(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -7634,6 +7659,9 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.entry_min_score_counter_macro, 0.06)
             self.assertEqual(config.STRATEGY.short_entry_btc_max_return_30m, 0.0005)
             self.assertEqual(config.STRATEGY.entry_net_exposure_cap_equity_ratio, 1.0)
+            self.assertEqual(
+                config.STRATEGY.entry_leverage_fallback_ladder, (20.0, 10.0)
+            )
             self.assertEqual(config.STRATEGY.exit_order_reject_retry_sec, 900.0)
             self.assertEqual(config.STRATEGY.pending_exit_ladder_alert_minutes, 30.0)
             self.assertEqual(config.STRATEGY.long_entry_btc_min_return_30m, -0.0005)
