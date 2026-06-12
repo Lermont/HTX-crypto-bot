@@ -201,6 +201,25 @@ class MonitoringMixin:
         if jsonl_path:
             self._ensure_jsonl_file(jsonl_path)
 
+    def _touch_heartbeat(self):
+        """Write a liveness timestamp so an external watchdog can detect a frozen
+        loop (e.g. the 2026-06-12 DNS hang). Throttled; failures are ignored."""
+        path = str(getattr(config.RUNTIME, "heartbeat_file", "") or "")
+        if not path:
+            return
+        interval = max(
+            1.0,
+            float(getattr(config.RUNTIME, "heartbeat_interval_sec", 10.0) or 10.0),
+        )
+        now = time.time()
+        if now - getattr(self, "_last_heartbeat_at", 0.0) < interval:
+            return
+        self._last_heartbeat_at = now
+        try:
+            Path(path).write_text(f"{int(now)} pid={os.getpid()}\n", encoding="utf-8")
+        except OSError:
+            pass
+
     def _csv_archive_path(self, path: Path) -> Path:
         archive_dir = Path(config.MONITORING.csv_archive_dir)
         if not archive_dir.is_absolute():

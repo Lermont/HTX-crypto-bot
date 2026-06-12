@@ -152,6 +152,7 @@ class RunnerMixin:
         self._save_state()
 
     def step_symbol(self, symbol: str):
+        self._touch_heartbeat()
         state = self._get_state(symbol)
         had_tracked_exit_orders = bool(state.sell_ladder_orders or state.hard_stop_order)
         snapshot = self._fetch_position_snapshot(symbol)
@@ -270,6 +271,7 @@ class RunnerMixin:
             while True:
                 started_at = time.time()
                 self._assert_runtime_lock_owned()
+                self._touch_heartbeat()
                 self._reset_private_caches()
                 reset_market_data = getattr(self, "_reset_market_data_caches", None)
                 if reset_market_data:

@@ -621,6 +621,8 @@ class RuntimeSettings:
     fill_detail_lookback_sec: int
     state_file: str
     markets_cache_file: str
+    heartbeat_file: str
+    heartbeat_interval_sec: float
 
 
 def _make_hedge_settings() -> HedgeSettings:
@@ -2114,6 +2116,10 @@ def _make_runtime_settings(name: str) -> RuntimeSettings:
         ),
         markets_cache_file=_path(
             name, f"bot_futures{'_short' if name == 'short' else ''}_markets_cache.json"
+        ),
+        heartbeat_file=_env("HEARTBEAT_FILE", profile=name) or "bot_heartbeat.txt",
+        heartbeat_interval_sec=max(
+            1.0, _env_float("HEARTBEAT_INTERVAL_SEC", 10.0, profile=name)
         ),
     )
 

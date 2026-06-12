@@ -68,3 +68,5 @@ short/account_pnl.csv
 short/csv_archive/
 
 output*.txt
+bot_heartbeat.txt
+watchdog.log

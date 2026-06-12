@@ -2447,6 +2447,50 @@ class UnifiedBotTests(unittest.TestCase):
 
                 self.assertTrue(bot._get_state(SYMBOL).entry_orders)
 
+    def test_touch_heartbeat_writes_and_throttles(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            heartbeat = Path(raw_tmp) / "hb.txt"
+            runtime = replace(
+                config.RUNTIME,
+                heartbeat_file=str(heartbeat),
+                heartbeat_interval_sec=10.0,
+            )
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+
+                bot._touch_heartbeat()
+
+                content = heartbeat.read_text(encoding="utf-8")
+                self.assertIn("pid=", content)
+                stamp = bot._last_heartbeat_at
+
+                bot._touch_heartbeat()  # within the interval: throttled
+                self.assertEqual(bot._last_heartbeat_at, stamp)
+
+                bot._last_heartbeat_at = time.time() - 11.0
+                bot._touch_heartbeat()
+                self.assertGreater(bot._last_heartbeat_at, stamp - 11.0)
+
+    def test_watchdog_staleness_logic(self):
+        from bot_watchdog import heartbeat_is_stale
+
+        now = 10_000.0
+        # no own heartbeat yet: the startup grace window applies
+        self.assertFalse(heartbeat_is_stale(now, now - 100.0, 0.0, 60.0, 900.0))
+        self.assertTrue(heartbeat_is_stale(now, now - 1000.0, 0.0, 60.0, 900.0))
+        # a heartbeat left by the previous run (older than process start) is ignored
+        self.assertFalse(
+            heartbeat_is_stale(now, now - 100.0, now - 5000.0, 60.0, 900.0)
+        )
+        # fresh own heartbeat keeps the bot alive
+        self.assertFalse(
+            heartbeat_is_stale(now, now - 2000.0, now - 30.0, 60.0, 900.0)
+        )
+        # stale own heartbeat triggers a restart
+        self.assertTrue(
+            heartbeat_is_stale(now, now - 2000.0, now - 120.0, 60.0, 900.0)
+        )
+
     def test_mexc_client_fetch_parses_book(self):
         class StubResponse:
             def __enter__(self):
@@ -7731,6 +7775,8 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(config.STRATEGY.soft_defensive_exit_max_fraction, 1.0)
             self.assertEqual(config.STRATEGY.soft_defensive_exit_reprice_minutes, 6.0)
             self.assertFalse(config.EXTERNAL_PRICE_FEED.exit_adjustment_enabled)
+            self.assertEqual(config.RUNTIME.heartbeat_file, "bot_heartbeat.txt")
+            self.assertEqual(config.RUNTIME.heartbeat_interval_sec, 10.0)
 
     def test_ema_large_periods_convert_to_configured_timeframes(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
