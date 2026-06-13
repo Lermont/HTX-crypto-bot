@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 sys.stdout.reconfigure(encoding="utf-8")
 ROOT = r"D:\HTX-Crypto-bot_1.3"
-RESTART = 1781178884.0  # 11.06 14:54:44 local (process 2876)
+RESTART = 1781200000.0  # 11.06 20:46 local — restart with macro 100h/200h + mirrored gates
 
 
 def lt(t):
