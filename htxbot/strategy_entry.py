@@ -471,9 +471,13 @@ class EntryStrategy:
                 self._save_state()
             return
 
-        external_directional_reason = self._external_directional_1m_block_reason(
-            symbol,
-            scope="averaging" if is_average_ladder else "entry",
+        external_directional_reason = (
+            ""
+            if (factor_mode and not is_average_ladder)
+            else self._external_directional_1m_block_reason(
+                symbol,
+                scope="averaging" if is_average_ladder else "entry",
+            )
         )
         if external_directional_reason:
             self._cancel_entry_orders(symbol, reason=external_directional_reason)
@@ -1197,7 +1201,12 @@ class EntryStrategy:
             )
             return
 
-        external_block_reason = self._external_entry_block_reason(symbol)
+        # Factor mode bypasses the MEXC cross-reference filter (a discretionary
+        # microstructure gate, not part of the factor hypothesis); the HTX
+        # order-book spread filter below stays as the real liquidity guard.
+        external_block_reason = (
+            "" if factor_mode else self._external_entry_block_reason(symbol)
+        )
         if external_block_reason:
             self._record_signal_analytics(
                 "entry_gate_checked",
