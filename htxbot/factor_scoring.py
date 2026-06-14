@@ -1,23 +1,31 @@
 # -*- coding: utf-8 -*-
 """Cross-sectional factor scoring.
 
-Each entry filter (macro trend, pullback recovery, trigger cross, relative
-strength, volume, choppiness, raw signal score) has an underlying *continuous*
-metric. Instead of collapsing them into a conjunctive ``AND`` gate (which lets
-through ~0 symbols and makes per-filter attribution impossible), this module:
+Each entry filter has an underlying *continuous* metric. Instead of collapsing
+them into a conjunctive ``AND`` gate (which lets through ~0 symbols and makes
+per-filter attribution impossible), this module:
 
-1. converts every metric into a robust cross-sectional z-score over the whole
-   tradable universe each closed candle (median / MAD, winsorized), oriented so
-   higher z = more favourable for this profile's side;
-2. sums them into a composite score with configurable weights (equal by
-   default) and ranks the universe;
+1. converts every per-symbol metric into a robust cross-sectional z-score over
+   the whole tradable universe each closed candle (median / MAD, winsorized),
+   oriented so higher z = more favourable for this profile's side;
+2. sums them into a composite with configurable weights (equal by default),
+   adds a common regime *side offset* (gold/BTC macro + BTC momentum) that shifts
+   the whole side's level, and ranks the universe;
 3. logs the per-symbol z-vector + composite each cycle so the offline
-   ``analyze_factors.py`` can run a Fama-MacBeth regression of forward returns
-   on the z-scores and prove each filter's marginal predictive power.
+   ``analyze_factors.py`` can Fama-MacBeth regress forward returns on the
+   z-scores and prove each filter's marginal predictive power.
 
-Steps 1-3 are pure measurement (no order side effects). Turning the ranking
-into live top-K entries is gated separately behind ``config.FACTOR.entry_enabled``
-(see ``strategy_filters``/``strategy_entry``).
+Factor families:
+  * cross-sectional (per-symbol): macro_gap, pullback_recovery_gap, trigger_gap,
+    rs60, rs30, volume_ratio, chop, plus two external (MEXC) microstructure
+    factors -- spread reversion and lead-lag impulse. Each contributes ``w*z``.
+  * common (per-side): gold/BTC macro budget + BTC 30m momentum, folded into a
+    single additive ``side_offset`` (cannot be cross-sectional -- a market-wide
+    value has zero cross-sectional variance -- so it shifts the level and gates
+    via the absolute ``entry_min_composite`` threshold instead of the ranking).
+
+Steps 1-3 are pure measurement (no order side effects). Turning the ranking into
+live top-K entries is gated behind ``config.FACTOR.entry_enabled``.
 """
 
 import math
@@ -27,24 +35,39 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 
 class FactorScoringMixin:
-    # (name, signal_key, kind)
+    # (name, source, key, kind)
+    #   source == "signal":   read key from the per-symbol signal dict.
+    #   source == "external": read key from the MEXC external-price context.
     #   kind == "side": symmetric metric; multiply raw by side sign
     #                   (+1 long / -1 short) so higher means "aligned with side".
     #   kind == "raw":  already side-aware / higher-is-better.
     #   kind == "neg":  lower-is-better (negate before ranking).
-    _FACTOR_METRIC_SPECS: Tuple[Tuple[str, str, str], ...] = (
-        ("macro", "macro_gap", "side"),
-        ("pullback", "pullback_recovery_gap", "raw"),
-        ("trigger", "trigger_gap", "side"),
-        ("rs60", "rs60", "side"),
-        ("rs30", "rs30", "side"),
-        ("volume", "volume_ratio", "raw"),
-        ("chop", "chop", "neg"),
-        ("score", "score", "raw"),
+    _FACTOR_METRIC_SPECS: Tuple[Tuple[str, str, str, str], ...] = (
+        ("macro", "signal", "macro_gap", "side"),
+        ("pullback", "signal", "pullback_recovery_gap", "raw"),
+        ("trigger", "signal", "trigger_gap", "side"),
+        ("rs60", "signal", "rs60", "side"),
+        ("rs30", "signal", "rs30", "side"),
+        ("volume", "signal", "volume_ratio", "raw"),
+        ("chop", "signal", "chop", "neg"),
+    )
+    # External (MEXC) microstructure factors. raw values are produced by
+    # _factor_external_raw already oriented for kind="side":
+    #   ext_spread = -spread_bps   (long favours HTX discount, short HTX premium)
+    #   ext_lead   = mexc_change_1m - htx_change_1m  (MEXC leading the move)
+    _FACTOR_EXTERNAL_SPECS: Tuple[Tuple[str, str, str, str], ...] = (
+        ("ext_spread", "external", "ext_spread", "side"),
+        ("ext_lead", "external", "ext_lead", "side"),
     )
 
-    def _factor_metric_specs(self) -> Tuple[Tuple[str, str, str], ...]:
-        return self._FACTOR_METRIC_SPECS
+    def _factor_metric_specs(self) -> Tuple[Tuple[str, str, str, str], ...]:
+        import config
+
+        settings = getattr(config, "FACTOR", None)
+        specs = self._FACTOR_METRIC_SPECS
+        if getattr(settings, "external_factors_enabled", True):
+            specs = specs + self._FACTOR_EXTERNAL_SPECS
+        return specs
 
     def _factor_side_sign(self) -> float:
         import config
@@ -64,8 +87,11 @@ class FactorScoringMixin:
         settings = getattr(config, "FACTOR", None)
         overrides = dict(getattr(settings, "weights", ()) or ())
         weights = {}
-        for name, _key, _kind in self._factor_metric_specs():
-            weights[name] = max(0.0, self._safe_float(overrides.get(name), 1.0))
+        for name, _source, _key, _kind in self._factor_metric_specs():
+            # Signed weights are allowed: a negative weight inverts a factor
+            # (e.g. treating relative strength as cross-sectional reversion
+            # instead of momentum). Missing factors default to +1.0.
+            weights[name] = self._safe_float(overrides.get(name), 1.0)
         return weights
 
     @staticmethod
@@ -111,6 +137,66 @@ class FactorScoringMixin:
         )
         return max(0.0, self._safe_float(context.get(key), 1.0))
 
+    def _factor_regime_side_offset(self, btc_return: float = 0.0) -> float:
+        """Common (market-wide) regime tilt added to every symbol's composite.
+
+        Gold/BTC macro budget penalises the disfavoured side; BTC 30m momentum
+        adds a symmetric tilt. A constant shift does not change within-side
+        ranking -- it gates trade count via the absolute ``entry_min_composite``
+        threshold (and reallocates slots when sides are pooled)."""
+        import config
+
+        settings = getattr(config, "FACTOR", None)
+        if not settings or not getattr(settings, "entry_side_budget_scaling", False):
+            return 0.0
+        offset = 0.0
+        kappa_macro = max(
+            0.0, self._safe_float(getattr(settings, "macro_offset_strength", 0.0), 0.0)
+        )
+        if kappa_macro > 0:
+            offset += kappa_macro * (self._factor_side_budget_multiplier() - 1.0)
+        kappa_btc = max(
+            0.0, self._safe_float(getattr(settings, "btc_offset_strength", 0.0), 0.0)
+        )
+        if kappa_btc > 0:
+            ref = max(
+                1e-9,
+                self._safe_float(getattr(settings, "btc_return_reference", 0.005), 0.005),
+            )
+            offset += (
+                self._factor_side_sign()
+                * kappa_btc
+                * math.tanh(self._safe_float(btc_return, 0.0) / ref)
+            )
+        return offset
+
+    def _factor_external_raw(self, symbol: str) -> Optional[Dict[str, float]]:
+        """Directional raw values for the external factors, or None when the
+        MEXC reference is missing/invalid (factor stays neutral, never blocks)."""
+        getter = getattr(self, "_external_price_context", None)
+        if not getter:
+            return None
+        try:
+            context = getter(symbol)
+        except Exception:
+            return None
+        if not context or not context.get("valid"):
+            return None
+        spread = self._safe_float(context.get("spread_bps"), 0.0)
+        htx_change = self._safe_float(context.get("htx_change_1m_bps"), 0.0)
+        mexc_change = self._safe_float(context.get("mexc_change_1m_bps"), 0.0)
+        return {"ext_spread": -spread, "ext_lead": mexc_change - htx_change}
+
+    def _factor_external_value(
+        self, symbol: str, key: str, cache: Dict[str, Optional[Dict[str, float]]]
+    ) -> Optional[float]:
+        if symbol not in cache:
+            cache[symbol] = self._factor_external_raw(symbol)
+        raws = cache[symbol]
+        if not raws:
+            return None
+        return raws.get(key)
+
     def _factor_usable_symbols(self, signals: Dict[str, dict]) -> List[str]:
         usable = []
         for symbol, signal in (signals or {}).items():
@@ -141,23 +227,45 @@ class FactorScoringMixin:
         winsor = max(0.0, self._safe_float(getattr(settings, "winsor", 3.0), 3.0))
         weights = self._factor_weights()
 
+        external_cache: Dict[str, Optional[Dict[str, float]]] = {}
         z_by_metric: Dict[str, Dict[str, float]] = {}
-        for name, key, kind in specs:
-            raws = [
-                self._factor_directional_value(
-                    kind, self._safe_float(signals[s].get(key), 0.0), side_sign
-                )
-                for s in usable
-            ]
-            zs = self._factor_robust_z(raws)
+        for name, source, key, kind in specs:
+            raw_by_symbol: Dict[str, float] = {}
+            for s in usable:
+                if source == "external":
+                    value = self._factor_external_value(s, key, external_cache)
+                    if value is None:
+                        continue  # missing reference -> neutral (absent => z=0)
+                    raw_by_symbol[s] = self._factor_directional_value(
+                        kind, value, side_sign
+                    )
+                else:
+                    raw_by_symbol[s] = self._factor_directional_value(
+                        kind, self._safe_float(signals[s].get(key), 0.0), side_sign
+                    )
+            present = list(raw_by_symbol.keys())
+            zs = self._factor_robust_z([raw_by_symbol[s] for s in present])
             if winsor > 0:
                 zs = [max(-winsor, min(winsor, z)) for z in zs]
-            z_by_metric[name] = dict(zip(usable, zs))
+            z_by_metric[name] = dict(zip(present, zs))
+
+        btc_return = 0.0
+        for s in usable:
+            value = signals[s].get("btc_return_30m")
+            if value is not None:
+                btc_return = self._safe_float(value, 0.0)
+                break
+        side_offset = self._factor_regime_side_offset(btc_return)
 
         composites: Dict[str, float] = {}
         for s in usable:
-            z_record = {name: z_by_metric[name].get(s, 0.0) for name, _k, _kd in specs}
-            composite = sum(weights.get(name, 1.0) * z for name, z in z_record.items())
+            z_record = {
+                name: z_by_metric[name].get(s, 0.0) for name, _src, _k, _kd in specs
+            }
+            composite = (
+                sum(weights.get(name, 1.0) * z for name, z in z_record.items())
+                + side_offset
+            )
             composites[s] = composite
             signal = signals[s]
             signal["factor_z"] = z_record
@@ -175,6 +283,8 @@ class FactorScoringMixin:
             "universe": len(usable),
             "weights": weights,
             "side_budget_multiplier": self._factor_side_budget_multiplier(),
+            "side_offset": side_offset,
+            "btc_return_30m": btc_return,
             "winsor": winsor,
         }
 
@@ -219,11 +329,13 @@ class FactorScoringMixin:
             "profile": self._current_profile_name(),
             "side": config.POSITION_SIDE,
             "universe": int(summary.get("universe") or 0),
-            "metrics": [name for name, _k, _kd in specs],
+            "metrics": [name for name, _src, _k, _kd in specs],
             "weights": summary.get("weights") or {},
             "side_budget_multiplier": self._safe_float(
                 summary.get("side_budget_multiplier"), 1.0
             ),
+            "side_offset": self._safe_float(summary.get("side_offset"), 0.0),
+            "btc_return_30m": self._safe_float(summary.get("btc_return_30m"), 0.0),
             "rows": rows,
         }
         self._append_jsonl(path, payload)
@@ -253,8 +365,9 @@ class FactorScoringMixin:
         signal_ts: Optional[float] = None,
     ) -> dict:
         """Pick the top-K competitors by composite (+ random controls) for the
-        current interval. Selection is stable within an interval bucket so the
-        same names are chosen on every poll until the bucket rolls over."""
+        current interval. Regime tilt is already baked into the composite via the
+        side offset, so selection is top-K intersected with the absolute
+        ``entry_min_composite`` threshold. Stable within an interval bucket."""
         import config
 
         now = time.time() if now is None else now
@@ -271,9 +384,6 @@ class FactorScoringMixin:
 
         ranked = sorted(competing, key=lambda s: (-self._safe_float(composites.get(s), 0.0), s))
         top_k = max(0, int(getattr(settings, "entry_top_k", 0)))
-        if getattr(settings, "entry_side_budget_scaling", False) and top_k > 0:
-            multiplier = self._safe_float(summary.get("side_budget_multiplier"), 1.0)
-            top_k = int(math.floor(top_k * max(0.0, multiplier) + 1e-9))
 
         min_composite = self._safe_float(getattr(settings, "entry_min_composite", 0.0), 0.0)
         top = [

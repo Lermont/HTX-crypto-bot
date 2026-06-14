@@ -642,12 +642,16 @@ class FactorSettings:
     winsor: float
     min_symbols: int
     weights: Tuple[Tuple[str, float], ...]
+    external_factors_enabled: bool
     entry_enabled: bool
     entry_top_k: int
     entry_interval_minutes: float
     entry_random_control: int
     entry_min_composite: float
     entry_side_budget_scaling: bool
+    macro_offset_strength: float
+    btc_offset_strength: float
+    btc_return_reference: float
     exit_enabled: bool
     exit_horizon_minutes: float
     exit_walk_minutes: float
@@ -679,6 +683,9 @@ def _make_factor_settings(name: str) -> FactorSettings:
         winsor=max(0.0, _env_float("FACTOR_WINSOR", 3.0, profile=name)),
         min_symbols=max(2, _env_int("FACTOR_MIN_SYMBOLS", 5, profile=name)),
         weights=_parse_factor_weight_overrides(_env("FACTOR_WEIGHTS", profile=name)),
+        external_factors_enabled=_env_bool(
+            "FACTOR_EXTERNAL_FACTORS_ENABLED", True, profile=name
+        ),
         entry_enabled=_env_bool("FACTOR_ENTRY_ENABLED", False, profile=name),
         entry_top_k=max(0, _env_int("FACTOR_ENTRY_TOP_K", 3, profile=name)),
         entry_interval_minutes=max(
@@ -690,6 +697,15 @@ def _make_factor_settings(name: str) -> FactorSettings:
         entry_min_composite=_env_float("FACTOR_ENTRY_MIN_COMPOSITE", 0.0, profile=name),
         entry_side_budget_scaling=_env_bool(
             "FACTOR_ENTRY_SIDE_BUDGET_SCALING", True, profile=name
+        ),
+        macro_offset_strength=max(
+            0.0, _env_float("FACTOR_MACRO_OFFSET_STRENGTH", 5.0, profile=name)
+        ),
+        btc_offset_strength=max(
+            0.0, _env_float("FACTOR_BTC_OFFSET_STRENGTH", 2.0, profile=name)
+        ),
+        btc_return_reference=max(
+            1e-9, _env_float("FACTOR_BTC_RETURN_REFERENCE", 0.005, profile=name)
         ),
         exit_enabled=_env_bool("FACTOR_EXIT_ENABLED", True, profile=name),
         exit_horizon_minutes=max(

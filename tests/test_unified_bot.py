@@ -4383,6 +4383,41 @@ class UnifiedBotTests(unittest.TestCase):
                 )
                 self.assertEqual(state.exit_runner_contracts, 70.0)
 
+    def test_ensure_sell_ladder_rebuilds_missing_fixed_exit_when_closeable_is_capped(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_trailing_enabled=True,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 100.0
+                state.position_available = 30.0
+                state.entry_price = 100.0
+                state.initial_entry_notional = 10000.0
+                state.sell_ladder_orders = []
+                state.exit_runner_contracts = 70.0
+                state.sell_ladder_signature = bot._exit_ladder_signature(
+                    "normal", SYMBOL, state
+                )
+
+                bot._ensure_sell_ladder(SYMBOL)
+
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                self.assertEqual(bot.exchange.created_orders[0]["amount"], 30.0)
+                self.assertTrue(
+                    bot.exchange.created_orders[0]["params"].get("reduceOnly")
+                )
+                self.assertEqual(
+                    [ref["amount"] for ref in state.sell_ladder_orders], [30.0]
+                )
+                self.assertEqual(state.exit_runner_contracts, 70.0)
+
     def test_ensure_sell_ladder_keeps_runner_only_remainder_when_signature_matches(
         self,
     ):
@@ -5312,30 +5347,71 @@ class UnifiedBotTests(unittest.TestCase):
                 )
                 self.assertEqual(sel["random"], sel2["random"])
 
-    def test_factor_select_entries_side_budget_scaling(self):
+    def test_factor_regime_side_offset_shifts_composite(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            bot._factor_side_budget_multiplier = lambda: 0.8
+            factor = replace(
+                config.FACTOR,
+                entry_side_budget_scaling=True,
+                macro_offset_strength=5.0,
+                btc_offset_strength=0.0,
+            )
+            with override_config(FACTOR=factor):
+                # macro term only: 5 * (0.8 - 1) = -1.0
+                self.assertAlmostEqual(bot._factor_regime_side_offset(0.0), -1.0)
+            disabled = replace(config.FACTOR, entry_side_budget_scaling=False)
+            with override_config(FACTOR=disabled):
+                self.assertEqual(bot._factor_regime_side_offset(0.05), 0.0)
+
+    def test_factor_negative_weight_inverts_factor(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
             signals = {
-                f"S{i}/USDT": self._factor_signal(macro_gap=i * 0.001)
-                for i in range(8)
+                f"S{i}/USDT": self._factor_signal(rs60=i * 0.001) for i in range(6)
+            }
+            # zero the common side offset so only the rs60 factor drives the rank
+            base = replace(
+                config.FACTOR,
+                macro_offset_strength=0.0,
+                btc_offset_strength=0.0,
+                weights=(),
+            )
+            with override_config(FACTOR=base):
+                bot._compute_factor_scores(signals)
+                # default (+1) weight: strongest rs60 ranks above weakest
+                self.assertGreater(
+                    signals["S5/USDT"]["factor_composite"],
+                    signals["S0/USDT"]["factor_composite"],
+                )
+            inverted = replace(base, weights=(("rs60", -1.0),))
+            with override_config(FACTOR=inverted):
+                bot._compute_factor_scores(signals)
+                # negative weight inverts it: strongest rs60 now ranks below weakest
+                self.assertLess(
+                    signals["S5/USDT"]["factor_composite"],
+                    signals["S0/USDT"]["factor_composite"],
+                )
+
+    def test_factor_external_factors_neutral_when_unavailable(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signals = {
+                f"S{i}/USDT": self._factor_signal(macro_gap=i * 0.001, rs60=i * 0.001)
+                for i in range(6)
             }
             summary = bot._compute_factor_scores(signals)
-            summary["side_budget_multiplier"] = 0.5
-            factor = replace(
-                config.FACTOR,
-                entry_enabled=True,
-                entry_top_k=4,
-                entry_random_control=0,
-                entry_interval_minutes=0.0,
-                entry_side_budget_scaling=True,
-            )
-            with override_config(FACTOR=factor):
-                sel = bot._factor_select_entries(
-                    list(signals.keys()), signals, summary, now=1.0, signal_ts=0
-                )
-                # 4 * 0.5 = 2 effective top-K
-                self.assertEqual(sel["effective_top_k"], 2)
-                self.assertEqual(len(sel["top"]), 2)
+            names = [n for n, _s, _k, _kd in bot._factor_metric_specs()]
+            self.assertIn("ext_spread", names)
+            self.assertIn("ext_lead", names)
+            self.assertNotIn("score", names)
+            for s in signals:
+                z = signals[s]["factor_z"]
+                self.assertEqual(z.get("ext_spread"), 0.0)
+                self.assertEqual(z.get("ext_lead"), 0.0)
+            # ranking still driven by the available signal factors
+            self.assertEqual(summary["ranked"][0], "S5/USDT")
+            self.assertEqual(summary["ranked"][-1], "S0/USDT")
 
     def test_prepare_factor_entry_gate_selects_top_and_random(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -9593,6 +9669,66 @@ class UnifiedBotTests(unittest.TestCase):
                 self.assertEqual(
                     state.sell_ladder_signature, bot._sell_ladder_signature("normal")
                 )
+                self.assertEqual(bot.exchange.canceled_orders, [])
+
+    def test_tracked_exit_rotation_preserves_runner_coverage(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_exit_runner_enabled=True,
+                ema_exit_trailing_enabled=True,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 42.0
+                state.position_available = 28.0
+                state.position_frozen = 14.0
+                state.entry_price = 100.0
+                state.initial_entry_notional = 4200.0
+                state.exit_runner_contracts = 28.0
+                state.sell_ladder_signature = bot._exit_ladder_signature(
+                    "normal", SYMBOL, state
+                )
+                state.sell_ladder_orders = [
+                    {
+                        "id": "old_buy",
+                        "side": "buy",
+                        "price": 99.0,
+                        "amount": 14.0,
+                    }
+                ]
+
+                valid = bot._validate_sell_orders(
+                    SYMBOL,
+                    [
+                        {
+                            "id": "rotated_buy",
+                            "symbol": SYMBOL,
+                            "side": "buy",
+                            "price": 99.0,
+                            "amount": 14.0,
+                            "remaining": 14.0,
+                            "reduceOnly": True,
+                        }
+                    ],
+                )
+
+                self.assertTrue(valid)
+                self.assertEqual(
+                    [order["id"] for order in state.sell_ladder_orders],
+                    ["rotated_buy"],
+                )
+                self.assertEqual(state.exit_runner_contracts, 28.0)
+                self.assertEqual(
+                    state.sell_ladder_signature,
+                    bot._exit_ladder_signature("normal", SYMBOL, state),
+                )
+
+                bot._ensure_sell_ladder(SYMBOL)
+
+                self.assertEqual(bot.exchange.created_orders, [])
                 self.assertEqual(bot.exchange.canceled_orders, [])
 
     def test_tracked_and_unknown_safe_close_orders_are_merged_without_exceeding_position(

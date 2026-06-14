@@ -1836,6 +1836,7 @@ class ExitStrategy:
         ladder_contracts: float,
         steps: List[dict],
         state: Optional[TradeState],
+        desired_total_contracts: Optional[float] = None,
     ) -> Tuple[List[Tuple[int, dict, float]], float]:
         fixed_steps = [
             (index, step)
@@ -1851,6 +1852,14 @@ class ExitStrategy:
             if step.get("runner")
         )
 
+        desired_total = ladder_contracts
+        if desired_total_contracts is not None:
+            desired_total = max(
+                ladder_contracts,
+                self._safe_float(desired_total_contracts, ladder_contracts),
+            )
+            desired_total = self._amount_to_precision(symbol, desired_total)
+
         fixed_contracts = ladder_contracts
         runner_contracts = 0.0
         if runner_fraction_total > 0 and fixed_fraction_total > 0:
@@ -1861,10 +1870,14 @@ class ExitStrategy:
             )
             if existing_runner > 0:
                 runner_contracts = self._amount_to_precision(
-                    symbol, min(ladder_contracts, existing_runner)
+                    symbol, min(desired_total, existing_runner)
                 )
                 fixed_contracts = self._amount_to_precision(
-                    symbol, max(0.0, ladder_contracts - runner_contracts)
+                    symbol,
+                    min(
+                        ladder_contracts,
+                        max(0.0, desired_total - runner_contracts),
+                    ),
                 )
             else:
                 fixed_target = self._amount_to_precision(
@@ -2734,7 +2747,11 @@ class ExitStrategy:
             signal=signal,
         )
         allocations, runner_contracts = self._exit_ladder_contract_allocations(
-            symbol, ladder_contracts, steps, state
+            symbol,
+            ladder_contracts,
+            steps,
+            state,
+            desired_total_contracts=total_contracts,
         )
         state.sell_ladder_signature = signature_override or self._sell_ladder_signature(
             mode,
@@ -3721,6 +3738,66 @@ class ExitStrategy:
         self._save_state()
         return False
 
+    def _adopted_exit_runner_coverage(
+        self, symbol: str, state: TradeState, adopted_contracts: float, reason: str
+    ) -> Tuple[bool, float, str]:
+        if adopted_contracts <= 0 or state.position_size <= 0 or state.entry_price <= 0:
+            return False, 0.0, ""
+        if not any(
+            marker in reason
+            for marker in (
+                "tracked_exit_id_rotated",
+                "tracked_unknown_exit_orders_merged",
+            )
+        ):
+            return False, 0.0, ""
+
+        mode = state.sell_ladder_mode or "normal"
+        if mode != "normal" or self._should_use_split_exit_ladder(symbol, state, mode):
+            return False, 0.0, ""
+
+        steps, plan_context = self._sell_ladder_plan(
+            symbol,
+            state.position_size,
+            state.entry_price,
+            mode=mode,
+            state=state,
+        )
+        if not plan_context.get("runner_enabled"):
+            return False, 0.0, ""
+
+        _, planned_runner = self._exit_ladder_contract_allocations(
+            symbol,
+            state.position_size,
+            steps,
+            state,
+            desired_total_contracts=state.position_size,
+        )
+        planned_runner = self._amount_to_precision(
+            symbol, min(max(0.0, planned_runner), state.position_size)
+        )
+        expected_fixed = self._amount_to_precision(
+            symbol, max(0.0, state.position_size - planned_runner)
+        )
+        eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
+        if adopted_contracts + eps < expected_fixed:
+            return False, 0.0, ""
+
+        runner_contracts = self._amount_to_precision(
+            symbol, max(0.0, state.position_size - adopted_contracts)
+        )
+        if adopted_contracts + runner_contracts + eps < state.position_size:
+            return False, 0.0, ""
+        return (
+            True,
+            runner_contracts,
+            (
+                "runner_external_exit_coverage;"
+                f"fixed_target={expected_fixed:.12f};"
+                f"runner_contracts={runner_contracts:.12f}"
+            ),
+        )
+
     def _adopt_sell_orders(
         self, symbol: str, open_sell_orders: List[dict], reason: str
     ) -> bool:
@@ -3778,16 +3855,28 @@ class ExitStrategy:
         state.sell_ladder_orders = adopted
         state.sell_ladder_mode = state.sell_ladder_mode or "normal"
         full_coverage = remaining + eps >= state.position_size
-        state.sell_ladder_signature = (
-            self._exit_ladder_signature(state.sell_ladder_mode, symbol, state)
-            if full_coverage
-            else ""
+        runner_coverage, runner_contracts, runner_reason = (
+            self._adopted_exit_runner_coverage(symbol, state, remaining, reason)
         )
+        if full_coverage:
+            self._reset_exit_runner_state(state)
+            state.sell_ladder_signature = self._exit_ladder_signature(
+                state.sell_ladder_mode, symbol, state
+            )
+        elif runner_coverage:
+            state.exit_runner_contracts = runner_contracts
+            state.sell_ladder_signature = self._exit_ladder_signature(
+                state.sell_ladder_mode, symbol, state
+            )
+        else:
+            state.sell_ladder_signature = ""
+            self._reset_exit_runner_state(state)
         self._clear_pending_exit_ladder(state)
-        self._reset_exit_runner_state(state)
         self._refresh_active_side(state)
         log_reason = reason
-        if not full_coverage:
+        if runner_coverage and runner_reason:
+            log_reason = f"{reason};{runner_reason}"
+        elif not full_coverage:
             log_reason = (
                 f"{reason};partial_external_exit_coverage;"
                 f"covered={remaining:.12f};position={state.position_size:.12f}"
