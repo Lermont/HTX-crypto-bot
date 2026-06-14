@@ -449,11 +449,15 @@ class EntryStrategy:
         )
         signal_for_quality = dict(signal or {})
         signal_for_quality["symbol"] = symbol
-        signal_block_reason = (
-            self._averaging_signal_block_reason(signal_for_quality)
-            if is_average_ladder
-            else self._entry_signal_quality_block_reason(signal_for_quality)
-        )
+        factor_mode = bool(getattr(config.FACTOR, "entry_enabled", False))
+        if is_average_ladder:
+            signal_block_reason = self._averaging_signal_block_reason(signal_for_quality)
+        elif factor_mode:
+            # Factor entries are selected by composite rank, not the conjunctive
+            # quality gate, so they are not cancelled when that gate fails.
+            signal_block_reason = ""
+        else:
+            signal_block_reason = self._entry_signal_quality_block_reason(signal_for_quality)
         if signal_block_reason:
             self._cancel_entry_orders(
                 symbol,
@@ -1089,17 +1093,19 @@ class EntryStrategy:
             return
         if state.cooldown_until and time.time() < state.cooldown_until:
             return
+        factor_mode = bool(getattr(config.FACTOR, "entry_enabled", False))
         signal_for_quality = dict(signal or {})
         signal_for_quality["symbol"] = symbol
-        quality_reason = self._entry_signal_quality_block_reason(signal_for_quality)
-        if quality_reason:
-            self._record_signal_analytics(
-                "entry_gate_checked",
-                symbol=symbol,
-                signal=signal_for_quality,
-                block_reason=quality_reason,
-            )
-            return
+        if not factor_mode:
+            quality_reason = self._entry_signal_quality_block_reason(signal_for_quality)
+            if quality_reason:
+                self._record_signal_analytics(
+                    "entry_gate_checked",
+                    symbol=symbol,
+                    signal=signal_for_quality,
+                    block_reason=quality_reason,
+                )
+                return
         if state.last_entry_ladder_signal_timestamp == (signal or {}).get("ts"):
             return
         macro_context = self._macro_guard_context()
@@ -1113,7 +1119,9 @@ class EntryStrategy:
             )
             self._log_macro_action_blocked("macro_entry_blocked", symbol, signal, macro_context)
             return
-        btc_block_reason = self._entry_btc_momentum_block_reason(signal)
+        btc_block_reason = (
+            "" if factor_mode else self._entry_btc_momentum_block_reason(signal)
+        )
         if btc_block_reason:
             self._record_signal_analytics(
                 "entry_gate_checked",
@@ -1301,7 +1309,20 @@ class EntryStrategy:
             )
             return
 
-        self._place_buy_ladder(symbol, budget, reference_price, signal, reason=f"ema_initial_signal;{budget_reason}")
+        if factor_mode:
+            gate = getattr(self, "entry_gate", {}) or {}
+            kind = "random" if symbol in gate.get("factor_random_symbols", set()) else "top"
+            sig = signal or {}
+            place_reason = (
+                f"factor_entry;kind={kind};"
+                f"composite={self._safe_float(sig.get('factor_composite'), 0.0):.6f};"
+                f"rank={int(sig.get('factor_rank') or 0)};"
+                f"universe={int(sig.get('factor_universe') or 0)};{budget_reason}"
+            )
+            self._get_state(symbol).factor_entry = True
+        else:
+            place_reason = f"ema_initial_signal;{budget_reason}"
+        self._place_buy_ladder(symbol, budget, reference_price, signal, reason=place_reason)
 
 
 __all__ = ["EntryStrategy"]

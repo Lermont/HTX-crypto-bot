@@ -92,6 +92,7 @@ class StateMixin:
         "last_average_at",
         "last_ema_strategy_signal_timestamp",
         "breakeven_activated_at",
+        "factor_horizon_activated_at",
         "exit_runner_activated_at",
         "soft_defensive_last_signal_timestamp",
         "soft_defensive_exit_activated_at",
@@ -108,6 +109,7 @@ class StateMixin:
         "frozen_no_more_buys",
         "zombie_position",
         "exit_runner_active",
+        "factor_entry",
     }
 
     def _is_transient_replace_error(self, exc: OSError) -> bool:
@@ -305,6 +307,21 @@ class StateMixin:
                     continue
                 except OSError as exc:
                     raise RuntimeError(f"Could not remove stale runtime lock {self.lock_path}: {exc}") from exc
+                log_event = getattr(self, "_log_event", None)
+                if callable(log_event):
+                    try:
+                        log_event(
+                            "WARNING",
+                            f"Removed stale runtime lock {self.lock_path} owned by PID {existing_pid or 'unknown'}",
+                            event="futures_setup",
+                            reason="stale_runtime_lock_removed",
+                            diagnostic_context={
+                                "lock_path": str(self.lock_path),
+                                "owner_pid": existing_pid,
+                            },
+                        )
+                    except Exception:
+                        pass
                 continue
 
             try:

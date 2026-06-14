@@ -157,6 +157,8 @@ class TradeState:
     strategy_name: str = "ema_pullback"
     last_ema_strategy_signal_timestamp: Optional[float] = None
     breakeven_activated_at: Optional[float] = None
+    factor_entry: bool = False
+    factor_horizon_activated_at: Optional[float] = None
     exit_runner_active: bool = False
     exit_runner_activated_at: Optional[float] = None
     exit_runner_peak_price: float = 0.0

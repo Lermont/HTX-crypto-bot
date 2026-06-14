@@ -61,6 +61,8 @@ def parse_args():
     parser.add_argument("--check-interval-sec", type=float, default=10.0,
                         help="How often to poll the heartbeat (default 10).")
     parser.add_argument("--logfile", default="watchdog.log")
+    parser.add_argument("--child-logfile", default="bot_child.log",
+                        help="File for bot stdout/stderr captured by the watchdog.")
     parser.add_argument("command", nargs="*",
                         help="Bot command (default: <python> bot.py)")
     return parser.parse_args()
@@ -71,9 +73,23 @@ def main():
     command = args.command or [sys.executable, "bot.py"]
     restarts = 0
     while True:
-        process = subprocess.Popen(command)
+        child_log = None
+        try:
+            child_log = open(args.child_logfile, "a", encoding="utf-8", buffering=1)
+            child_log.write(
+                f"\n{datetime.now():%Y-%m-%d %H:%M:%S} | watchdog | starting child restart #{restarts}: {' '.join(command)}\n"
+            )
+        except OSError as exc:
+            log(f"could not open child log {args.child_logfile}: {exc}", args.logfile)
+            child_log = None
+
+        process = subprocess.Popen(
+            command,
+            stdout=child_log or None,
+            stderr=subprocess.STDOUT if child_log else None,
+        )
         started_at = time.time()
-        log(f"started: pid={process.pid} cmd={' '.join(command)} (restart #{restarts})", args.logfile)
+        log(f"started: pid={process.pid} cmd={' '.join(command)} (restart #{restarts}); child_log={args.child_logfile}", args.logfile)
         reason = ""
         try:
             while True:
@@ -105,7 +121,12 @@ def main():
                 process.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 pass
+            if child_log is not None:
+                child_log.close()
             return
+        finally:
+            if child_log is not None and not child_log.closed:
+                child_log.close()
         restarts += 1
         log(f"restarting: {reason}", args.logfile)
         time.sleep(max(0.0, args.restart_delay_sec))

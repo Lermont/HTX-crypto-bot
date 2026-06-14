@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 
+from .factor_scoring import FactorScoringMixin
 from .strategy_entry import EntryStrategy
 from .strategy_exit import ExitStrategy
 from .strategy_filters import SignalFilters
 from .strategy_risk import RiskManager
 
 
-class StrategyMixin(RiskManager, SignalFilters, ExitStrategy, EntryStrategy):
+class StrategyMixin(
+    RiskManager, SignalFilters, ExitStrategy, EntryStrategy, FactorScoringMixin
+):
     """Compatibility facade for the decomposed strategy components."""
 
 

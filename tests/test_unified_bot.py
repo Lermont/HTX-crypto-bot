@@ -184,6 +184,10 @@ class FakeExchange:
         self.fetch_order_responses = {}
         self.fetch_my_trades_responses = {}
         self.fetch_my_trades_calls = []
+        self.hidden_tpsl_orders = []
+        self.hidden_trigger_orders = []
+        self.hidden_track_orders = []
+        self.hidden_fetch_calls = []
         self.ohlcv = {}
         self.ohlcv_calls = []
         self.reject_leverage_above = None
@@ -434,6 +438,43 @@ class FakeExchange:
             "data": data,
         }
 
+    def _hidden_open_orders_response(self, hidden_type, request, orders):
+        self.hidden_fetch_calls.append((hidden_type, dict(request)))
+        return {
+            "status": "ok",
+            "data": {"orders": [dict(order) for order in orders]},
+        }
+
+    def contractPrivatePostLinearSwapApiV1SwapCrossTpslOpenorders(self, request):
+        return self._hidden_open_orders_response(
+            "tpsl", request, self.hidden_tpsl_orders
+        )
+
+    def contractPrivatePostLinearSwapApiV1SwapCrossTriggerOpenorders(self, request):
+        return self._hidden_open_orders_response(
+            "trigger", request, self.hidden_trigger_orders
+        )
+
+    def contractPrivatePostLinearSwapApiV1SwapCrossTrackOpenorders(self, request):
+        return self._hidden_open_orders_response(
+            "track", request, self.hidden_track_orders
+        )
+
+    def contractPrivatePostLinearSwapApiV1SwapTpslOpenorders(self, request):
+        return self._hidden_open_orders_response(
+            "tpsl", request, self.hidden_tpsl_orders
+        )
+
+    def contractPrivatePostLinearSwapApiV1SwapTriggerOpenorders(self, request):
+        return self._hidden_open_orders_response(
+            "trigger", request, self.hidden_trigger_orders
+        )
+
+    def contractPrivatePostLinearSwapApiV1SwapTrackOpenorders(self, request):
+        return self._hidden_open_orders_response(
+            "track", request, self.hidden_track_orders
+        )
+
 
 class UnifiedBotTests(unittest.TestCase):
     def test_bot_modules_import_without_side_effects(self):
@@ -532,6 +573,7 @@ class UnifiedBotTests(unittest.TestCase):
                 account_pnl_csv_file=str(tmp_path / "account_pnl.csv"),
                 signal_analytics_csv_file=str(tmp_path / "signal_analytics.csv"),
                 signal_analytics_jsonl_file=str(tmp_path / "signal_analytics.jsonl"),
+                factor_snapshot_jsonl_file=str(tmp_path / "factor_snapshots.jsonl"),
                 diagnostics_csv_file=str(tmp_path / "diagnostics.csv"),
                 diagnostics_jsonl_file=str(tmp_path / "diagnostics.jsonl"),
                 csv_archive_dir=str(tmp_path / "archive"),
@@ -616,6 +658,7 @@ class UnifiedBotTests(unittest.TestCase):
         instance.account_pnl_csv_path = tmp_path / "account_pnl.csv"
         instance.signal_analytics_csv_path = tmp_path / "signal_analytics.csv"
         instance.signal_analytics_jsonl_path = tmp_path / "signal_analytics.jsonl"
+        instance.factor_snapshot_jsonl_path = tmp_path / "factor_snapshots.jsonl"
         instance.diagnostics_csv_path = tmp_path / "diagnostics.csv"
         instance.diagnostics_jsonl_path = tmp_path / "diagnostics.jsonl"
         instance.timeframe_sec = 60
@@ -775,6 +818,24 @@ class UnifiedBotTests(unittest.TestCase):
             "ema_gap": score / 4.0,
             "ts": ts,
         }
+
+    def _factor_signal(self, **metrics):
+        base = {
+            "valid": True,
+            "data_valid": True,
+            "entry_valid": False,
+            "ts": 1000,
+            "macro_gap": 0.0,
+            "pullback_recovery_gap": 0.0,
+            "trigger_gap": 0.0,
+            "rs60": 0.0,
+            "rs30": 0.0,
+            "volume_ratio": 1.0,
+            "chop": 50.0,
+            "score": 0.0,
+        }
+        base.update(metrics)
+        return base
 
     def macro_context(self, **overrides):
         context = {
@@ -5159,6 +5220,162 @@ class UnifiedBotTests(unittest.TestCase):
                     "external_reference_invalid", gate["blocked_reasons"][SYMBOL]
                 )
 
+    def test_factor_scores_rank_and_write_back(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signals = {
+                "A/USDT": self._factor_signal(macro_gap=0.01, rs60=0.01, score=0.02),
+                "B/USDT": self._factor_signal(),
+                "C/USDT": self._factor_signal(macro_gap=-0.01, rs60=-0.01, score=-0.02),
+                "D/USDT": self._factor_signal(macro_gap=0.005, rs60=0.004, score=0.01),
+                "E/USDT": self._factor_signal(macro_gap=-0.005, rs60=-0.004, score=-0.01),
+            }
+            summary = bot._compute_factor_scores(signals)
+            self.assertEqual(summary["universe"], 5)
+            self.assertEqual(summary["ranked"][0], "A/USDT")
+            self.assertEqual(summary["ranked"][-1], "C/USDT")
+            self.assertEqual(signals["A/USDT"]["factor_rank"], 1)
+            self.assertIn("macro", signals["A/USDT"]["factor_z"])
+            self.assertGreater(
+                signals["A/USDT"]["factor_composite"],
+                signals["C/USDT"]["factor_composite"],
+            )
+            bot._log_factor_snapshot(signals, summary)
+            lines = (
+                bot.factor_snapshot_jsonl_path.read_text(encoding="utf-8")
+                .strip()
+                .splitlines()
+            )
+            self.assertEqual(len(lines), 1)
+            record = json.loads(lines[0])
+            self.assertEqual(len(record["rows"]), 5)
+            self.assertEqual(record["rows"][0]["s"], "A/USDT")
+            self.assertIn("macro", record["metrics"])
+
+    def test_factor_scores_short_side_flips_direction(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            bot = self.make_bot(Path(raw_tmp))
+            signals = {
+                "A/USDT": self._factor_signal(
+                    macro_gap=-0.01, rs60=-0.01, rs30=-0.01, trigger_gap=-0.01, score=0.02
+                ),
+                "B/USDT": self._factor_signal(),
+                "C/USDT": self._factor_signal(
+                    macro_gap=0.01, rs60=0.01, rs30=0.01, trigger_gap=0.01, score=-0.02
+                ),
+                "D/USDT": self._factor_signal(
+                    macro_gap=-0.005, rs60=-0.004, rs30=-0.004, trigger_gap=-0.005
+                ),
+                "E/USDT": self._factor_signal(
+                    macro_gap=0.005, rs60=0.004, rs30=0.004, trigger_gap=0.005
+                ),
+            }
+            summary = bot._compute_factor_scores(signals)
+            self.assertEqual(summary["ranked"][0], "A/USDT")
+            self.assertEqual(summary["ranked"][-1], "C/USDT")
+
+    def test_factor_scores_skipped_below_min_symbols(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signals = {"A/USDT": self._factor_signal(macro_gap=0.01)}
+            self.assertEqual(bot._compute_factor_scores(signals), {})
+
+    def test_factor_select_entries_topk_random_and_bucket_stable(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signals = {
+                f"S{i}/USDT": self._factor_signal(
+                    macro_gap=i * 0.001, rs60=i * 0.001, score=i * 0.001
+                )
+                for i in range(8)
+            }
+            summary = bot._compute_factor_scores(signals)
+            factor = replace(
+                config.FACTOR,
+                entry_enabled=True,
+                entry_top_k=2,
+                entry_random_control=1,
+                entry_interval_minutes=60.0,
+                entry_side_budget_scaling=False,
+            )
+            with override_config(FACTOR=factor):
+                competing = list(signals.keys())
+                sel = bot._factor_select_entries(
+                    competing, signals, summary, now=1000.0, signal_ts=1000 * 1000
+                )
+                self.assertEqual(set(sel["top"]), {"S7/USDT", "S6/USDT"})
+                self.assertEqual(len(sel["random"]), 1)
+                self.assertNotIn(sel["random"][0], sel["top"])
+                self.assertEqual(len(sel["allowed"]), 3)
+                sel2 = bot._factor_select_entries(
+                    competing, signals, summary, now=1005.0, signal_ts=1000 * 1000
+                )
+                self.assertEqual(sel["random"], sel2["random"])
+
+    def test_factor_select_entries_side_budget_scaling(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signals = {
+                f"S{i}/USDT": self._factor_signal(macro_gap=i * 0.001)
+                for i in range(8)
+            }
+            summary = bot._compute_factor_scores(signals)
+            summary["side_budget_multiplier"] = 0.5
+            factor = replace(
+                config.FACTOR,
+                entry_enabled=True,
+                entry_top_k=4,
+                entry_random_control=0,
+                entry_interval_minutes=0.0,
+                entry_side_budget_scaling=True,
+            )
+            with override_config(FACTOR=factor):
+                sel = bot._factor_select_entries(
+                    list(signals.keys()), signals, summary, now=1.0, signal_ts=0
+                )
+                # 4 * 0.5 = 2 effective top-K
+                self.assertEqual(sel["effective_top_k"], 2)
+                self.assertEqual(len(sel["top"]), 2)
+
+    def test_prepare_factor_entry_gate_selects_top_and_random(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            symbols = [f"S{i}/USDT" for i in range(8)]
+            bot.entry_symbols = set(symbols)
+            signals = {
+                s: self._factor_signal(
+                    macro_gap=i * 0.001, rs60=i * 0.001, score=i * 0.001
+                )
+                for i, s in enumerate(symbols)
+            }
+            summary = bot._compute_factor_scores(signals)
+            bot.signal_cache = {
+                "benchmark_ok": True,
+                "closed_candle_ts": 1000,
+                "symbols": signals,
+                "factor_summary": summary,
+            }
+            factor = replace(
+                config.FACTOR,
+                entry_enabled=True,
+                entry_top_k=2,
+                entry_random_control=1,
+                entry_interval_minutes=0.0,
+                entry_side_budget_scaling=False,
+            )
+            with override_config(FACTOR=factor):
+                gate = bot._prepare_new_entry_gate()
+            self.assertTrue(gate.get("factor_mode"))
+            self.assertEqual(len(gate["allowed_symbols"]), 3)
+            self.assertIn("S7/USDT", gate["allowed_symbols"])
+            blocked = [s for s in symbols if s not in gate["allowed_symbols"]]
+            self.assertTrue(
+                any(
+                    "factor_not_selected" in gate["blocked_reasons"].get(s, "")
+                    for s in blocked
+                )
+            )
+
     def test_entry_gate_rate_limit_counts_recent_positions(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             strategy = replace(
@@ -6937,6 +7154,271 @@ class UnifiedBotTests(unittest.TestCase):
                         item["type"].startswith("stop") or item["type"] == "market"
                         for item in bot.exchange.created_orders
                     )
+                )
+
+    def test_factor_horizon_progress_ramps_over_walk(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            factor = replace(config.FACTOR, exit_walk_minutes=60.0)
+            with override_config(FACTOR=factor):
+                state.factor_horizon_activated_at = None
+                self.assertEqual(bot._factor_horizon_progress(state), 0.0)
+                state.factor_horizon_activated_at = time.time() - 30.0 * 60.0
+                self.assertAlmostEqual(bot._factor_horizon_progress(state), 0.5, places=2)
+                state.factor_horizon_activated_at = time.time() - 120.0 * 60.0
+                self.assertEqual(bot._factor_horizon_progress(state), 1.0)
+
+    def test_factor_horizon_exit_inactive_without_factor_entry_or_flag(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            state = bot._get_state(SYMBOL)
+            state.position_size = 10.0
+            state.position_available = 10.0
+            state.entry_price = 100.0
+            state.cycle_opened_at = time.time() - 10.0 * 60.0 * 60.0
+            # FACTOR entry mode off -> never applies (default live behaviour)
+            self.assertFalse(bot._maybe_apply_factor_horizon_exit(SYMBOL, None))
+            factor = replace(
+                config.FACTOR, entry_enabled=True, exit_enabled=True, exit_horizon_minutes=1.0
+            )
+            with override_config(FACTOR=factor):
+                # entry mode on but this position is not a factor entry
+                self.assertFalse(bot._maybe_apply_factor_horizon_exit(SYMBOL, None))
+                state.factor_entry = True
+                state.cycle_opened_at = time.time() - 10.0  # below horizon
+                self.assertFalse(bot._maybe_apply_factor_horizon_exit(SYMBOL, None))
+
+    def test_factor_horizon_exit_activates_with_repricing_limit(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            factor = replace(
+                config.FACTOR,
+                entry_enabled=True,
+                exit_enabled=True,
+                exit_horizon_minutes=1.0,
+                exit_walk_minutes=60.0,
+                exit_start_markup=0.004,
+            )
+            with override_config(RUNTIME=runtime, FACTOR=factor):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 10.0
+                state.position_available = 10.0
+                state.entry_price = 100.0
+                state.factor_entry = True
+                state.cycle_opened_at = time.time() - 5.0 * 60.0
+                state.sell_ladder_orders = [
+                    {"id": "tp", "side": "sell", "price": 105.0, "amount": 10.0}
+                ]
+
+                applied = bot._maybe_apply_factor_horizon_exit(
+                    SYMBOL, signal={"valid": True}
+                )
+
+                self.assertTrue(applied)
+                self.assertEqual(state.sell_ladder_mode, "factor_horizon")
+                self.assertTrue(state.frozen_no_more_buys)
+                self.assertIsNotNone(state.factor_horizon_activated_at)
+                self.assertIn(
+                    ("tp", SYMBOL, {"marginMode": config.RISK.margin_mode}),
+                    bot.exchange.canceled_orders,
+                )
+                limit_orders = [
+                    o for o in bot.exchange.created_orders if o["type"] == "limit"
+                ]
+                self.assertEqual(len(limit_orders), 1)
+                order = limit_orders[0]
+                self.assertEqual(order["side"], "sell")
+                self.assertTrue(order["params"].get("reduceOnly"))
+                # progress ~0 at activation -> rests at the profit anchor (> entry)
+                self.assertGreater(order["price"], 100.0)
+                self.assertFalse(
+                    any(
+                        item["type"].startswith("stop") or item["type"] == "market"
+                        for item in bot.exchange.created_orders
+                    )
+                )
+
+    def test_fetch_open_orders_includes_hidden_tpsl_close_order_for_adoption(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                raw_exchange = bot.exchange.unsafe_exchange()
+                state = bot._get_state(SYMBOL)
+                state.position_size = 5.0
+                state.position_available = 0.0
+                state.position_frozen = 5.0
+                state.position_side = "long"
+                state.entry_price = 100.0
+                raw_exchange.hidden_tpsl_orders = [
+                    {
+                        "order_id": "hidden_tp",
+                        "contract_code": "TEST-USDT",
+                        "trade_type": "4",
+                        "volume": 5.0,
+                        "tp_trigger_price": 101.0,
+                        "created_at": int(time.time() * 1000),
+                    }
+                ]
+
+                open_orders = bot._fetch_open_orders(SYMBOL)
+                valid = bot._validate_sell_orders(SYMBOL, open_orders)
+
+                self.assertTrue(valid)
+                tpsl_calls = [
+                    request
+                    for hidden_type, request in raw_exchange.hidden_fetch_calls
+                    if hidden_type == "tpsl"
+                ]
+                self.assertTrue(tpsl_calls)
+                self.assertEqual(tpsl_calls[-1]["contract_code"], "TEST-USDT")
+                self.assertEqual(len(state.sell_ladder_orders), 1)
+                adopted = state.sell_ladder_orders[0]
+                self.assertEqual(adopted["id"], "hidden_tp")
+                self.assertEqual(adopted["hidden_order_type"], "tpsl")
+                self.assertEqual(adopted["cancel_params"], {"stopLossTakeProfit": True})
+                self.assertEqual(state.sell_ladder_mode, "normal")
+
+    def test_breakeven_exit_cancels_hard_stop_before_waiting_for_closeable(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            strategy = replace(
+                config.STRATEGY,
+                ema_breakeven_enabled=True,
+                time_exit_after_minutes=1.0,
+                hard_stop_loss_enabled=True,
+                ema_breakeven_fee_buffer=0.0002,
+            )
+            with override_config(RUNTIME=runtime, STRATEGY=strategy):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 11.0
+                state.position_available = 0.0
+                state.position_frozen = 11.0
+                state.position_side = "short"
+                state.entry_price = 2.016
+                state.cycle_opened_at = time.time() - 90.0
+                state.hard_stop_order = {
+                    "id": "hard",
+                    "side": "buy",
+                    "amount": 11.0,
+                    "trigger_price": 2.05,
+                    "hard_stop_loss": True,
+                    "reduce_only": True,
+                    "cancel_params": {"stopLossTakeProfit": True},
+                }
+                state.hard_stop_signature = "old_hard_stop"
+
+                applied = bot._maybe_apply_time_based_exit(SYMBOL, signal={"valid": True})
+
+                self.assertTrue(applied)
+                self.assertFalse(state.hard_stop_order)
+                self.assertEqual(state.sell_ladder_mode, "breakeven")
+                self.assertTrue(state.frozen_no_more_buys)
+                self.assertEqual(
+                    state.pending_exit_ladder_reason,
+                    "closeable_amount_reserved_by_existing_exit_orders",
+                )
+                self.assertIn(
+                    (
+                        "hard",
+                        SYMBOL,
+                        {
+                            "marginMode": config.RISK.margin_mode,
+                            "stopLossTakeProfit": True,
+                        },
+                    ),
+                    bot.exchange.canceled_orders,
+                )
+                self.assertEqual(bot.exchange.created_orders, [])
+
+                self.assertFalse(bot._ensure_hard_stop_loss(SYMBOL))
+                state.position_available = 11.0
+                state.position_frozen = 0.0
+
+                applied_again = bot._maybe_apply_time_based_exit(
+                    SYMBOL, signal={"valid": True}
+                )
+
+                self.assertTrue(applied_again)
+                self.assertFalse(state.hard_stop_order)
+                self.assertEqual(len(bot.exchange.created_orders), 1)
+                order = bot.exchange.created_orders[0]
+                self.assertEqual(order["type"], "limit")
+                self.assertEqual(order["side"], "buy")
+                self.assertEqual(order["amount"], 11.0)
+                self.assertTrue(order["params"].get("reduceOnly"))
+                self.assertNotIn("stopLossPrice", order["params"])
+
+    def test_managed_exit_validation_cancels_overlapping_hard_stop(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            runtime = replace(config.RUNTIME, reduce_only_enabled=True)
+            with override_config(RUNTIME=runtime):
+                bot = self.make_bot(Path(raw_tmp))
+                state = bot._get_state(SYMBOL)
+                state.position_size = 11.0
+                state.position_available = 0.0
+                state.position_frozen = 11.0
+                state.position_side = "short"
+                state.entry_price = 2.016
+                state.sell_ladder_mode = "breakeven"
+                state.sell_ladder_orders = [
+                    {
+                        "id": "tp",
+                        "side": "buy",
+                        "price": 2.015,
+                        "amount": 11.0,
+                        "mode": "breakeven",
+                    }
+                ]
+                state.hard_stop_order = {
+                    "id": "hard",
+                    "side": "buy",
+                    "amount": 11.0,
+                    "trigger_price": 2.05,
+                    "hard_stop_loss": True,
+                    "reduce_only": True,
+                    "cancel_params": {"stopLossTakeProfit": True},
+                }
+
+                valid = bot._validate_sell_orders(
+                    SYMBOL,
+                    [
+                        {
+                            "id": "tp",
+                            "symbol": SYMBOL,
+                            "side": "buy",
+                            "price": 2.015,
+                            "amount": 11.0,
+                            "remaining": 11.0,
+                            "reduceOnly": True,
+                        },
+                        {
+                            "id": "hard",
+                            "symbol": SYMBOL,
+                            "side": "buy",
+                            "price": 2.05,
+                            "amount": 11.0,
+                            "remaining": 11.0,
+                            "reduceOnly": True,
+                        },
+                    ],
+                )
+
+                self.assertFalse(valid)
+                self.assertFalse(state.hard_stop_order)
+                self.assertIn(
+                    (
+                        "hard",
+                        SYMBOL,
+                        {
+                            "marginMode": config.RISK.margin_mode,
+                            "stopLossTakeProfit": True,
+                        },
+                    ),
+                    bot.exchange.canceled_orders,
                 )
 
     def test_hard_stop_loss_places_reduce_only_tpsl_for_long_position(self):

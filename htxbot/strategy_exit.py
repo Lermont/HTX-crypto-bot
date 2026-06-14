@@ -169,6 +169,38 @@ class ExitStrategy:
             extra_params={"stopLossPrice": trigger_price},
         )
 
+    def _cancel_hard_stop_for_managed_exit(
+        self, symbol: str, mode: str, reason: str
+    ) -> bool:
+        state = self._get_state(symbol)
+        ref = dict(state.hard_stop_order or {})
+        if not ref:
+            return True
+
+        self._log_event(
+            "WARNING",
+            f"Tracked {config.EXIT_SIDE} hard stop conflicts with managed {mode} exit for {symbol}; canceling stop before rebuilding exit ladder",
+            event="reduce_only_violation_prevented",
+            symbol=symbol,
+            side=config.EXIT_SIDE,
+            order_id=str(ref.get("id") or ""),
+            price=self._safe_float(ref.get("trigger_price", ref.get("price")), 0.0),
+            amount=self._safe_float(ref.get("amount"), 0.0),
+            position_size=state.position_size,
+            entry_price=state.entry_price,
+            reason=f"{reason};managed_exit_replaces_hard_stop;mode={mode}",
+        )
+        if self._cancel_hard_stop_order(
+            symbol, reason=f"{reason};managed_exit_replaces_hard_stop"
+        ):
+            return True
+
+        state = self._get_state(symbol)
+        state.frozen_no_more_buys = True
+        self._refresh_active_side(state)
+        self._save_state()
+        return False
+
     def _force_hard_stop_loss_market_close(
         self,
         symbol: str,
@@ -391,6 +423,15 @@ class ExitStrategy:
         if not config.STRATEGY.hard_stop_loss_enabled:
             if state.hard_stop_order:
                 self._cancel_hard_stop_order(symbol, reason="hard_stop_loss_disabled")
+            return False
+
+        if self._is_managed_exit_mode(state.sell_ladder_mode):
+            if state.hard_stop_order:
+                return self._cancel_hard_stop_for_managed_exit(
+                    symbol,
+                    state.sell_ladder_mode,
+                    "hard_stop_loss_managed_exit_conflict",
+                )
             return False
 
         loss_rate, loss_rate_reason = self._hard_stop_loss_rate(signal)
@@ -1077,6 +1118,7 @@ class ExitStrategy:
             "controlled_loss_exit",
             "urgent_time_exit",
             "soft_defensive_exit",
+            "factor_horizon",
         }
 
     def _position_initial_notional(
@@ -1571,6 +1613,12 @@ class ExitStrategy:
         if mode == "soft_defensive_exit":
             context["ladder_name"] = "soft_defensive_exit"
             return [{"fraction": 1.0, "markup": 0.0, "runner": False}], context
+
+        if mode == "factor_horizon":
+            progress = self._factor_horizon_progress(state)
+            context["ladder_name"] = "factor_horizon"
+            context["factor_horizon_progress"] = progress
+            return [{"fraction": 1.0, "markup": progress, "runner": False}], context
 
         if mode == "controlled_loss_exit":
             fractions = tuple(strategy.ema_exit_ladder_fractions)
@@ -2622,6 +2670,13 @@ class ExitStrategy:
             )
             return
 
+        if self._is_managed_exit_mode(mode):
+            if not self._cancel_hard_stop_for_managed_exit(
+                symbol, mode, f"{mode}_exit_ladder"
+            ):
+                return
+            state = self._get_state(symbol)
+
         preflight = self._exit_ladder_preflight(
             symbol,
             total_contracts,
@@ -2761,6 +2816,10 @@ class ExitStrategy:
             )
             if mode == "controlled_loss_exit":
                 price = self._controlled_loss_exit_price(
+                    symbol, avg_entry_price, markup, context=sell_context
+                )
+            elif mode == "factor_horizon":
+                price = self._factor_horizon_exit_price(
                     symbol, avg_entry_price, markup, context=sell_context
                 )
             else:
@@ -4236,9 +4295,38 @@ class ExitStrategy:
         import config
         exit_side = exposure["exit_side"]
         tracked_sell_orders = exposure["tracked_exit_orders"]
+        tracked_hard_stop_orders = exposure["tracked_hard_stop_orders"]
         eps = max(self._get_min_contracts(symbol) * 1e-9, 1e-12)
 
         remaining = sum(self._order_remaining_amount(order) for order in tracked_sell_orders)
+        hard_stop_remaining = sum(
+            self._order_remaining_amount(order) for order in tracked_hard_stop_orders
+        )
+
+        if (
+            remaining > eps
+            and hard_stop_remaining > eps
+            and remaining + hard_stop_remaining > state.position_size + eps
+            and self._is_managed_exit_mode(state.sell_ladder_mode)
+        ):
+            self._log_event(
+                "WARNING",
+                f"Managed {exit_side} exit ladder overlaps tracked hard stop for {symbol}; canceling hard stop before continuing",
+                event="reduce_only_violation_prevented",
+                symbol=symbol,
+                side=exit_side,
+                amount=remaining + hard_stop_remaining,
+                position_size=state.position_size,
+                reason=(
+                    "managed_exit_hard_stop_overlap;"
+                    f"mode={state.sell_ladder_mode};"
+                    f"ladder={remaining:.12f};hard_stop={hard_stop_remaining:.12f}"
+                ),
+            )
+            self._cancel_hard_stop_for_managed_exit(
+                symbol, state.sell_ladder_mode, "managed_exit_hard_stop_overlap"
+            )
+            return False
 
         if remaining > state.position_size + eps:
             self._log_event(
@@ -4413,6 +4501,13 @@ class ExitStrategy:
         state = self._get_state(symbol)
         if state.sell_ladder_orders:
             return True
+        if not self._cancel_hard_stop_for_managed_exit(
+            symbol,
+            "controlled_loss_exit",
+            "controlled_loss_volatility_acceleration",
+        ):
+            return True
+        state = self._get_state(symbol)
 
         self._place_sell_ladder(
             ExitLadderConfig(
@@ -4475,6 +4570,12 @@ class ExitStrategy:
         )
         if block_reason:
             return False
+
+        if not self._cancel_hard_stop_for_managed_exit(
+            symbol, "controlled_loss_exit", reason
+        ):
+            return True
+        state = self._get_state(symbol)
 
         had_sell_ladder = bool(state.sell_ladder_orders)
         close_contracts = self._controlled_loss_contracts(
@@ -4587,6 +4688,13 @@ class ExitStrategy:
                 self._refresh_active_side(state)
                 self._save_state()
                 if not state.sell_ladder_orders:
+                    if not self._cancel_hard_stop_for_managed_exit(
+                        symbol,
+                        "urgent_time_exit",
+                        "controlled_loss_blocked_switch_to_urgent",
+                    ):
+                        return True
+                    state = self._get_state(symbol)
                     self._place_sell_ladder(
                         ExitLadderConfig(
                             symbol,
@@ -4644,6 +4752,11 @@ class ExitStrategy:
                 symbol, "urgent_time_exit", state
             ):
                 return True
+            if not self._cancel_hard_stop_for_managed_exit(
+                symbol, "urgent_time_exit", "urgent_time_exit_missing_ladder"
+            ):
+                return True
+            state = self._get_state(symbol)
             self._place_sell_ladder(
                 ExitLadderConfig(
                     symbol,
@@ -4674,6 +4787,11 @@ class ExitStrategy:
         state = self._get_state(symbol)
         if state.sell_ladder_orders:
             return True
+        if not self._cancel_hard_stop_for_managed_exit(
+            symbol, "urgent_time_exit", "urgent_time_exit_activated"
+        ):
+            return True
+        state = self._get_state(symbol)
         self._place_sell_ladder(
             ExitLadderConfig(
                 symbol,
@@ -4703,6 +4821,8 @@ class ExitStrategy:
             return max(0.0, config.STRATEGY.ema_breakeven_reprice_minutes)
         if mode == "controlled_loss_exit":
             return max(0.0, config.STRATEGY.controlled_loss_reprice_minutes)
+        if mode == "factor_horizon":
+            return max(0.0, self._safe_float(config.FACTOR.exit_reprice_minutes, 0.0))
         return 0.0
 
     def _maybe_reprice_time_exit_ladder(
@@ -4749,6 +4869,12 @@ class ExitStrategy:
         state = self._get_state(symbol)
         if state.sell_ladder_orders:
             return True
+        if self._is_managed_exit_mode(mode):
+            if not self._cancel_hard_stop_for_managed_exit(
+                symbol, mode, f"{mode}_reprice"
+            ):
+                return True
+            state = self._get_state(symbol)
 
         self._place_sell_ladder(
             ExitLadderConfig(
@@ -5241,6 +5367,160 @@ class ExitStrategy:
         )
         return True
 
+    def _factor_horizon_progress(self, state: Optional[TradeState]) -> float:
+        """0 at horizon activation -> 1 after the full profit->market walk."""
+        if state is None:
+            return 0.0
+        activated = self._safe_float(
+            getattr(state, "factor_horizon_activated_at", 0.0), 0.0
+        )
+        if activated <= 0:
+            return 0.0
+        walk = max(0.0, self._safe_float(config.FACTOR.exit_walk_minutes, 0.0))
+        if walk <= 0:
+            return 1.0
+        elapsed_min = max(0.0, (time.time() - activated) / 60.0)
+        return self._clamp(elapsed_min / walk, 0.0, 1.0)
+
+    def _factor_horizon_exit_price(
+        self,
+        symbol: str,
+        avg_entry_price: float,
+        progress: float,
+        context: Optional[dict] = None,
+    ) -> float:
+        """Limit price that walks from a profit anchor toward market price.
+
+        ``progress`` 0 -> rest at entry +/- start_markup (profit); ``progress``
+        1 -> cross to market for a guaranteed reduce-only fill. No breakeven
+        clamp: the walk concedes all the way to market to honour the horizon.
+        """
+        progress = self._clamp(self._safe_float(progress, 0.0), 0.0, 1.0)
+        if avg_entry_price <= 0:
+            return 0.0
+        if progress >= 1.0 - 1e-9:
+            aggressive = self._aggressive_exit_limit_price(symbol)
+            if aggressive > 0:
+                return aggressive
+        start_markup = max(0.0, self._safe_float(config.FACTOR.exit_start_markup, 0.0))
+        reference_price, last_price = self._fetch_reference_price(symbol)
+        market = reference_price or last_price
+        if config.POSITION_SIDE == "short":
+            anchor = avg_entry_price * (1.0 - start_markup)
+            if market <= 0 or market <= anchor:
+                return self._price_at_or_below(symbol, anchor)
+            raw_price = anchor + (market - anchor) * progress
+            return self._price_at_or_below(symbol, raw_price)
+        anchor = avg_entry_price * (1.0 + start_markup)
+        if market <= 0 or market >= anchor:
+            return self._price_at_or_above(symbol, anchor)
+        raw_price = anchor - (anchor - market) * progress
+        return self._price_at_or_above(symbol, raw_price)
+
+    def _maybe_apply_factor_horizon_exit(
+        self, symbol: str, signal: Optional[dict]
+    ) -> bool:
+        """Fixed-horizon maker exit for factor entries: hold at a profit anchor
+        until the horizon, then walk the reduce-only limit from profit to market."""
+        settings = getattr(config, "FACTOR", None)
+        if not settings or not getattr(settings, "entry_enabled", False):
+            return False
+        if not getattr(settings, "exit_enabled", True):
+            return False
+        state = self._get_state(symbol)
+        if state.position_size <= 0 or state.entry_price <= 0:
+            return False
+        if not bool(getattr(state, "factor_entry", False)):
+            return False
+
+        if state.sell_ladder_mode == "factor_horizon":
+            if not state.frozen_no_more_buys:
+                state.frozen_no_more_buys = True
+                self._refresh_active_side(state)
+                self._save_state()
+            if state.sell_ladder_orders:
+                return self._maybe_reprice_time_exit_ladder(symbol, signal) or True
+            if self._is_exit_ladder_waiting_for_closeable(
+                symbol, "factor_horizon", state
+            ):
+                return True
+            if not self._cancel_hard_stop_for_managed_exit(
+                symbol, "factor_horizon", "factor_horizon_missing_ladder"
+            ):
+                return True
+            state = self._get_state(symbol)
+            self._place_sell_ladder(
+                ExitLadderConfig(
+                    symbol,
+                    state.position_size,
+                    state.entry_price,
+                    rebuild=True,
+                    closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                        symbol, had_sell_ladder=False
+                    ),
+                    mode="factor_horizon",
+                )
+            )
+            return True
+
+        held_minutes = self._position_held_minutes(state)
+        horizon = max(
+            0.0, self._safe_float(getattr(settings, "exit_horizon_minutes", 0.0), 0.0)
+        )
+        if not state.cycle_opened_at or held_minutes < horizon:
+            return False
+
+        had_sell_ladder = bool(state.sell_ladder_orders)
+        if state.entry_orders:
+            self._cancel_entry_orders(symbol, reason="factor_horizon_activated")
+            state = self._get_state(symbol)
+        state.frozen_no_more_buys = True
+        state.sell_ladder_mode = "factor_horizon"
+        state.sell_ladder_signature = ""
+        now = time.time()
+        state.time_exit_activated_at = state.time_exit_activated_at or now
+        state.factor_horizon_activated_at = now
+        self._refresh_active_side(state)
+        self._save_state()
+
+        if had_sell_ladder:
+            self._cancel_sell_orders(symbol, reason="factor_horizon_activated")
+        state = self._get_state(symbol)
+        if state.sell_ladder_orders:
+            return True
+        if not self._cancel_hard_stop_for_managed_exit(
+            symbol, "factor_horizon", "factor_horizon_activated"
+        ):
+            return True
+        state = self._get_state(symbol)
+        self._place_sell_ladder(
+            ExitLadderConfig(
+                symbol,
+                state.position_size,
+                state.entry_price,
+                rebuild=True,
+                closeable_contracts=self._closeable_contracts_for_exit_ladder(
+                    symbol, had_sell_ladder=had_sell_ladder
+                ),
+                mode="factor_horizon",
+            )
+        )
+        self._log_event(
+            "INFO",
+            f"Factor horizon exit activated for {symbol}: held={held_minutes:.1f}m",
+            event="factor_horizon_activated",
+            symbol=symbol,
+            side=config.EXIT_SIDE,
+            position_size=state.position_size,
+            entry_price=state.entry_price,
+            reason=(
+                f"factor_horizon_activated;holding_minutes={held_minutes:.1f};"
+                f"horizon_minutes={horizon:.1f};walk_minutes={self._safe_float(settings.exit_walk_minutes, 0.0):.1f};"
+                f"start_markup={self._safe_float(settings.exit_start_markup, 0.0):.5f}"
+            ),
+        )
+        return True
+
     def _maybe_apply_time_based_exit(self, symbol: str, signal: Optional[dict]) -> bool:
         if not config.STRATEGY.ema_breakeven_enabled:
             return False
@@ -5260,6 +5540,11 @@ class ExitStrategy:
                 return self._maybe_reprice_time_exit_ladder(symbol) or True
             if self._is_exit_ladder_waiting_for_closeable(symbol, "breakeven", state):
                 return True
+            if not self._cancel_hard_stop_for_managed_exit(
+                symbol, "breakeven", "ema_breakeven_missing_ladder"
+            ):
+                return True
+            state = self._get_state(symbol)
             self._place_sell_ladder(
                 ExitLadderConfig(
                     symbol,
@@ -5295,6 +5580,11 @@ class ExitStrategy:
         state = self._get_state(symbol)
         if state.sell_ladder_orders:
             return True
+        if not self._cancel_hard_stop_for_managed_exit(
+            symbol, "breakeven", "ema_breakeven_activated"
+        ):
+            return True
+        state = self._get_state(symbol)
         self._place_sell_ladder(
             ExitLadderConfig(
                 symbol,

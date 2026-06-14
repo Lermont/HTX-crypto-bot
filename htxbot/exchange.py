@@ -943,6 +943,7 @@ class ExchangeMixin:
         with self._private_cache_runtime_lock():
             self._private_positions_by_symbol = None
             self._private_open_orders_by_symbol = None
+            self._private_hidden_close_orders_by_symbol = {}
             self._private_tickers_by_symbol = None
             self._account_snapshot_cache = None
             self._account_snapshot_inflight = None
@@ -952,6 +953,7 @@ class ExchangeMixin:
             self._private_open_orders_bulk_failed = False
             self._private_tickers_bulk_failed = False
             self._private_api_network_failed = False
+            self._private_hidden_close_orders_failed = False
             self._external_price_context_cache = {}
 
     def _reset_market_data_caches(self):
@@ -1292,6 +1294,254 @@ class ExchangeMixin:
                 continue
             grouped.setdefault(symbol, []).append(payload)
         return grouped, missing_symbol
+
+    def _should_fetch_hidden_close_orders(self, symbol: str) -> bool:
+        state = self._get_state(symbol)
+        return bool(
+            state.position_size > 0
+            or state.position_frozen > 0
+            or state.sell_ladder_orders
+            or state.hard_stop_order
+            or state.pending_exit_ladder_since
+        )
+
+    def _hidden_close_order_methods(self) -> List[Tuple[str, str, dict]]:
+        if config.RISK.margin_mode == "cross":
+            prefix = "SwapCross"
+        else:
+            prefix = "Swap"
+        base = f"contractPrivatePostLinearSwapApiV1{prefix}"
+        return [
+            ("tpsl", f"{base}TpslOpenorders", {"stopLossTakeProfit": True}),
+            ("trigger", f"{base}TriggerOpenorders", {"stopLossTakeProfit": True}),
+            ("track", f"{base}TrackOpenorders", {"stopLossTakeProfit": True}),
+        ]
+
+    def _hidden_close_order_request(self, symbol: str) -> dict:
+        market = self._market(symbol)
+        request = {
+            "contract_code": market.get("id") or symbol,
+            "page_index": 1,
+            "page_size": 50,
+        }
+        if config.RISK.margin_mode == "cross":
+            request["margin_account"] = config.EXCHANGE.quote_currency
+        return request
+
+    def _hidden_order_items_from_payload(self, payload) -> List[dict]:
+        if isinstance(payload, list):
+            items: List[dict] = []
+            for item in payload:
+                items.extend(self._hidden_order_items_from_payload(item))
+            return items
+        if not isinstance(payload, dict):
+            return []
+
+        for key in ("orders", "order_list", "orderList", "list", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [
+                    item for item in value if isinstance(item, dict)
+                ]
+
+        data = payload.get("data")
+        if isinstance(data, (dict, list)):
+            items = self._hidden_order_items_from_payload(data)
+            if items:
+                return items
+
+        if any(
+            payload.get(key) is not None
+            for key in (
+                "id",
+                "order_id",
+                "orderId",
+                "tpsl_order_id",
+                "trigger_order_id",
+                "track_order_id",
+            )
+        ):
+            return [payload]
+        return []
+
+    def _hidden_order_id(self, item: dict) -> str:
+        for key in (
+            "id",
+            "order_id",
+            "orderId",
+            "tpsl_order_id",
+            "tpslOrderId",
+            "trigger_order_id",
+            "triggerOrderId",
+            "track_order_id",
+            "trackOrderId",
+            "relation_tpsl_order_id",
+            "relationTpslOrderId",
+        ):
+            value = item.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    def _hidden_order_amount(self, item: dict) -> float:
+        for key in (
+            "volume",
+            "order_volume",
+            "orderVolume",
+            "amount",
+            "remaining",
+            "order_size",
+            "orderSize",
+        ):
+            amount = self._safe_float(item.get(key), 0.0)
+            if amount > 0:
+                return amount
+        return 0.0
+
+    def _hidden_order_price(self, item: dict) -> float:
+        for key in (
+            "price",
+            "order_price",
+            "orderPrice",
+            "trigger_price",
+            "triggerPrice",
+            "tp_trigger_price",
+            "tpTriggerPrice",
+            "sl_trigger_price",
+            "slTriggerPrice",
+            "tp_order_price",
+            "tpOrderPrice",
+            "sl_order_price",
+            "slOrderPrice",
+            "active_price",
+            "activePrice",
+        ):
+            price = self._safe_float(item.get(key), 0.0)
+            if price > 0:
+                return price
+        return 0.0
+
+    def _hidden_order_side(self, item: dict) -> Tuple[str, bool]:
+        trade_type = str(
+            item.get("trade_type") or item.get("tradeType") or ""
+        ).strip()
+        if trade_type == "3":
+            return "buy", config.POSITION_SIDE == "short"
+        if trade_type == "4":
+            return "sell", config.POSITION_SIDE == "long"
+        direction = str(item.get("direction") or item.get("side") or "").lower()
+        offset = str(item.get("offset") or "").lower()
+        if direction in {"buy", "sell"}:
+            return direction, offset == "close"
+        return "", offset == "close"
+
+    def _normalize_hidden_close_order(
+        self, symbol: str, item: dict, hidden_type: str, cancel_params: dict
+    ) -> Optional[dict]:
+        order_id = self._hidden_order_id(item)
+        amount = self._hidden_order_amount(item)
+        side, close_like = self._hidden_order_side(item)
+        if not order_id or amount <= 0:
+            return None
+        if not close_like:
+            return None
+        if not side:
+            side = config.EXIT_SIDE
+        if side != config.EXIT_SIDE:
+            return None
+
+        timestamp = self._safe_float(
+            item.get("created_at", item.get("createdAt", item.get("created_date", 0.0))),
+            0.0,
+        )
+        if timestamp <= 0:
+            timestamp = self._safe_float(item.get("ctime", item.get("created_time", 0.0)), 0.0)
+        if timestamp > 1_000_000_000_000:
+            timestamp = timestamp / 1000.0
+
+        price = self._hidden_order_price(item)
+        order = {
+            "id": order_id,
+            "symbol": symbol,
+            "side": side,
+            "price": price,
+            "triggerPrice": price,
+            "amount": amount,
+            "remaining": amount,
+            "reduceOnly": True,
+            "bot_hidden_order_type": hidden_type,
+            "bot_cancel_params": dict(cancel_params),
+            "info": dict(item),
+        }
+        if timestamp > 0:
+            order["timestamp"] = timestamp
+        return order
+
+    def _fetch_hidden_close_orders(self, symbol: str) -> List[dict]:
+        if not self._should_fetch_hidden_close_orders(symbol):
+            return []
+        with self._private_cache_runtime_lock():
+            cache = getattr(self, "_private_hidden_close_orders_by_symbol", None)
+            if cache is None:
+                cache = {}
+                self._private_hidden_close_orders_by_symbol = cache
+            if symbol in cache:
+                return list(cache[symbol])
+            if getattr(self, "_private_hidden_close_orders_failed", False):
+                return []
+
+        request = self._hidden_close_order_request(symbol)
+        hidden_orders: List[dict] = []
+        any_method = False
+        for hidden_type, method_name, cancel_params in self._hidden_close_order_methods():
+            method = getattr(self.exchange, method_name, None)
+            if not method:
+                continue
+            any_method = True
+            try:
+                payload = self._private_fetch_with_retry(
+                    symbol,
+                    f"hidden_{hidden_type}_open_orders_fetch_failed",
+                    f"hidden {hidden_type} close orders for {symbol}",
+                    lambda method=method: method(dict(request)),
+                )
+            except Exception as exc:
+                self._log_event(
+                    "WARNING",
+                    f"Could not fetch hidden {hidden_type} close orders for {symbol}: {exc}",
+                    event="state_exchange_mismatch",
+                    symbol=symbol,
+                    reason=f"hidden_{hidden_type}_open_orders_fetch_failed",
+                    exception=exc,
+                    retryable=getattr(
+                        self, "_is_transient_exchange_error", lambda _exc: False
+                    )(exc),
+                )
+                continue
+
+            for item in self._hidden_order_items_from_payload(payload):
+                order = self._normalize_hidden_close_order(
+                    symbol, item, hidden_type, cancel_params
+                )
+                if order:
+                    hidden_orders.append(order)
+
+        if not any_method:
+            with self._private_cache_runtime_lock():
+                self._private_hidden_close_orders_failed = True
+
+        deduped = []
+        seen = set()
+        for order in hidden_orders:
+            order_id = str(order.get("id") or "")
+            if not order_id or order_id in seen:
+                continue
+            seen.add(order_id)
+            deduped.append(order)
+
+        with self._private_cache_runtime_lock():
+            self._private_hidden_close_orders_by_symbol[symbol] = list(deduped)
+        return deduped
 
     def _bulk_tickers_by_symbol(self) -> Optional[Dict[str, dict]]:
         with self._private_cache_runtime_lock():
@@ -2304,6 +2554,19 @@ class ExchangeMixin:
             )
             return None
 
+        hidden_orders = self._fetch_hidden_close_orders(symbol)
+        if hidden_orders:
+            merged = []
+            seen = set()
+            for order in list(orders or []) + hidden_orders:
+                order_id = str(order.get("id") or "")
+                if order_id and order_id in seen:
+                    continue
+                if order_id:
+                    seen.add(order_id)
+                merged.append(order)
+            return merged
+
         return orders
 
     def _cancel_order_ref(
@@ -2396,22 +2659,23 @@ class ExchangeMixin:
         state = self._get_state(symbol)
         ref = dict(state.hard_stop_order or {})
         if not ref:
-            return
+            return True
         if ref.get("market_close"):
             state.hard_stop_order = {}
             state.hard_stop_signature = ""
             self._refresh_active_side(state)
             self._save_state()
-            return
+            return True
         side = str(ref.get("side") or config.EXIT_SIDE).lower()
         if not self._cancel_order_ref(
             symbol, ref, event=f"{side}_order_canceled", reason=reason
         ):
-            return
+            return False
         state.hard_stop_order = {}
         state.hard_stop_signature = ""
         self._refresh_active_side(state)
         self._save_state()
+        return True
 
     def _cancel_exchange_orders(
         self,

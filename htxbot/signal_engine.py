@@ -2794,6 +2794,20 @@ class SignalMixin:
             )
 
         self.signal_cache["symbols"] = rows
+        try:
+            factor_summary = self._compute_factor_scores(rows)
+            self.signal_cache["factor_summary"] = factor_summary
+            if factor_summary:
+                self._log_factor_snapshot(rows, factor_summary)
+        except Exception as exc:
+            self.signal_cache["factor_summary"] = {}
+            self._log_event(
+                "WARNING",
+                f"Factor scoring failed: {exc}",
+                event="signal_updated",
+                reason="factor_scoring_failed",
+                exception=exc,
+            )
         self.signal_cache["closed_candle_ts"] = (
             None if had_retryable_symbol_error else latest_ts
         )

@@ -602,6 +602,7 @@ class MonitoringSettings:
     account_pnl_csv_file: str
     signal_analytics_csv_file: str
     signal_analytics_jsonl_file: str
+    factor_snapshot_jsonl_file: str
     diagnostics_csv_file: str
     diagnostics_jsonl_file: str
     csv_archive_dir: str
@@ -623,6 +624,87 @@ class RuntimeSettings:
     markets_cache_file: str
     heartbeat_file: str
     heartbeat_interval_sec: float
+
+
+@dataclass(frozen=True)
+class FactorSettings:
+    """Cross-sectional factor scoring.
+
+    ``scoring_enabled``/``snapshot_logging_enabled`` only compute and log
+    per-symbol z-scores (risk-free measurement that feeds the offline
+    Fama-MacBeth analysis). ``entry_enabled`` turns those scores into live
+    top-K entries and is OFF by default so live behaviour is unchanged until
+    explicitly enabled.
+    """
+
+    scoring_enabled: bool
+    snapshot_logging_enabled: bool
+    winsor: float
+    min_symbols: int
+    weights: Tuple[Tuple[str, float], ...]
+    entry_enabled: bool
+    entry_top_k: int
+    entry_interval_minutes: float
+    entry_random_control: int
+    entry_min_composite: float
+    entry_side_budget_scaling: bool
+    exit_enabled: bool
+    exit_horizon_minutes: float
+    exit_walk_minutes: float
+    exit_reprice_minutes: float
+    exit_start_markup: float
+
+
+def _parse_factor_weight_overrides(raw: str) -> Tuple[Tuple[str, float], ...]:
+    overrides = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip()
+        try:
+            overrides.append((key, float(value.strip())))
+        except ValueError:
+            continue
+    return tuple(overrides)
+
+
+def _make_factor_settings(name: str) -> FactorSettings:
+    return FactorSettings(
+        scoring_enabled=_env_bool("FACTOR_SCORING_ENABLED", True, profile=name),
+        snapshot_logging_enabled=_env_bool(
+            "FACTOR_SNAPSHOT_LOGGING_ENABLED", True, profile=name
+        ),
+        winsor=max(0.0, _env_float("FACTOR_WINSOR", 3.0, profile=name)),
+        min_symbols=max(2, _env_int("FACTOR_MIN_SYMBOLS", 5, profile=name)),
+        weights=_parse_factor_weight_overrides(_env("FACTOR_WEIGHTS", profile=name)),
+        entry_enabled=_env_bool("FACTOR_ENTRY_ENABLED", False, profile=name),
+        entry_top_k=max(0, _env_int("FACTOR_ENTRY_TOP_K", 3, profile=name)),
+        entry_interval_minutes=max(
+            0.0, _env_float("FACTOR_ENTRY_INTERVAL_MINUTES", 60.0, profile=name)
+        ),
+        entry_random_control=max(
+            0, _env_int("FACTOR_ENTRY_RANDOM_CONTROL", 1, profile=name)
+        ),
+        entry_min_composite=_env_float("FACTOR_ENTRY_MIN_COMPOSITE", 0.0, profile=name),
+        entry_side_budget_scaling=_env_bool(
+            "FACTOR_ENTRY_SIDE_BUDGET_SCALING", True, profile=name
+        ),
+        exit_enabled=_env_bool("FACTOR_EXIT_ENABLED", True, profile=name),
+        exit_horizon_minutes=max(
+            0.0, _env_float("FACTOR_EXIT_HORIZON_MINUTES", 120.0, profile=name)
+        ),
+        exit_walk_minutes=max(
+            0.0, _env_float("FACTOR_EXIT_WALK_MINUTES", 60.0, profile=name)
+        ),
+        exit_reprice_minutes=max(
+            0.0, _env_float("FACTOR_EXIT_REPRICE_MINUTES", 10.0, profile=name)
+        ),
+        exit_start_markup=max(
+            0.0, _env_float("FACTOR_EXIT_START_MARKUP", 0.004, profile=name)
+        ),
+    )
 
 
 def _make_hedge_settings() -> HedgeSettings:
@@ -663,6 +745,7 @@ class BotProfile:
     monitoring: MonitoringSettings
     runtime: RuntimeSettings
     external_price_feed: ExternalPriceFeedSettings
+    factor: "FactorSettings"
 
     @property
     def COINS(self) -> Tuple[str, ...]:
@@ -735,6 +818,10 @@ class BotProfile:
     @property
     def EXTERNAL_PRICE_FEED(self) -> ExternalPriceFeedSettings:
         return self.external_price_feed
+
+    @property
+    def FACTOR(self) -> "FactorSettings":
+        return self.factor
 
     @property
     def BOT_NAME(self) -> str:
@@ -1991,6 +2078,7 @@ def _make_monitoring_settings(name: str) -> MonitoringSettings:
         account_pnl_csv_file=_path(name, "account_pnl.csv"),
         signal_analytics_csv_file=_path(name, "signal_analytics.csv"),
         signal_analytics_jsonl_file=_path(name, "signal_analytics.jsonl"),
+        factor_snapshot_jsonl_file=_path(name, "factor_snapshots.jsonl"),
         diagnostics_csv_file=_path(name, "diagnostics.csv"),
         diagnostics_jsonl_file=_path(name, "diagnostics.jsonl"),
         csv_archive_dir=archive_dir,
@@ -2156,6 +2244,7 @@ def _make_profile(name: str, direction: str, coins: Tuple[str, ...]) -> BotProfi
         monitoring=_make_monitoring_settings(name),
         runtime=_make_runtime_settings(name),
         external_price_feed=_make_external_price_feed_settings(name),
+        factor=_make_factor_settings(name),
     )
     _validate_profile(profile)
     return profile

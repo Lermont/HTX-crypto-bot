@@ -108,6 +108,7 @@ class HtxFuturesBot(
             self.external_price_csv_path = Path(config.MONITORING.external_price_csv_file)
             self.signal_analytics_csv_path = Path(config.MONITORING.signal_analytics_csv_file)
             self.signal_analytics_jsonl_path = Path(config.MONITORING.signal_analytics_jsonl_file)
+            self.factor_snapshot_jsonl_path = Path(config.MONITORING.factor_snapshot_jsonl_file)
             self.diagnostics_csv_path = Path(config.MONITORING.diagnostics_csv_file)
             self.diagnostics_jsonl_path = Path(config.MONITORING.diagnostics_jsonl_file)
             self.timeframe_sec = self._timeframe_to_seconds(config.SIGNALS.timeframe)
