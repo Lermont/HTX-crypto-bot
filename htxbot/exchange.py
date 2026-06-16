@@ -1952,7 +1952,12 @@ class ExchangeMixin:
     def _is_order_leverage_mismatch_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
         return (
-            '"err_code":1349' in text
+            bool(
+                re.search(
+                    r'"(?:err[_-]?code|error[_-]?code|code)"\s*:\s*"?1349"?',
+                    text,
+                )
+            )
             or "leverage for new orders does not match" in text
         )
 

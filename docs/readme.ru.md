@@ -219,9 +219,11 @@ Runtime CSV-файлы создаются локально и игнорирую
 - cycle statistics;
 - macro overlay context;
 - external reference-price diagnostics;
+- diagnostics CSV/JSONL;
+- config snapshot без API keys и credentials;
 - markets cache и state-файлы.
 
-Они помогают понять, почему сигнал был принят или отклонён, как рассчитан размер позиции, когда заблокировано усреднение и как переставлены выходы.
+При старте каждый профиль пишет полный effective non-secret config snapshot в `diagnostics.jsonl` и `config_snapshot.json`. Эти файлы помогают понять, почему сигнал был принят или отклонён, как рассчитан размер позиции, когда заблокировано усреднение и как переставлены выходы.
 
 ## Тесты
 

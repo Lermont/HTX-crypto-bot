@@ -193,7 +193,7 @@ EMA_AVERAGING_REQUIRE_PULLBACK_RECOVERY=true
 EMA_MAX_AVERAGING_STAGES=2
 ```
 
-`EMA_AVERAGING_BASE_FRACTION` is the fraction of the current open position used for each averaging stage. `EMA_MAX_AVERAGING_STAGES` is capped at 2. The effective averaging drawdown threshold is never below `EMA_AVERAGING_MIN_DRAWDOWN_STEP * stage`, and live signals can widen it with ATR and daily-volatility floors. Averaging also requires pullback recovery by default, so a valid trigger alone cannot average into a no-rebound trend.
+`EMA_AVERAGING_BASE_FRACTION` is the fraction of the current open position used for each averaging stage. The legacy `EMA_AVERAGING_POSITION_FRACTION` alias is no longer read. `EMA_MAX_AVERAGING_STAGES` is capped at 2. The effective averaging drawdown threshold is never below `EMA_AVERAGING_MIN_DRAWDOWN_STEP * stage`, and live signals can widen it with ATR and daily-volatility floors. Averaging also requires pullback recovery by default, so a valid trigger alone cannot average into a no-rebound trend.
 
 Breakeven:
 
@@ -291,11 +291,12 @@ Each profile writes state and logs into its own directory:
 - cycle stats CSV
 - `signal_analytics.csv` and `signal_analytics.jsonl`
 - `diagnostics.csv` and `diagnostics.jsonl`
+- `config_snapshot.json`
 - `account_pnl.csv`
 - `external_price_feed.csv`
 - `bot_futures_macro.csv`
 
-These runtime CSV/JSONL artifacts are local audit output and are ignored by git. Local secrets live in the root `.env`; this file is also ignored by git.
+On startup each profile writes the full effective non-secret configuration to `diagnostics.jsonl` and `config_snapshot.json`; API keys and credentials are omitted. These runtime CSV/JSONL artifacts are local audit output and are ignored by git. Local secrets live in the root `.env`; this file is also ignored by git.
 
 ## Live Launch Checklist
 

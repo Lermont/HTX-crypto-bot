@@ -638,6 +638,35 @@ class UnifiedBotTests(unittest.TestCase):
 
         self.assertTrue(runtime_artifacts.isdisjoint(tracked_paths))
 
+    def test_active_config_snapshot_logs_every_non_secret_parameter(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+
+            bot._log_active_config()
+
+            snapshot_path = bot.diagnostics_csv_path.with_name("config_snapshot.json")
+            self.assertTrue(snapshot_path.exists())
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            expected_params = config.describe_active_config(config.current_profile())
+            self.assertEqual(snapshot["event"], "config_snapshot")
+            self.assertEqual(snapshot["param_count"], len(expected_params))
+            self.assertEqual(snapshot["params"], expected_params)
+            self.assertNotIn("api_key", json.dumps(snapshot).lower())
+            self.assertNotIn("api_secret", json.dumps(snapshot).lower())
+
+            jsonl_events = [
+                json.loads(line)
+                for line in bot.diagnostics_jsonl_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertTrue(
+                any(
+                    event.get("event") == "config_snapshot"
+                    and event.get("param_count") == len(expected_params)
+                    for event in jsonl_events
+                )
+            )
+
     def make_bot(self, tmp_path: Path) -> HtxFuturesBot:
         instance = object.__new__(HtxFuturesBot)
         logger = logging.getLogger(f"test_unified_bot_{id(instance)}")
@@ -3222,6 +3251,27 @@ class UnifiedBotTests(unittest.TestCase):
                 # the failing attempt entirely
                 self.assertEqual(state.leverage, 50.0)
                 self.assertEqual(bot.order_leverage_cache.get(SYMBOL), 50.0)
+
+    def test_reduce_only_leverage_mismatch_detector_accepts_htx_code_variants(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
+            bot = self.make_bot(Path(raw_tmp))
+
+            variants = (
+                RuntimeError(
+                    'htx {"status":"error", "err_code": 1349, '
+                    '"err_msg":"The leverage for new orders does not match current positions."}'
+                ),
+                RuntimeError('htx {"status":"error","error_code":"1349"}'),
+                RuntimeError('The leverage for new orders does not match current positions.'),
+            )
+            for exc in variants:
+                self.assertTrue(bot._is_order_leverage_mismatch_error(exc))
+
+            self.assertFalse(
+                bot._is_order_leverage_mismatch_error(
+                    RuntimeError('htx {"status":"error","err_code":1492}')
+                )
+            )
 
     def test_stale_pending_exit_ladder_emits_alert(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):

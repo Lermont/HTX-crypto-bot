@@ -219,7 +219,7 @@ desired_notional = current_position_notional * EMA_AVERAGING_BASE_FRACTION
 ```
 
 Если добор разрешен account-PnL context, применяется `ACCOUNT_AVERAGING_BUDGET_SCALE`.
-`EMA_AVERAGING_BASE_FRACTION` также читает legacy alias `EMA_AVERAGING_POSITION_FRACTION`; это доля от текущей позиции, а не от начального входа. `EMA_AVERAGING_POWER` сохраняется как legacy-настройка для совместимости логов, но размер добора не может превышать явно заданную долю текущей позиции.
+`EMA_AVERAGING_BASE_FRACTION` - канонический параметр доли от текущей позиции для каждого добора; старый alias `EMA_AVERAGING_POSITION_FRACTION` больше не читается. `EMA_AVERAGING_POWER` остается активной настройкой масштаба по отношению размера текущей позиции к initial notional, но итоговый размер добора не может превышать явно заданную долю текущей позиции.
 
 По умолчанию:
 
@@ -274,8 +274,8 @@ HARD_STOP_LOSS_ATR_MAX_PCT=0.03
 
 ```text
 EMA_ADAPTIVE_EXIT_ENABLED=true
-EMA_EXIT_NORMAL_LADDER_FRACTIONS=0.35,0.25,0.25,0.15
-EMA_EXIT_NORMAL_LADDER_MARKUPS=0.008,0.016,0.030,0.050
+EMA_EXIT_NORMAL_LADDER_FRACTIONS=0.25,0.25,0.25,0.15
+EMA_EXIT_NORMAL_LADDER_MARKUPS=0.012,0.020,0.032,0.050
 EMA_EXIT_MEDIUM_LADDER_FRACTIONS=0.45,0.30,0.15,0.10
 EMA_EXIT_MEDIUM_LADDER_MARKUPS=0.004,0.010,0.020,0.035
 EMA_EXIT_HEAVY_LADDER_FRACTIONS=0.60,0.25,0.15
@@ -303,7 +303,7 @@ profit_floor >= (buy_fee_rate + sell_fee_rate) * min_profit_fee_multiplier
 
 Если HTX отклоняет reduce-only ladder с причиной, что closeable amount уже зарезервирован существующими close orders, бот переводит ladder в pending mode (`pending_closeable:*`) и не повторяет постановку только из-за истечения таймаута, пока snapshot показывает `position_available=0` и `position_frozen>0`. Retry возобновляется, когда появляется closeable amount, меняется размер позиции или видимые close orders можно принять/отменить.
 
-После `HARD_TIME_EXIT_AFTER_HOURS=96` включается bounded-loss маршрут: бот может постепенно перестраивать reduce-only выход с ограничением `HARD_TIME_EXIT_MAX_LOSS_ON_NOTIONAL=0.03`, начиная с `HARD_TIME_EXIT_CLOSE_FRACTION=0.25` и увеличивая долю каждые `HARD_TIME_EXIT_STEP_MINUTES`.
+После `HARD_TIME_EXIT_AFTER_MINUTES=5760` (96 часов) включается bounded-loss маршрут: бот может постепенно перестраивать reduce-only выход с ограничением `HARD_TIME_EXIT_MAX_LOSS_ON_NOTIONAL=0.03`, начиная с `HARD_TIME_EXIT_CLOSE_FRACTION=0.25` и увеличивая долю каждые `HARD_TIME_EXIT_STEP_MINUTES`. Старый `HARD_TIME_EXIT_AFTER_HOURS` остается только fallback для старых `.env`; в новых настройках используйте minutes-ключ.
 
 ## 12. Breakeven
 
@@ -360,13 +360,14 @@ Macro overlay сравнивает XAUT/BTC context через RSI и может
 - `signal_analytics.jsonl`;
 - `diagnostics.csv`;
 - `diagnostics.jsonl`;
+- `config_snapshot.json`;
 - `account_pnl.csv`;
 - `external_price_feed.csv`;
 - `bot_futures_macro.csv`.
 
 `signal_analytics.csv` содержит текущую EMA-схему: `ema50`, `ema100`, `ema1d`, `ema2d`, `ema25d`, `ema50d`, а также компоненты `macro_gap`, `trigger_gap`, `pullback_depth`.
 
-Все diagnostics/signal analytics/runtime CSV/JSONL файлы являются локальными артефактами аудита и не должны попадать в git. Если старые diagnostics со signed HTX URL уже были опубликованы или отправлены третьим лицам, API key нужно ротировать до live-старта.
+При старте каждый профиль пишет полный effective non-secret config snapshot в `diagnostics.jsonl` и соседний `config_snapshot.json`; API keys и credentials туда не включаются. Все diagnostics/signal analytics/runtime CSV/JSONL файлы являются локальными артефактами аудита и не должны попадать в git. Если старые diagnostics со signed HTX URL уже были опубликованы или отправлены третьим лицам, API key нужно ротировать до live-старта.
 
 ## 16. Что Удалено Из Конфига
 
@@ -378,6 +379,7 @@ Macro overlay сравнивает XAUT/BTC context через RSI и может
 - старые неиспользуемые controlled-loss ladder поля;
 - неиспользуемые external-price поля `use_existing_trading_universe`, `only_usdt_pairs`, `reconnect_on_stale_ms`, `tighten_ladder_factor`;
 - неиспользуемый monitoring TTL.
+- legacy alias `EMA_AVERAGING_POSITION_FRACTION`; используйте `EMA_AVERAGING_BASE_FRACTION`.
 
 Оставлены выключенные по умолчанию, но реально подключенные механики: volatility sizing/recovery, BTC risk multiplier, funding-aware exit, dynamic profit floor, hard/controlled/absolute force exit helpers.
 Controlled-loss exit при активации двигает цену закрытия от `CONTROLLED_LOSS_MIN_MOVE_FRACTION` к reference price за `CONTROLLED_LOSS_RAMP_MINUTES`; скорость ramp ускоряется при отрицательном directional `trend_ema_gap`/`macro_gap`, неблагоприятном macro overlay и adverse local volatility spike (`atr_rate`/realized volatility против `CONTROLLED_LOSS_VOLATILITY_REFERENCE` или `VOLATILITY_REFERENCE`). При volatility spike progress становится `exponential_volatility`, а ladder может перестроиться до обычного stale reprice, если новый `loss_move_fraction` вырос минимум на `CONTROLLED_LOSS_VOLATILITY_REPRICE_MIN_MOVE_DELTA`; обычный stale ladder всё ещё перестраивается через `CONTROLLED_LOSS_REPRICE_MINUTES`.

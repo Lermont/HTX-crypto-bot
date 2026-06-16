@@ -214,9 +214,11 @@ Radar 会把 HTX symbols 映射成 MEXC spot-style `BASEUSDT` symbols，并把 b
 - cycle statistics；
 - macro overlay context；
 - external reference-price diagnostics；
+- diagnostics CSV/JSONL；
+- 不包含 API keys 和 credentials 的 config snapshot；
 - markets cache 和 bot state files。
 
-这些文件可以帮助分析信号为什么被接受或拒绝、仓位如何计算、补仓何时被阻止，以及出场订单如何重新定价。
+启动时每个 profile 会把完整的 effective non-secret config snapshot 写入 `diagnostics.jsonl` 和 `config_snapshot.json`。这些文件可以帮助分析信号为什么被接受或拒绝、仓位如何计算、补仓何时被阻止，以及出场订单如何重新定价。
 
 ## 测试
 

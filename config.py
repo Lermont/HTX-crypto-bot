@@ -1361,9 +1361,7 @@ def _make_strategy_settings(
         "EMA_AVERAGING_DRAWDOWN_STEP", 0.01, profile=name
     )
     ema_averaging_base_fraction = _env_float(
-        "EMA_AVERAGING_BASE_FRACTION",
-        _env_float("EMA_AVERAGING_POSITION_FRACTION", 0.50, profile=name),
-        profile=name,
+        "EMA_AVERAGING_BASE_FRACTION", 0.50, profile=name
     )
     ema_averaging_power = _env_float("EMA_AVERAGING_POWER", 1.0, profile=name)
     averaging_stage_count = max(0, strategy_context.ema_max_averaging_stages)

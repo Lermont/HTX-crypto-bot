@@ -175,6 +175,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(profile.strategy.ema_max_averaging_stages, 2)
         self.assertEqual(len(profile.strategy.averaging_drawdown_steps), 2)
 
+    def test_removed_legacy_averaging_position_fraction_alias_is_ignored(self):
+        with temporary_env(
+            EMA_AVERAGING_BASE_FRACTION=None,
+            HTXBOT_EMA_AVERAGING_BASE_FRACTION=None,
+            ALIAS_EMA_AVERAGING_BASE_FRACTION=None,
+            HTXBOT_ALIAS_EMA_AVERAGING_BASE_FRACTION=None,
+            EMA_AVERAGING_POSITION_FRACTION="0.77",
+            HTXBOT_EMA_AVERAGING_POSITION_FRACTION="0.78",
+            ALIAS_EMA_AVERAGING_POSITION_FRACTION="0.79",
+            HTXBOT_ALIAS_EMA_AVERAGING_POSITION_FRACTION="0.80",
+        ):
+            profile = config._make_profile("alias", "long", ("test",))
+
+        self.assertEqual(profile.strategy.ema_averaging_base_fraction, 0.50)
+
     def test_describe_active_config_covers_every_settings_field(self):
         profile = config.resolve_profile("long")
         params = config.describe_active_config(profile)
