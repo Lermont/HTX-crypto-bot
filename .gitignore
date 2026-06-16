@@ -1,6 +1,15 @@
 .env
 long/.env
 short/.env
+# Never commit env backups - they can contain live API keys/secrets.
+.env.bak*
+*.env.bak*
+*.bak
+
+# Startup config dump written by _log_active_config() (no secrets, runtime artifact).
+config_snapshot.json
+long/config_snapshot.json
+short/config_snapshot.json
 
 __pycache__/
 *.py[cod]
