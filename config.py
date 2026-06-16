@@ -687,12 +687,15 @@ def _make_factor_settings(name: str) -> FactorSettings:
             "FACTOR_EXTERNAL_FACTORS_ENABLED", True, profile=name
         ),
         entry_enabled=_env_bool("FACTOR_ENTRY_ENABLED", False, profile=name),
-        entry_top_k=max(0, _env_int("FACTOR_ENTRY_TOP_K", 3, profile=name)),
+        # Factor-entry is a paired long/short experiment: keep sampling knobs
+        # side-symmetric even when other profile-specific strategy settings
+        # differ.
+        entry_top_k=max(0, _env_int("FACTOR_ENTRY_TOP_K", 3)),
         entry_interval_minutes=max(
             0.0, _env_float("FACTOR_ENTRY_INTERVAL_MINUTES", 60.0, profile=name)
         ),
         entry_random_control=max(
-            0, _env_int("FACTOR_ENTRY_RANDOM_CONTROL", 1, profile=name)
+            0, _env_int("FACTOR_ENTRY_RANDOM_CONTROL", 0)
         ),
         entry_min_composite=_env_float("FACTOR_ENTRY_MIN_COMPOSITE", 0.0, profile=name),
         entry_side_budget_scaling=_env_bool(

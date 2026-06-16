@@ -1201,9 +1201,6 @@ class EntryStrategy:
             )
             return
 
-        # Factor mode bypasses the MEXC cross-reference filter (a discretionary
-        # microstructure gate, not part of the factor hypothesis); the HTX
-        # order-book spread filter below stays as the real liquidity guard.
         external_block_reason = (
             "" if factor_mode else self._external_entry_block_reason(symbol)
         )

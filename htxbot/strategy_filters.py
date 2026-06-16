@@ -141,11 +141,11 @@ class SignalFilters:
     def _prepare_factor_entry_gate(self) -> dict:
         """Build the entry gate from cross-sectional composite ranking.
 
-        Selects the top-K competitors by composite (scaled by the macro side
-        budget) plus a random control group, stable within each interval bucket.
-        Bypasses the conjunctive quality gate; downstream safety gates (price,
-        spread, external staleness, risk budget) still apply in
-        ``_maybe_place_initial_buy``.
+        Selects the top-K competitors by composite directly.  In factor-entry
+        mode the strategy is an experiment for measuring factor influence, so
+        normal EMA quality, BTC momentum, and external-reference filters do not
+        decide the entry universe.  Execution safety gates still run in the
+        final entry path.
         """
         now = time.time()
         signal_ts = self._entry_gate_signal_ts()
@@ -153,24 +153,24 @@ class SignalFilters:
         summary = self.signal_cache.get("factor_summary") or {}
         composites = summary.get("composites") or {}
 
-        competing = []
+        raw_candidates = []
         for symbol in self.entry_symbols:
             signal = signals.get(symbol)
             if not signal or symbol not in composites:
                 continue
             if not self._entry_state_competes_for_signal(symbol, signal_ts, now):
                 continue
-            competing.append(symbol)
+            raw_candidates.append(symbol)
 
         selection = self._factor_select_entries(
-            competing, signals, summary, now=now, signal_ts=signal_ts
+            raw_candidates, signals, summary, now=now, signal_ts=signal_ts
         )
         allowed = selection.get("allowed", set())
         random_symbols = set(selection.get("random", []))
         ranked = selection.get("ranked", [])
 
         blocked_reasons = {}
-        for symbol in competing:
+        for symbol in raw_candidates:
             if symbol in allowed:
                 continue
             composite = self._safe_float(composites.get(symbol), 0.0)
@@ -184,8 +184,8 @@ class SignalFilters:
 
         gate = {
             "signal_ts": signal_ts,
-            "raw_count": len(competing),
-            "quality_count": len(allowed),
+            "raw_count": len(raw_candidates),
+            "quality_count": len(raw_candidates),
             "allowed_symbols": allowed,
             "ranked_symbols": ranked,
             "blocked_reasons": blocked_reasons,
@@ -195,6 +195,8 @@ class SignalFilters:
             "rate_remaining": len(allowed),
             "recent_count": 0,
             "external_blocked_count": 0,
+            "factor_external_blocked_count": 0,
+            "factor_btc_blocked_count": 0,
             "factor_mode": True,
             "factor_random_symbols": random_symbols,
             "factor_top_symbols": set(selection.get("top", [])),
@@ -203,14 +205,14 @@ class SignalFilters:
         self.entry_gate = gate
 
         bucket = selection.get("bucket")
-        if competing and getattr(self, "_last_factor_gate_bucket", None) != bucket:
+        if raw_candidates and getattr(self, "_last_factor_gate_bucket", None) != bucket:
             self._last_factor_gate_bucket = bucket
             self._log_event(
                 "INFO",
                 (
                     "Factor entry gate prepared: "
-                    f"competing={len(competing)} top={len(selection.get('top', []))} "
-                    f"random={len(random_symbols)}"
+                    f"raw={len(raw_candidates)} "
+                    f"top={len(selection.get('top', []))} random={len(random_symbols)}"
                 ),
                 event="entry_gate_updated",
                 reason=(

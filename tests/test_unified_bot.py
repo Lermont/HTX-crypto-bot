@@ -2146,6 +2146,52 @@ class UnifiedBotTests(unittest.TestCase):
                     rows = list(csv.DictReader(handle))
                 self.assertIn("external_discount_blocked", rows[-1]["reason"])
 
+    def test_factor_initial_entry_bypasses_quality_btc_and_external_filters(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            factor = replace(
+                config.FACTOR,
+                entry_enabled=True,
+                entry_top_k=1,
+                entry_random_control=0,
+            )
+            with override_config(FACTOR=factor):
+                bot = self.make_bot(Path(raw_tmp))
+                bot.external_price_feed = StaticExternalPriceFeed(
+                    self.external_context(
+                        valid=False,
+                        stale=False,
+                        spread_bps=100.0,
+                        reason="forced_external_block",
+                    )
+                )
+                bot.entry_gate = {
+                    "signal_ts": 1000,
+                    "allowed_symbols": {SYMBOL},
+                    "blocked_reasons": {},
+                    "ranked_symbols": [SYMBOL],
+                    "factor_mode": True,
+                    "factor_top_symbols": {SYMBOL},
+                    "factor_random_symbols": set(),
+                }
+                signal = self.entry_signal(score=-0.10, rs30=-0.02, rs60=-0.03, ts=1000)
+                signal.update(
+                    {
+                        "entry_valid": False,
+                        "ema_entry_valid": False,
+                        "pullback_valid": False,
+                        "btc_return_30m": -0.01,
+                        "factor_composite": 9.0,
+                        "factor_rank": 1,
+                        "factor_universe": 3,
+                    }
+                )
+
+                bot._maybe_place_initial_buy(SYMBOL, signal)
+
+                state = bot._get_state(SYMBOL)
+                self.assertTrue(state.entry_orders)
+                self.assertIn("factor_entry;kind=top", state.entry_orders[0]["reason"])
+
     def test_entry_gate_external_and_budget_blocks_write_signal_analytics(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
             bot = self.make_bot(Path(raw_tmp))
@@ -5287,27 +5333,66 @@ class UnifiedBotTests(unittest.TestCase):
             self.assertEqual(record["rows"][0]["s"], "A/USDT")
             self.assertIn("macro", record["metrics"])
 
-    def test_factor_scores_short_side_flips_direction(self):
+    def test_factor_scores_preserve_side_aware_ema_gaps_for_short(self):
+        factor = replace(
+            config.FACTOR,
+            external_factors_enabled=False,
+            weights=(
+                ("macro", 1.0),
+                ("trigger", 1.0),
+                ("pullback", 0.0),
+                ("rs60", 0.0),
+                ("rs30", 0.0),
+                ("volume", 0.0),
+                ("chop", 0.0),
+            ),
+            min_symbols=2,
+            entry_side_budget_scaling=False,
+        )
+        for profile in ("long", "short"):
+            with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile(profile):
+                bot = self.make_bot(Path(raw_tmp))
+                signals = {
+                    "ALIGNED/USDT": self._factor_signal(
+                        macro_gap=0.02, trigger_gap=0.01
+                    ),
+                    "NEUTRAL/USDT": self._factor_signal(),
+                    "OPPOSED/USDT": self._factor_signal(
+                        macro_gap=-0.02, trigger_gap=-0.01
+                    ),
+                }
+                with override_config(FACTOR=factor):
+                    summary = bot._compute_factor_scores(signals)
+                self.assertEqual(summary["ranked"][0], "ALIGNED/USDT")
+                self.assertEqual(summary["ranked"][-1], "OPPOSED/USDT")
+
+    def test_factor_scores_short_side_flips_relative_strength_only(self):
+        factor = replace(
+            config.FACTOR,
+            external_factors_enabled=False,
+            weights=(
+                ("macro", 0.0),
+                ("trigger", 0.0),
+                ("pullback", 0.0),
+                ("rs60", 1.0),
+                ("rs30", 1.0),
+                ("volume", 0.0),
+                ("chop", 0.0),
+            ),
+            min_symbols=2,
+            entry_side_budget_scaling=False,
+        )
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("short"):
             bot = self.make_bot(Path(raw_tmp))
             signals = {
-                "A/USDT": self._factor_signal(
-                    macro_gap=-0.01, rs60=-0.01, rs30=-0.01, trigger_gap=-0.01, score=0.02
-                ),
-                "B/USDT": self._factor_signal(),
-                "C/USDT": self._factor_signal(
-                    macro_gap=0.01, rs60=0.01, rs30=0.01, trigger_gap=0.01, score=-0.02
-                ),
-                "D/USDT": self._factor_signal(
-                    macro_gap=-0.005, rs60=-0.004, rs30=-0.004, trigger_gap=-0.005
-                ),
-                "E/USDT": self._factor_signal(
-                    macro_gap=0.005, rs60=0.004, rs30=0.004, trigger_gap=0.005
-                ),
+                "WEAK/USDT": self._factor_signal(rs60=-0.01, rs30=-0.01),
+                "NEUTRAL/USDT": self._factor_signal(),
+                "STRONG/USDT": self._factor_signal(rs60=0.01, rs30=0.01),
             }
-            summary = bot._compute_factor_scores(signals)
-            self.assertEqual(summary["ranked"][0], "A/USDT")
-            self.assertEqual(summary["ranked"][-1], "C/USDT")
+            with override_config(FACTOR=factor):
+                summary = bot._compute_factor_scores(signals)
+            self.assertEqual(summary["ranked"][0], "WEAK/USDT")
+            self.assertEqual(summary["ranked"][-1], "STRONG/USDT")
 
     def test_factor_scores_skipped_below_min_symbols(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5333,7 +5418,8 @@ class UnifiedBotTests(unittest.TestCase):
                 entry_interval_minutes=60.0,
                 entry_side_budget_scaling=False,
             )
-            with override_config(FACTOR=factor):
+            runtime = replace(config.RUNTIME, dry_run=True)
+            with override_config(FACTOR=factor, RUNTIME=runtime):
                 competing = list(signals.keys())
                 sel = bot._factor_select_entries(
                     competing, signals, summary, now=1000.0, signal_ts=1000 * 1000
@@ -5346,6 +5432,58 @@ class UnifiedBotTests(unittest.TestCase):
                     competing, signals, summary, now=1005.0, signal_ts=1000 * 1000
                 )
                 self.assertEqual(sel["random"], sel2["random"])
+
+    def test_factor_select_entries_disables_random_control_in_live(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signals = {
+                f"S{i}/USDT": self._factor_signal(
+                    macro_gap=i * 0.001, rs60=i * 0.001, score=i * 0.001
+                )
+                for i in range(6)
+            }
+            summary = bot._compute_factor_scores(signals)
+            factor = replace(
+                config.FACTOR,
+                entry_enabled=True,
+                entry_top_k=0,
+                entry_random_control=2,
+                entry_interval_minutes=60.0,
+                entry_side_budget_scaling=False,
+            )
+            live_runtime = replace(config.RUNTIME, dry_run=False)
+            with override_config(FACTOR=factor, RUNTIME=live_runtime):
+                sel = bot._factor_select_entries(
+                    list(signals.keys()), signals, summary, now=1000.0, signal_ts=1000 * 1000
+                )
+            self.assertEqual(sel["random"], [])
+            self.assertEqual(sel["allowed"], set())
+
+    def test_factor_select_entries_uses_literal_topk_without_composite_floor(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            signals = {
+                f"S{i}/USDT": self._factor_signal(
+                    macro_gap=i * 0.001, rs60=i * 0.001, score=i * 0.001
+                )
+                for i in range(6)
+            }
+            summary = bot._compute_factor_scores(signals)
+            factor = replace(
+                config.FACTOR,
+                entry_enabled=True,
+                entry_top_k=2,
+                entry_random_control=0,
+                entry_min_composite=999.0,
+                entry_interval_minutes=60.0,
+                entry_side_budget_scaling=False,
+            )
+            with override_config(FACTOR=factor):
+                sel = bot._factor_select_entries(
+                    list(signals.keys()), signals, summary, now=1000.0, signal_ts=1000 * 1000
+                )
+            self.assertEqual(sel["top"], ["S5/USDT", "S4/USDT"])
+            self.assertEqual(sel["allowed"], {"S5/USDT", "S4/USDT"})
 
     def test_factor_regime_side_offset_shifts_composite(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
@@ -5420,7 +5558,12 @@ class UnifiedBotTests(unittest.TestCase):
             bot.entry_symbols = set(symbols)
             signals = {
                 s: self._factor_signal(
-                    macro_gap=i * 0.001, rs60=i * 0.001, score=i * 0.001
+                    macro_gap=i * 0.001,
+                    rs60=i * 0.001,
+                    score=i * 0.001,
+                    entry_valid=True,
+                    ema_entry_valid=True,
+                    macro_valid=True,
                 )
                 for i, s in enumerate(symbols)
             }
@@ -5439,7 +5582,16 @@ class UnifiedBotTests(unittest.TestCase):
                 entry_interval_minutes=0.0,
                 entry_side_budget_scaling=False,
             )
-            with override_config(FACTOR=factor):
+            strategy = replace(
+                config.STRATEGY,
+                entry_min_score=0.0,
+                entry_min_rs60_abs=0.0,
+                entry_min_rs30_abs=0.0,
+                entry_crowded_min_signals=0,
+                entry_crowded_signal_fraction=0.0,
+            )
+            runtime = replace(config.RUNTIME, dry_run=True)
+            with override_config(FACTOR=factor, STRATEGY=strategy, RUNTIME=runtime):
                 gate = bot._prepare_new_entry_gate()
             self.assertTrue(gate.get("factor_mode"))
             self.assertEqual(len(gate["allowed_symbols"]), 3)
@@ -5451,6 +5603,77 @@ class UnifiedBotTests(unittest.TestCase):
                     for s in blocked
                 )
             )
+
+    def test_prepare_factor_entry_gate_selects_composite_top_without_quality_gate(self):
+        with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):
+            bot = self.make_bot(Path(raw_tmp))
+            symbols = ["BAD/USDT", "GOOD/USDT", "OK/USDT"]
+            bot.entry_symbols = set(symbols)
+            signals = {
+                "BAD/USDT": self._factor_signal(
+                    macro_gap=0.10,
+                    rs60=-0.010,
+                    rs30=-0.010,
+                    score=-0.010,
+                    entry_valid=False,
+                    ema_entry_valid=False,
+                    macro_valid=False,
+                ),
+                "GOOD/USDT": self._factor_signal(
+                    macro_gap=0.020,
+                    rs60=0.006,
+                    rs30=0.003,
+                    score=0.060,
+                    entry_valid=True,
+                    ema_entry_valid=True,
+                    macro_valid=True,
+                ),
+                "OK/USDT": self._factor_signal(
+                    macro_gap=0.015,
+                    rs60=0.005,
+                    rs30=0.002,
+                    score=0.050,
+                    entry_valid=True,
+                    ema_entry_valid=True,
+                    macro_valid=True,
+                ),
+            }
+            factor = replace(
+                config.FACTOR,
+                entry_enabled=True,
+                external_factors_enabled=False,
+                weights=(
+                    ("macro", 1.0),
+                    ("pullback", 0.0),
+                    ("trigger", 0.0),
+                    ("rs60", 0.0),
+                    ("rs30", 0.0),
+                    ("volume", 0.0),
+                    ("chop", 0.0),
+                ),
+                min_symbols=2,
+                entry_top_k=2,
+                entry_random_control=0,
+                entry_min_composite=-999.0,
+                entry_interval_minutes=0.0,
+                entry_side_budget_scaling=False,
+            )
+            with override_config(FACTOR=factor):
+                summary = bot._compute_factor_scores(signals)
+            self.assertEqual(summary["ranked"][0], "BAD/USDT")
+            bot.signal_cache = {
+                "benchmark_ok": True,
+                "closed_candle_ts": 1000,
+                "symbols": signals,
+                "factor_summary": summary,
+            }
+            with override_config(FACTOR=factor):
+                gate = bot._prepare_new_entry_gate()
+            self.assertIn("BAD/USDT", gate["allowed_symbols"])
+            self.assertIn("GOOD/USDT", gate["allowed_symbols"])
+            self.assertNotIn("OK/USDT", gate["allowed_symbols"])
+            self.assertEqual(gate["quality_count"], 3)
+            self.assertIn("factor_not_selected", gate["blocked_reasons"]["OK/USDT"])
 
     def test_entry_gate_rate_limit_counts_recent_positions(self):
         with tempfile.TemporaryDirectory() as raw_tmp, config.use_profile("long"):

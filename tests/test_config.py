@@ -110,6 +110,29 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(profile.runtime.market_data_max_workers, 3)
 
+    def test_factor_entry_sampling_knobs_are_side_symmetric(self):
+        with temporary_env(
+            FACTOR_ENTRY_TOP_K="4",
+            FACTOR_ENTRY_RANDOM_CONTROL="0",
+            HTXBOT_FACTOR_ENTRY_TOP_K=None,
+            HTXBOT_FACTOR_ENTRY_RANDOM_CONTROL=None,
+            LONG_FACTOR_ENTRY_TOP_K="0",
+            SHORT_FACTOR_ENTRY_TOP_K="9",
+            HTXBOT_LONG_FACTOR_ENTRY_TOP_K=None,
+            HTXBOT_SHORT_FACTOR_ENTRY_TOP_K=None,
+            LONG_FACTOR_ENTRY_RANDOM_CONTROL="2",
+            SHORT_FACTOR_ENTRY_RANDOM_CONTROL="3",
+            HTXBOT_LONG_FACTOR_ENTRY_RANDOM_CONTROL=None,
+            HTXBOT_SHORT_FACTOR_ENTRY_RANDOM_CONTROL=None,
+        ):
+            long_factor = config._make_factor_settings("long")
+            short_factor = config._make_factor_settings("short")
+
+        self.assertEqual(long_factor.entry_top_k, 4)
+        self.assertEqual(short_factor.entry_top_k, 4)
+        self.assertEqual(long_factor.entry_random_control, 0)
+        self.assertEqual(short_factor.entry_random_control, 0)
+
     def test_frozen_runtime_rejects_direct_field_assignment(self):
         with self.assertRaises(FrozenInstanceError):
             config.RUNTIME.poll_interval_sec = config.RUNTIME.poll_interval_sec + 1

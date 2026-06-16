@@ -21,8 +21,8 @@ Factor families:
     factors -- spread reversion and lead-lag impulse. Each contributes ``w*z``.
   * common (per-side): gold/BTC macro budget + BTC 30m momentum, folded into a
     single additive ``side_offset`` (cannot be cross-sectional -- a market-wide
-    value has zero cross-sectional variance -- so it shifts the level and gates
-    via the absolute ``entry_min_composite`` threshold instead of the ranking).
+    value has zero cross-sectional variance -- so it shifts the level recorded
+    in logs without changing within-side ranking).
 
 Steps 1-3 are pure measurement (no order side effects). Turning the ranking into
 live top-K entries is gated behind ``config.FACTOR.entry_enabled``.
@@ -43,9 +43,11 @@ class FactorScoringMixin:
     #   kind == "raw":  already side-aware / higher-is-better.
     #   kind == "neg":  lower-is-better (negate before ranking).
     _FACTOR_METRIC_SPECS: Tuple[Tuple[str, str, str, str], ...] = (
-        ("macro", "signal", "macro_gap", "side"),
+        # signal_math.ema_signal_direction_metrics already emits EMA gaps
+        # positive when they agree with the active long/short profile.
+        ("macro", "signal", "macro_gap", "raw"),
         ("pullback", "signal", "pullback_recovery_gap", "raw"),
-        ("trigger", "signal", "trigger_gap", "side"),
+        ("trigger", "signal", "trigger_gap", "raw"),
         ("rs60", "signal", "rs60", "side"),
         ("rs30", "signal", "rs30", "side"),
         ("volume", "signal", "volume_ratio", "raw"),
@@ -142,8 +144,7 @@ class FactorScoringMixin:
 
         Gold/BTC macro budget penalises the disfavoured side; BTC 30m momentum
         adds a symmetric tilt. A constant shift does not change within-side
-        ranking -- it gates trade count via the absolute ``entry_min_composite``
-        threshold (and reallocates slots when sides are pooled)."""
+        ranking, but it remains logged for offline factor attribution."""
         import config
 
         settings = getattr(config, "FACTOR", None)
@@ -366,8 +367,8 @@ class FactorScoringMixin:
     ) -> dict:
         """Pick the top-K competitors by composite (+ random controls) for the
         current interval. Regime tilt is already baked into the composite via the
-        side offset, so selection is top-K intersected with the absolute
-        ``entry_min_composite`` threshold. Stable within an interval bucket."""
+        side offset. Selection is the literal top-K by composite so live samples
+        match the offline factor ranking. Stable within an interval bucket."""
         import config
 
         now = time.time() if now is None else now
@@ -385,15 +386,13 @@ class FactorScoringMixin:
         ranked = sorted(competing, key=lambda s: (-self._safe_float(composites.get(s), 0.0), s))
         top_k = max(0, int(getattr(settings, "entry_top_k", 0)))
 
-        min_composite = self._safe_float(getattr(settings, "entry_min_composite", 0.0), 0.0)
-        top = [
-            s
-            for s in ranked[:top_k]
-            if self._safe_float(composites.get(s), 0.0) + 1e-12 >= min_composite
-        ]
+        top = list(ranked[:top_k])
 
         bucket = self._factor_entry_interval_bucket(signal_ts, now)
+        runtime = getattr(config, "RUNTIME", None)
         random_n = max(0, int(getattr(settings, "entry_random_control", 0)))
+        if random_n > 0 and not bool(getattr(runtime, "dry_run", False)):
+            random_n = 0
         random_pick: List[str] = []
         pool = [s for s in ranked if s not in set(top)]
         if random_n > 0 and pool:
