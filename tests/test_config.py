@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 
+import json
 import os
 import unittest
 from contextlib import contextmanager
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 
 import config
 import htxbot.config as package_config
@@ -173,6 +174,35 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(profile.strategy.ema_max_averaging_stages, 2)
         self.assertEqual(len(profile.strategy.averaging_drawdown_steps), 2)
+
+    def test_describe_active_config_covers_every_settings_field(self):
+        profile = config.resolve_profile("long")
+        params = config.describe_active_config(profile)
+        # Every field of every logged settings section must appear in the dump so
+        # the startup config snapshot can never silently drift from the dataclasses.
+        for section in config._CONFIG_SECTION_ATTRS:
+            obj = getattr(profile, section)
+            for field in fields(obj):
+                self.assertIn(f"{section}.{field.name}", params)
+        for field in fields(config.HEDGE):
+            self.assertIn(f"hedge.{field.name}", params)
+        for attr in config._CONFIG_SCALAR_ATTRS:
+            self.assertIn(f"profile.{attr}", params)
+
+    def test_describe_active_config_omits_secrets_and_is_serializable(self):
+        params = config.describe_active_config("short")
+        for key in params:
+            self.assertNotIn("api_key", key.lower())
+            self.assertNotIn("api_secret", key.lower())
+        self.assertNotIn("api_credentials", "".join(params))
+        # Must be JSON serializable so it can be written to the diagnostics log.
+        json.dumps(params)
+
+    def test_describe_active_config_reflects_profile_direction(self):
+        long_params = config.describe_active_config("long")
+        short_params = config.describe_active_config("short")
+        self.assertEqual(long_params["profile.position_side"], "long")
+        self.assertEqual(short_params["profile.position_side"], "short")
 
     def test_add_config_warning(self):
         # Record initial length to avoid side effects from other tests

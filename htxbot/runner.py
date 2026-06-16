@@ -40,6 +40,7 @@ class RunnerMixin:
 
     def setup(self):
         self._log_event("INFO", "Initializing HTX futures bot", event="futures_setup", reason="startup")
+        self._log_active_config()
         self._load_markets_with_retry()
 
         self.benchmark_symbol = self._find_futures_symbol("btc")

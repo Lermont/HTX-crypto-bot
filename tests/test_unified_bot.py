@@ -5474,7 +5474,6 @@ class UnifiedBotTests(unittest.TestCase):
                 entry_enabled=True,
                 entry_top_k=2,
                 entry_random_control=0,
-                entry_min_composite=999.0,
                 entry_interval_minutes=60.0,
                 entry_side_budget_scaling=False,
             )
@@ -5654,7 +5653,6 @@ class UnifiedBotTests(unittest.TestCase):
                 min_symbols=2,
                 entry_top_k=2,
                 entry_random_control=0,
-                entry_min_composite=-999.0,
                 entry_interval_minutes=0.0,
                 entry_side_budget_scaling=False,
             )

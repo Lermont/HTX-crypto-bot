@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 
 import os
+from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, Optional, Tuple, Union
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -612,7 +613,6 @@ class MonitoringSettings:
 @dataclass(frozen=True)
 class RuntimeSettings:
     dry_run: bool
-    dry_run_equity: float
     order_timeout_sec: int
     poll_interval_sec: int
     market_data_max_workers: int
@@ -647,7 +647,6 @@ class FactorSettings:
     entry_top_k: int
     entry_interval_minutes: float
     entry_random_control: int
-    entry_min_composite: float
     entry_side_budget_scaling: bool
     macro_offset_strength: float
     btc_offset_strength: float
@@ -697,7 +696,6 @@ def _make_factor_settings(name: str) -> FactorSettings:
         entry_random_control=max(
             0, _env_int("FACTOR_ENTRY_RANDOM_CONTROL", 0)
         ),
-        entry_min_composite=_env_float("FACTOR_ENTRY_MIN_COMPOSITE", 0.0, profile=name),
         entry_side_budget_scaling=_env_bool(
             "FACTOR_ENTRY_SIDE_BUDGET_SCALING", True, profile=name
         ),
@@ -2204,7 +2202,6 @@ def _make_external_price_feed_settings(name: str) -> ExternalPriceFeedSettings:
 def _make_runtime_settings(name: str) -> RuntimeSettings:
     return RuntimeSettings(
         dry_run=_env_bool("DRY_RUN", False, profile=name),
-        dry_run_equity=_env_float("DRY_RUN_EQUITY", 1000.0, profile=name),
         order_timeout_sec=_env_int("ORDER_TIMEOUT_SEC", 90, profile=name),
         poll_interval_sec=_env_int("POLL_INTERVAL_SEC", 3, profile=name),
         market_data_max_workers=max(
@@ -2328,6 +2325,63 @@ def enabled_profile_names() -> Tuple[str, ...]:
     if not names:
         return ("long", "short")
     return names
+
+
+# Profile sub-sections enumerated by describe_active_config(). Credential-bearing
+# sections (api_credentials, api_accounts) are deliberately excluded so secrets are
+# never written to the startup config dump.
+_CONFIG_SECTION_ATTRS: Tuple[str, ...] = (
+    "exchange",
+    "signals",
+    "buying",
+    "selling",
+    "risk",
+    "strategy",
+    "macro",
+    "monitoring",
+    "runtime",
+    "external_price_feed",
+    "factor",
+)
+_CONFIG_SCALAR_ATTRS: Tuple[str, ...] = (
+    "trade_direction",
+    "position_side",
+    "opposite_position_side",
+    "entry_side",
+    "exit_side",
+)
+
+
+def _config_value_for_log(value: Any) -> Any:
+    """Make a settings value JSON/log friendly without losing information."""
+    if isinstance(value, tuple):
+        return [_config_value_for_log(item) for item in value]
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: _config_value_for_log(getattr(value, f.name)) for f in fields(value)}
+    return value
+
+
+def describe_active_config(profile: Union[str, BotProfile, None] = None) -> "OrderedDict[str, Any]":
+    """Flat, ordered mapping of every effective configuration parameter for a profile.
+
+    Used to log the full active configuration once at startup so every parameter is
+    auditable in the logs. API credentials are intentionally omitted; nothing secret
+    is included.
+    """
+    prof = resolve_profile(profile)
+    out: "OrderedDict[str, Any]" = OrderedDict()
+    out["profile.name"] = prof.name
+    out["profile.coins_count"] = len(prof.coins)
+    out["profile.coins"] = list(prof.coins)
+    for attr in _CONFIG_SCALAR_ATTRS:
+        out[f"profile.{attr}"] = getattr(prof, attr)
+    for section in _CONFIG_SECTION_ATTRS:
+        obj = getattr(prof, section)
+        for field in fields(obj):
+            out[f"{section}.{field.name}"] = _config_value_for_log(getattr(obj, field.name))
+    for field in fields(HEDGE):
+        out[f"hedge.{field.name}"] = _config_value_for_log(getattr(HEDGE, field.name))
+    return out
 
 
 def __getattr__(name: str):

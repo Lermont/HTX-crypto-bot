@@ -924,6 +924,56 @@ class MonitoringMixin:
             )
         self._recorded_config_warnings = seen
 
+    def _log_active_config(self):
+        """Log the full effective configuration once at startup.
+
+        Every parameter (382+ fields across all settings sections) is written to the
+        diagnostics JSONL and to a standalone ``config_snapshot.json`` next to the CSV
+        logs, with a one-line INFO summary in the main log. API credentials are not
+        included (see config.describe_active_config).
+        """
+        try:
+            params = config.describe_active_config(getattr(self, "profile", None))
+        except Exception as exc:
+            self._log_event(
+                "WARNING",
+                f"Could not build active config snapshot: {exc}",
+                event="config_snapshot",
+                category="config",
+                reason="describe_failed",
+            )
+            return
+        payload = {
+            "ts": int(time.time()),
+            "profile": self._current_profile_name(),
+            "event": "config_snapshot",
+            "param_count": len(params),
+            "params": params,
+        }
+        self._append_jsonl(getattr(self, "diagnostics_jsonl_path", None), payload)
+
+        snapshot_path = None
+        base_path = getattr(self, "diagnostics_csv_path", None) or getattr(self, "csv_path", None)
+        if base_path is not None:
+            candidate = Path(base_path).with_name("config_snapshot.json")
+            try:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                candidate.write_text(
+                    json.dumps(self._sanitize_for_log(payload), ensure_ascii=False, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                snapshot_path = candidate
+            except Exception as exc:
+                self.log.warning("Could not write config snapshot file: %s", exc)
+
+        self._log_event(
+            "INFO",
+            f"Active configuration loaded: {len(params)} parameters"
+            + (f"; snapshot {snapshot_path}" if snapshot_path else ""),
+            event="config_snapshot",
+            reason=f"params={len(params)}",
+        )
+
     def _compact_log_message(self, message: str) -> str:
         text = self._redact_sensitive_text(message)
         html_markers = ("<!DOCTYPE html", "<html", "<head", "<body")
